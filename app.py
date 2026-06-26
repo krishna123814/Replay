@@ -35,12 +35,12 @@ GH_BASE = "https://raw.githubusercontent.com/krishna123814/Replay/main/"
 ASSETS = {
     "bn": {
         "label": "📊 BANKNIFTY",
-        "file": "banknifty_all_tf_pkl.gz",
+        "file": "banknifty_all_tf.pkl.gz",
         "tfs": ["5m", "15m", "45m", "135m", "1d", "3d", "9d", "27d"],
     },
     "btc": {
         "label": "₿ BTCUSDT",
-        "file": "btc_all_tf_pkl.gz",
+        "file": "btc_all_tf.pkl.gz",
         "tfs": ["160m", "8h", "1d", "3d", "9d", "27d"],
     },
 }
