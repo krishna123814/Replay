@@ -2,12 +2,14 @@
 ================================================================
  REPLAY APP — BankNifty + BTCUSDT Historical Stack Viewer
  Streamlit version (no local server needed)
- Data source: .pkl.gz files pulled directly from your GitHub repo
+ Data source: raw 5-minute .json.gz files pulled directly from your
+ GitHub repo. All higher timeframes (15m, 45m, 1d, 3d, ...) are
+ derived on the fly by resampling the 5-minute OHLC data.
 ================================================================
 Repo: krishna123814/Replay (branch: main)
 Files expected in repo root:
-    banknifty_all_tf_pkl.gz
-    btc_all_tf_pkl.gz
+    banknifty_5m_csv.json.gz       -> {"meta": {...}, "data": [{"t","o","h","l","c"}, ...]}
+    Bitcoin_BTCUSDT_IST_5m.json.gz -> [{"t","o","h","l","c"}, ...]
 
 Run locally:
     pip install streamlit pandas plotly requests
@@ -19,7 +21,7 @@ Deploy:
 """
 
 import gzip
-import pickle
+import json
 import io
 import requests
 import pandas as pd
@@ -35,14 +37,21 @@ GH_BASE = "https://raw.githubusercontent.com/krishna123814/Replay/main/"
 ASSETS = {
     "bn": {
         "label": "📊 BANKNIFTY",
-        "file": "banknifty_all_tf.pkl.gz",
+        "file": "banknifty_5m_csv.json.gz",
         "tfs": ["5m", "15m", "45m", "135m", "1d", "3d", "9d", "27d"],
     },
     "btc": {
         "label": "₿ BTCUSDT",
-        "file": "btc_all_tf.pkl.gz",
-        "tfs": ["160m", "8h", "1d", "3d", "9d", "27d"],
+        "file": "Bitcoin_BTCUSDT_IST_5m.json.gz",
+        "tfs": ["5m", "160m", "8h", "1d", "3d", "9d", "27d"],
     },
+}
+
+# Pandas resample rule for each timeframe key (base data is 5-minute bars)
+TF_RULE = {
+    "5m": "5min", "15m": "15min", "45m": "45min", "135m": "135min",
+    "160m": "160min", "8h": "8h",
+    "1d": "1D", "3d": "3D", "9d": "9D", "27d": "27D",
 }
 
 TF_COLOR = {
@@ -56,35 +65,85 @@ st.set_page_config(page_title="Replay — BN + BTC Stack", layout="wide")
 # ─────────────────────────────────────────────────────────────
 # DATA LOADING (cached)
 # ─────────────────────────────────────────────────────────────
+def _parse_5m_df(raw_bytes: bytes) -> pd.DataFrame:
+    """Decompress + parse a .json.gz into a 5-minute OHLC DataFrame.
+
+    Accepts either:
+      {"meta": {...}, "data": [{"t","o","h","l","c"}, ...]}
+    or a bare list:
+      [{"t","o","h","l","c"}, ...]
+    """
+    with gzip.open(io.BytesIO(raw_bytes), "rt") as f:
+        payload = json.load(f)
+
+    records = payload["data"] if isinstance(payload, dict) and "data" in payload else payload
+
+    df = pd.DataFrame.from_records(records)
+    df["t"] = pd.to_datetime(df["t"], unit="s", utc=True)
+    df = df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close"})
+    df = df.set_index("t").sort_index()
+    return df[["Open", "High", "Low", "Close"]]
+
+
+def _resample(df5: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Resample 5-minute OHLC data up to a higher timeframe."""
+    if rule == "5min":
+        return df5
+    agg = pd.concat(
+        [
+            df5["Open"].resample(rule).first(),
+            df5["High"].resample(rule).max(),
+            df5["Low"].resample(rule).min(),
+            df5["Close"].resample(rule).last(),
+        ],
+        axis=1,
+    )
+    agg.columns = ["Open", "High", "Low", "Close"]
+    return agg.dropna(how="any")
+
+
 @st.cache_data(show_spinner=False)
-def load_data_from_github(filename: str):
-    """Download the .pkl.gz from GitHub raw and unpickle it."""
+def _build_all_tfs(raw_bytes: bytes, tfs: tuple) -> dict:
+    """Parse raw 5m bytes once, then derive every requested timeframe."""
+    df5 = _parse_5m_df(raw_bytes)
+    out = {}
+    for tf in tfs:
+        rule = TF_RULE.get(tf)
+        if rule is None:
+            continue
+        out[tf] = _resample(df5, rule)
+    out["meta"] = {
+        "rows_5m": len(df5),
+        "range_start": str(df5.index.min()),
+        "range_end": str(df5.index.max()),
+    }
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def _fetch_bytes_from_github(filename: str) -> bytes:
     url = GH_BASE + filename
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    with gzip.open(io.BytesIO(resp.content), "rb") as f:
-        data = pickle.load(f)
-    return data
+    return resp.content
 
 
-@st.cache_data(show_spinner=False)
-def load_data_from_local(path: str):
-    """Fallback: read a .pkl.gz that sits next to app.py."""
-    with gzip.open(path, "rb") as f:
-        return pickle.load(f)
+def _read_bytes_local(filename: str) -> bytes:
+    with open(filename, "rb") as f:
+        return f.read()
 
 
 def get_asset_data(asset_key: str):
     cfg = ASSETS[asset_key]
     try:
-        return load_data_from_github(cfg["file"])
-    except Exception as e:
-        # Fallback to a local copy if running with the file alongside app.py
+        raw = _fetch_bytes_from_github(cfg["file"])
+    except Exception as e_gh:
         try:
-            return load_data_from_local(cfg["file"])
+            raw = _read_bytes_local(cfg["file"])
         except Exception:
-            st.error(f"❌ Could not load {cfg['file']} from GitHub or locally.\n\n{e}")
+            st.error(f"❌ Could not load {cfg['file']} from GitHub or locally.\n\n{e_gh}")
             st.stop()
+    return _build_all_tfs(raw, tuple(cfg["tfs"]))
 
 
 # ─────────────────────────────────────────────────────────────
