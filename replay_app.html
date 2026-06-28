@@ -256,7 +256,8 @@ html,body{width:100%;height:100%;overflow:hidden;background:#131722;
 
     <!-- Symbol button -->
     <div style="position:relative;flex-shrink:0">
-      <button id="sym-btn" onclick="toggleSymDrop()">
+      <button id="sym-btn" onclick="toggleSymDrop()" title="Switch Asset">
+        <span id="sym-icon" style="font-size:11px">⇄</span>
         <span id="sym-label">📊 BANKNIFTY</span> ▾
       </button>
       <div id="sym-drop">
@@ -305,8 +306,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#131722;
     <div class="bot-sep"></div>
     <button class="bb-btn" onclick="autoFitAll()">⊡ Auto</button>
     <div style="flex:1"></div>
-    <button id="jump-up" onclick="jumpStack(-1)">▲</button>
-    <button id="jump-dn" onclick="jumpStack(1)">▼</button>
+    <span id="scroll-pos-badge" style="font-size:9px;color:#555;margin-right:4px;white-space:nowrap"></span>
+    <button id="jump-up" onclick="jumpStack(-1)" title="Scroll up one screen">▲</button>
+    <button id="jump-dn" onclick="jumpStack(1)"  title="Scroll down one screen">▼</button>
   </div>
 
 </div>
@@ -477,12 +479,61 @@ function jumpToTf(tf) {
 }
 
 // ── Stack jump buttons ▲▼ ────────────────────────────────────────────────────
+// Tracks top-most visible cell index (0-based)
+let _topCellIdx = 0;
+
 function jumpStack(dir) {
   const wrap = document.getElementById('stack-wrap');
   if (!wrap || !_cells.length) return;
-  const cellH = wrap.clientHeight / 4 || 200;
-  wrap.scrollTo({ top: Math.max(0, wrap.scrollTop + dir * cellH), behavior: 'smooth' });
+
+  const total = _cells.length;
+  const maxTop = total - 4; // last valid top index (so 4 cells always shown if available)
+
+  _topCellIdx = Math.max(0, Math.min(maxTop < 0 ? 0 : maxTop, _topCellIdx + dir));
+
+  const cellEl = document.getElementById('scell-' + _topCellIdx);
+  if (cellEl) {
+    wrap.scrollTo({ top: cellEl.offsetTop, behavior: 'smooth' });
+  }
+  _updateArrowState();
 }
+
+function _updateArrowState() {
+  const total = _cells.length;
+  const maxTop = Math.max(0, total - 4);
+  const upBtn = document.getElementById('jump-up');
+  const dnBtn = document.getElementById('jump-dn');
+  if (upBtn) upBtn.style.opacity = _topCellIdx <= 0 ? '0.3' : '1';
+  if (dnBtn) dnBtn.style.opacity = _topCellIdx >= maxTop ? '0.3' : '1';
+
+  // Update scroll position badge indicator
+  const badge = document.getElementById('scroll-pos-badge');
+  if (badge && total > 0) {
+    badge.textContent = `${_topCellIdx+1}–${Math.min(_topCellIdx+4, total)}/${total}`;
+  }
+}
+
+// ── Sync _topCellIdx on manual scroll ────────────────────────────────────────
+(function() {
+  let _scrollRaf = null;
+  document.addEventListener('DOMContentLoaded', () => {
+    const wrap = document.getElementById('stack-wrap');
+    if (!wrap) return;
+    wrap.addEventListener('scroll', () => {
+      if (_scrollRaf) return;
+      _scrollRaf = requestAnimationFrame(() => {
+        _scrollRaf = null;
+        if (!_cells.length) return;
+        const cellH = wrap.clientHeight / 4 || 1;
+        const newTop = Math.round(wrap.scrollTop / cellH);
+        if (newTop !== _topCellIdx) {
+          _topCellIdx = Math.max(0, Math.min(Math.max(0, _cells.length - 4), newTop));
+          _updateArrowState();
+        }
+      });
+    }, { passive: true });
+  });
+})();
 
 // ── Auto fit all charts ───────────────────────────────────────────────────────
 function autoFitAll() {
@@ -556,6 +607,7 @@ function _buildStackDOM(asset) {
   const wrap = document.getElementById('stack-wrap');
   wrap.innerHTML = '';
   _destroyCells();
+  _topCellIdx = 0; // reset scroll position
 
   const cfg  = ASSETS[asset];
   const tfs  = cfg.tfs;
@@ -949,7 +1001,7 @@ async function _loadAndRender(asset) {
     _loadedFiles[asset] = true;
     _setStatus('');
     _setLoadingMsg('Done!', 100);
-    setTimeout(() => _showLoading(false), 400);
+    setTimeout(() => { _showLoading(false); _updateArrowState(); }, 400);
 
     // Highlight first TF button
     const firstTf = tfs[0];
