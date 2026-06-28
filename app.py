@@ -280,18 +280,28 @@ def build_stack_figure(data: dict, tfs: list, bars_back: int, show_swing: bool, 
                         line=dict(color=color, width=0.8, dash="dot"),
                     )
 
-        fig.update_xaxes(rangeslider_visible=False, row=row, col=1,
-                          showgrid=False, zeroline=False)
-        fig.update_yaxes(row=row, col=1, showgrid=False, zeroline=False, side="right")
+        fig.update_xaxes(
+            rangeslider_visible=False, row=row, col=1,
+            showgrid=True, gridcolor="#e6e9ec", zeroline=False,
+            showspikes=True, spikemode="across", spikesnap="cursor",
+            spikecolor="#9598a1", spikethickness=1, spikedash="solid",
+        )
+        fig.update_yaxes(
+            row=row, col=1, showgrid=True, gridcolor="#e6e9ec",
+            zeroline=False, side="right",
+            showspikes=True, spikemode="across", spikesnap="cursor",
+            spikecolor="#9598a1", spikethickness=1, spikedash="solid",
+        )
 
     fig.update_layout(
         height=320 * n,
-        template="plotly_dark",
-        plot_bgcolor="#131722", paper_bgcolor="#131722",
-        font=dict(color="#d1d4dc", size=11),
+        template="plotly_white",
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        font=dict(color="#131722", size=11),
         margin=dict(l=10, r=50, t=30, b=10),
         showlegend=False,
         dragmode="pan",
+        hovermode="x",
     )
     return fig
 
@@ -300,46 +310,57 @@ def build_stack_figure(data: dict, tfs: list, bars_back: int, show_swing: bool, 
 # UI
 # ─────────────────────────────────────────────────────────────
 st.markdown(
-    "<style>div.block-container{padding-top:1.2rem;}</style>",
+    """
+    <style>
+        html, body, .stApp { background-color: #ffffff; }
+        div.block-container { padding-top: 0.6rem; padding-bottom: 0rem; }
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        div[data-testid="stToolbar"] {visibility: hidden;}
+    </style>
+    """,
     unsafe_allow_html=True,
 )
 
-st.title("⏵ Replay — Historical Multi-Timeframe Stack")
+with st.sidebar:
+    st.markdown("### ⏵ Replay")
 
-col1, col2, col3, col4 = st.columns([2, 2, 2, 3])
-
-with col1:
     asset_key = st.selectbox(
         "Symbol",
         options=list(ASSETS.keys()),
         format_func=lambda k: ASSETS[k]["label"],
     )
 
-with col2:
     bars_back = st.selectbox(
         "Bars per chart",
         options=[100, 200, 300, 500, 1000],
         index=2,
     )
 
-with col3:
     show_swing = st.checkbox("Swing S/R lines", value=True)
-
-with col4:
     show_candle = st.checkbox("Candle High/Low lines", value=True)
 
-cfg = ASSETS[asset_key]
+    cfg = ASSETS[asset_key]
 
-with st.spinner(f"Loading {cfg['file']} …"):
-    data = get_asset_data(asset_key)
+    with st.spinner(f"Loading {cfg['file']} …"):
+        data = get_asset_data(asset_key)
 
-available_tfs = [tf for tf in cfg["tfs"] if tf in data]
+    available_tfs = [tf for tf in cfg["tfs"] if tf in data]
 
-selected_tfs = st.multiselect(
-    "Timeframes to stack",
-    options=available_tfs,
-    default=available_tfs,
-)
+    selected_tfs = st.multiselect(
+        "Timeframes to stack",
+        options=available_tfs,
+        default=available_tfs,
+    )
+
+    with st.expander("ℹ️ Data info"):
+        meta = data.get("meta")
+        if meta is not None:
+            st.write(meta)
+        for tf in available_tfs:
+            st.write(f"**{tf}** — {len(data[tf]):,} rows  "
+                      f"({data[tf].index.min()} → {data[tf].index.max()})")
 
 if not selected_tfs:
     st.warning("Select at least one timeframe.")
@@ -347,11 +368,3 @@ if not selected_tfs:
 
 fig = build_stack_figure(data, selected_tfs, bars_back, show_swing, show_candle)
 st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True})
-
-with st.expander("ℹ️ Data info"):
-    meta = data.get("meta")
-    if meta is not None:
-        st.write(meta)
-    for tf in available_tfs:
-        st.write(f"**{tf}** — {len(data[tf]):,} rows  "
-                  f"({data[tf].index.min()} → {data[tf].index.max()})")
