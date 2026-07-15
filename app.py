@@ -1,17 +1,15 @@
 import json
-import os
 import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Unknown Man — Trait Constellation", layout="wide")
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "default_qualities.json")
-
-# Fallback data — used automatically if data/default_qualities.json is missing
-# (e.g. the data/ folder wasn't pushed to GitHub), so the app never crashes.
-FALLBACK_QUALITIES = {
+# ---------------------------------------------------------------------------
+# Character data lives directly in this file — no external JSON file needed.
+# ---------------------------------------------------------------------------
+DEFAULT_QUALITIES = {
     "Loving": {
-        "color": "#e8546b",
+        "color": "#ff6b8a",
         "subAngles": [
             {"name": "Caring", "desc": "Dhyaan rakhta hai, chhoti-chhoti zarooraton ka khayal rakhta hai."},
             {"name": "Affectionate", "desc": "Apna sneh khule dil se jataata hai, hesitate nahi karta."},
@@ -21,7 +19,7 @@ FALLBACK_QUALITIES = {
         ],
     },
     "Honest": {
-        "color": "#e8b34a",
+        "color": "#ffc75c",
         "subAngles": [
             {"name": "Transparent", "desc": "Kuch chhupata nahi, seedha aur saaf baat karta hai."},
             {"name": "Trustworthy", "desc": "Uski baat par bharosa kiya ja sakta hai."},
@@ -29,7 +27,7 @@ FALLBACK_QUALITIES = {
         ],
     },
     "Confident": {
-        "color": "#8b5cf6",
+        "color": "#a78bfa",
         "subAngles": [
             {"name": "Self-assured", "desc": "Apne faislon par yakeen rakhta hai."},
             {"name": "Calm under pressure", "desc": "Mushkil waqt mein bhi sthir rehta hai."},
@@ -38,22 +36,8 @@ FALLBACK_QUALITIES = {
     },
 }
 
-
-def load_default_qualities():
-    try:
-        with open(DATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        st.warning(
-            "`data/default_qualities.json` nahi mili (shayad GitHub par upload nahi hui) — "
-            "built-in default data use ki jaa rahi hai. Yeh theek se chalega, bas apna data "
-            "**Export JSON** se save karna mat bhoolna."
-        )
-        return json.loads(json.dumps(FALLBACK_QUALITIES))
-
-
 if "qualities" not in st.session_state:
-    st.session_state.qualities = load_default_qualities()
+    st.session_state.qualities = json.loads(json.dumps(DEFAULT_QUALITIES))
 
 qualities = st.session_state.qualities
 
@@ -68,7 +52,7 @@ with st.sidebar:
     st.subheader("Add a quality")
     with st.form("add_quality", clear_on_submit=True):
         q_name = st.text_input("Quality name (e.g. Loving)")
-        q_color = st.color_picker("Glow color", "#8b5cf6")
+        q_color = st.color_picker("Glow color", "#a78bfa")
         submitted = st.form_submit_button("Add quality")
         if submitted and q_name.strip():
             if q_name not in qualities:
@@ -112,7 +96,7 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.subheader("Backup / restore")
+    st.subheader("Backup / restore (optional)")
     st.download_button(
         "Export current data (JSON)",
         data=json.dumps(qualities, ensure_ascii=False, indent=2),
@@ -128,7 +112,7 @@ with st.sidebar:
             st.error(f"File load nahi hua: {e}")
 
     if st.button("Reset to defaults"):
-        st.session_state.qualities = load_default_qualities()
+        st.session_state.qualities = json.loads(json.dumps(DEFAULT_QUALITIES))
         st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -137,21 +121,62 @@ with st.sidebar:
 st.markdown(
     "<h1 style='font-family:Space Grotesk, sans-serif; letter-spacing:-1px;'>"
     "Unknown Man — Trait Constellation</h1>"
-    "<p style='color:#9aa0b4;'>Figure ko drag karke ghumao. Kisi bhi tag par tap karke uske angles dekho.</p>",
+    "<p style='color:#9aa0b4;'>Figure ko drag karke ghumao. Kisi bhi tag par tap karke uske angles dekho. "
+    "Top-right corner ka ⛶ icon full screen ke liye hai.</p>",
     unsafe_allow_html=True,
 )
 
 QUALITIES_JSON = json.dumps(qualities, ensure_ascii=False)
 
 HTML = f"""
-<div id="root"></div>
+<div id="appRoot">
+<div id="root">
+  <button id="fsBtn" title="Full screen">⛶</button>
+  <div id="stage">
+    <div id="orbit">
+      <div id="figureWrap">
+        <svg width="150" height="320" viewBox="0 0 150 320">
+          <defs>
+            <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#9aa3c9"/>
+              <stop offset="100%" stop-color="#4d5480"/>
+            </linearGradient>
+          </defs>
+          <circle cx="75" cy="55" r="42" fill="url(#bodyGrad)" stroke="#c7cdea" stroke-width="1.5" stroke-opacity="0.4"/>
+          <path d="M75 95 C40 95 22 130 22 175 L22 260 C22 285 40 300 75 300 C110 300 128 285 128 260 L128 175 C128 130 110 95 75 95 Z" fill="url(#bodyGrad)" stroke="#c7cdea" stroke-width="1.5" stroke-opacity="0.4"/>
+          <path d="M22 150 C10 160 4 190 8 225" stroke="#6b7299" stroke-width="16" stroke-linecap="round" fill="none"/>
+          <path d="M128 150 C140 160 146 190 142 225" stroke="#6b7299" stroke-width="16" stroke-linecap="round" fill="none"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+  <div id="hint">drag to rotate • tap a tag for details</div>
+
+  <div id="overlay">
+    <div id="panel">
+      <button id="closeBtn" onclick="closePanel()">✕</button>
+      <h2 id="panelTitle"></h2>
+      <p id="panelSub"></p>
+      <div class="cardGrid" id="cardGrid"></div>
+    </div>
+  </div>
+</div>
+</div>
+
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500&display=swap');
 
   * {{ box-sizing: border-box; }}
+
+  #appRoot {{ width: 100%; }}
+
   #root {{
     font-family: 'Inter', sans-serif;
-    background: radial-gradient(ellipse at center, #1a1d29 0%, #0d0f16 70%);
+    background:
+      radial-gradient(circle at 30% 20%, rgba(167,139,250,0.16), transparent 45%),
+      radial-gradient(circle at 75% 75%, rgba(255,107,138,0.12), transparent 45%),
+      linear-gradient(180deg, #23273a 0%, #14161f 100%);
+    border: 1px solid rgba(255,255,255,0.08);
     border-radius: 20px;
     position: relative;
     width: 100%;
@@ -159,6 +184,28 @@ HTML = f"""
     overflow: hidden;
     user-select: none;
   }}
+  #root.fullscreen-mode {{
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 0;
+    z-index: 999999;
+  }}
+
+  #fsBtn {{
+    position: absolute;
+    top: 14px; right: 14px;
+    z-index: 20;
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.08);
+    color: #f2f2f7;
+    font-size: 18px;
+    cursor: pointer;
+  }}
+  #fsBtn:hover {{ background: rgba(255,255,255,0.16); }}
 
   #stage {{
     position: absolute;
@@ -172,6 +219,8 @@ HTML = f"""
     position: relative;
     width: 520px;
     height: 520px;
+    max-width: 92vw;
+    max-height: 80vh;
     cursor: grab;
   }}
   #orbit.dragging {{ cursor: grabbing; }}
@@ -181,7 +230,7 @@ HTML = f"""
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
     animation: breathe 4.5s ease-in-out infinite;
-    filter: drop-shadow(0 0 30px rgba(139,92,246,0.25));
+    filter: drop-shadow(0 0 24px rgba(167,139,250,0.45));
   }}
   @keyframes breathe {{
     0%, 100% {{ transform: translate(-50%, -50%) scale(1); }}
@@ -193,26 +242,27 @@ HTML = f"""
     top: 50%; left: 50%;
     padding: 8px 16px;
     border-radius: 999px;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.1);
+    border: 1.5px solid rgba(255,255,255,0.3);
     backdrop-filter: blur(6px);
-    color: #f2f2f7;
+    color: #ffffff;
     font-size: 14px;
-    font-weight: 500;
+    font-weight: 600;
     white-space: nowrap;
     cursor: pointer;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.35);
     transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
   }}
   .tag:hover {{
     transform: translate(-50%,-50%) scale(1.12) !important;
-    background: rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.2);
   }}
 
   .ring-line {{
     position: absolute;
     top: 50%; left: 50%;
     height: 1px;
-    background: linear-gradient(90deg, rgba(255,255,255,0.18), transparent);
+    background: linear-gradient(90deg, rgba(255,255,255,0.28), transparent);
     transform-origin: left center;
     pointer-events: none;
   }}
@@ -220,12 +270,12 @@ HTML = f"""
   #overlay {{
     position: absolute;
     inset: 0;
-    background: rgba(8,9,14,0.72);
+    background: rgba(8,9,14,0.82);
     backdrop-filter: blur(10px);
     display: none;
     align-items: center;
     justify-content: center;
-    z-index: 10;
+    z-index: 30;
     padding: 30px;
   }}
   #overlay.show {{ display: flex; }}
@@ -235,8 +285,8 @@ HTML = f"""
     width: 100%;
     max-height: 540px;
     overflow-y: auto;
-    background: #14161f;
-    border: 1px solid rgba(255,255,255,0.08);
+    background: #1b1e2b;
+    border: 1px solid rgba(255,255,255,0.12);
     border-radius: 18px;
     padding: 28px 32px;
     animation: panelIn 0.35s ease;
@@ -260,8 +310,8 @@ HTML = f"""
     gap: 14px;
   }}
   .card {{
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
     border-radius: 14px;
     padding: 16px;
     opacity: 0;
@@ -271,8 +321,8 @@ HTML = f"""
     from {{ opacity: 0; transform: translateY(8px); }}
     to {{ opacity: 1; transform: translateY(0); }}
   }}
-  .card h4 {{ margin: 8px 0 6px 0; font-family: 'Space Grotesk', sans-serif; font-size: 16px; }}
-  .card p {{ margin: 0; color: #b3b8c9; font-size: 13px; line-height: 1.5; }}
+  .card h4 {{ margin: 8px 0 6px 0; font-family: 'Space Grotesk', sans-serif; font-size: 16px; color: #fff; }}
+  .card p {{ margin: 0; color: #c3c8d9; font-size: 13px; line-height: 1.5; }}
 
   .icon {{
     width: 26px; height: 26px; border-radius: 50%;
@@ -287,7 +337,7 @@ HTML = f"""
 
   #closeBtn {{
     float: right;
-    background: rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.1);
     border: none;
     color: #f2f2f7;
     width: 32px; height: 32px;
@@ -295,59 +345,33 @@ HTML = f"""
     cursor: pointer;
     font-size: 16px;
   }}
-  #closeBtn:hover {{ background: rgba(255,255,255,0.18); }}
+  #closeBtn:hover {{ background: rgba(255,255,255,0.2); }}
 
   #hint {{
     position: absolute;
     bottom: 16px; left: 50%;
     transform: translateX(-50%);
-    color: #6b7086;
+    color: #b8bccc;
     font-size: 12px;
+    z-index: 5;
   }}
 </style>
-
-<div id="root">
-  <div id="stage">
-    <div id="orbit">
-      <div id="figureWrap">
-        <svg width="150" height="320" viewBox="0 0 150 320">
-          <defs>
-            <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#4b5170"/>
-              <stop offset="100%" stop-color="#2b2f42"/>
-            </linearGradient>
-          </defs>
-          <circle cx="75" cy="55" r="42" fill="url(#bodyGrad)"/>
-          <path d="M75 95 C40 95 22 130 22 175 L22 260 C22 285 40 300 75 300 C110 300 128 285 128 260 L128 175 C128 130 110 95 75 95 Z" fill="url(#bodyGrad)"/>
-          <path d="M22 150 C10 160 4 190 8 225" stroke="#2b2f42" stroke-width="16" stroke-linecap="round" fill="none"/>
-          <path d="M128 150 C140 160 146 190 142 225" stroke="#2b2f42" stroke-width="16" stroke-linecap="round" fill="none"/>
-        </svg>
-      </div>
-    </div>
-  </div>
-  <div id="hint">drag to rotate • tap a tag for details</div>
-
-  <div id="overlay">
-    <div id="panel">
-      <button id="closeBtn" onclick="closePanel()">✕</button>
-      <h2 id="panelTitle"></h2>
-      <p id="panelSub"></p>
-      <div class="cardGrid" id="cardGrid"></div>
-    </div>
-  </div>
-</div>
 
 <script>
   const QUALITIES = {QUALITIES_JSON};
   const names = Object.keys(QUALITIES);
+  const root = document.getElementById('root');
   const orbit = document.getElementById('orbit');
-  const radius = 220;
   const iconAnims = ['pulse', 'glow', 'wave'];
+
+  function getRadius() {{
+    return Math.min(220, orbit.clientWidth / 2 - 40);
+  }}
 
   let rotation = 0;
   let dragging = false;
   let lastX = 0;
-  let autoSpeed = 0.05;
+  const autoSpeed = 0.05;
 
   function layout() {{
     orbit.querySelectorAll('.tag, .ring-line').forEach(el => el.remove());
@@ -357,14 +381,12 @@ HTML = f"""
 
       const line = document.createElement('div');
       line.className = 'ring-line';
-      line.style.width = radius + 'px';
-      line.style.setProperty('--angle', angle + 'deg');
       orbit.appendChild(line);
 
       const tag = document.createElement('div');
       tag.className = 'tag';
       tag.textContent = name;
-      tag.style.borderColor = color + '55';
+      tag.style.borderColor = color;
       tag.dataset.angle = angle;
       tag.onclick = () => openPanel(name);
       orbit.appendChild(tag);
@@ -373,16 +395,20 @@ HTML = f"""
   }}
 
   function position() {{
-    orbit.querySelectorAll('.tag').forEach(tag => {{
+    const radius = getRadius();
+    const tags = orbit.querySelectorAll('.tag');
+    tags.forEach(tag => {{
       const a = (parseFloat(tag.dataset.angle) + rotation) * Math.PI / 180;
       const x = Math.cos(a) * radius;
       const y = Math.sin(a) * radius * 0.55;
       tag.style.transform = `translate(${{x}}px, ${{y}}px) translate(-50%,-50%)`;
       tag.style.zIndex = Math.round(100 + y);
-      tag.style.opacity = 0.55 + (y / (radius*0.55)) * 0.45;
+      tag.style.opacity = 0.65 + (y / (radius*0.55)) * 0.35;
     }});
-    orbit.querySelectorAll('.ring-line').forEach((line, i) => {{
-      const a = (parseFloat(names.length ? (360/names.length)*i : 0) + rotation);
+    const lines = orbit.querySelectorAll('.ring-line');
+    lines.forEach((line, i) => {{
+      line.style.width = radius + 'px';
+      const a = (names.length ? (360/names.length)*i : 0) + rotation;
       line.style.transform = `rotate(${{a}}deg) scaleX(0.5)`;
     }});
   }}
@@ -431,14 +457,17 @@ HTML = f"""
     document.getElementById('overlay').classList.remove('show');
   }}
 
+  document.getElementById('fsBtn').addEventListener('click', () => {{
+    root.classList.toggle('fullscreen-mode');
+    document.getElementById('fsBtn').textContent = root.classList.contains('fullscreen-mode') ? '✕' : '⛶';
+    setTimeout(position, 50);
+  }});
+
+  window.addEventListener('resize', position);
+
   layout();
   requestAnimationFrame(tick);
 </script>
 """
 
-components.html(HTML, height=660, scrolling=False)
-
-st.caption(
-    "Note: Streamlit Cloud ka filesystem restart par reset ho sakta hai — apna data safe rakhne ke liye "
-    "sidebar se **Export JSON** zaroor kar lena, aur baad mein **Import JSON** se wapas load kar sakte ho."
-)
+components.html(HTML, height=680, scrolling=False)
