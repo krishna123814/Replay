@@ -7,10 +7,49 @@ st.set_page_config(page_title="Unknown Man — Trait Constellation", layout="wid
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "default_qualities.json")
 
+# Fallback data — used automatically if data/default_qualities.json is missing
+# (e.g. the data/ folder wasn't pushed to GitHub), so the app never crashes.
+FALLBACK_QUALITIES = {
+    "Loving": {
+        "color": "#e8546b",
+        "subAngles": [
+            {"name": "Caring", "desc": "Dhyaan rakhta hai, chhoti-chhoti zarooraton ka khayal rakhta hai."},
+            {"name": "Affectionate", "desc": "Apna sneh khule dil se jataata hai, hesitate nahi karta."},
+            {"name": "Family-oriented", "desc": "Parivar ke rishton ko sabse upar rakhta hai."},
+            {"name": "Romantic", "desc": "Chhote-chhote palon ko khaas banane ki koshish karta hai."},
+            {"name": "Compassionate", "desc": "Doosron ke dard ko mehsoos karta hai aur madad karta hai."},
+        ],
+    },
+    "Honest": {
+        "color": "#e8b34a",
+        "subAngles": [
+            {"name": "Transparent", "desc": "Kuch chhupata nahi, seedha aur saaf baat karta hai."},
+            {"name": "Trustworthy", "desc": "Uski baat par bharosa kiya ja sakta hai."},
+            {"name": "Direct", "desc": "Ghuma-firake bina seedhi baat kehta hai."},
+        ],
+    },
+    "Confident": {
+        "color": "#8b5cf6",
+        "subAngles": [
+            {"name": "Self-assured", "desc": "Apne faislon par yakeen rakhta hai."},
+            {"name": "Calm under pressure", "desc": "Mushkil waqt mein bhi sthir rehta hai."},
+            {"name": "Decisive", "desc": "Jaldi aur sahi faisle leta hai."},
+        ],
+    },
+}
+
 
 def load_default_qualities():
-    with open(DATA_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(DATA_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        st.warning(
+            "`data/default_qualities.json` nahi mili (shayad GitHub par upload nahi hui) — "
+            "built-in default data use ki jaa rahi hai. Yeh theek se chalega, bas apna data "
+            "**Export JSON** se save karna mat bhoolna."
+        )
+        return json.loads(json.dumps(FALLBACK_QUALITIES))
 
 
 if "qualities" not in st.session_state:
