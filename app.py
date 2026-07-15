@@ -36,6 +36,23 @@ DEFAULT_QUALITIES = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# 10 selectable characters (Free Fire style) — each has its own color scheme
+# and a signature accessory (mask, cape, wings, hood, etc.)
+# ---------------------------------------------------------------------------
+CHARACTERS = [
+    {"id": "shadow",  "name": "Shadow Ninja",   "primary": "#3b3550", "secondary": "#1c1826", "accent": "#a78bfa", "skin": "#caa887", "accessory": "mask"},
+    {"id": "blaze",   "name": "Crimson Blaze",  "primary": "#c0374a", "secondary": "#7a1f2b", "accent": "#ff9d4d", "skin": "#e8b48c", "accessory": "headband"},
+    {"id": "frost",   "name": "Frost Guardian", "primary": "#4d7ea8", "secondary": "#274b66", "accent": "#e6f7ff", "skin": "#f0d3b8", "accessory": "goggles"},
+    {"id": "jungle",  "name": "Jungle Ranger",  "primary": "#3f7d47", "secondary": "#234a29", "accent": "#c9a15a", "skin": "#c98f5e", "accessory": "scarf"},
+    {"id": "gold",    "name": "Golden Warrior", "primary": "#caa23a", "secondary": "#7a5c17", "accent": "#2b2b2b", "skin": "#e8b48c", "accessory": "crown"},
+    {"id": "cyber",   "name": "Neon Cyber",     "primary": "#1aa6b7", "secondary": "#0c5560", "accent": "#ff59c8", "skin": "#d9b48f", "accessory": "visor"},
+    {"id": "desert",  "name": "Desert Nomad",   "primary": "#c68a3e", "secondary": "#7a521f", "accent": "#f2e2c8", "skin": "#caa06c", "accessory": "hood"},
+    {"id": "storm",   "name": "Storm Rider",    "primary": "#5b6b7d", "secondary": "#333d47", "accent": "#5aa9ff", "skin": "#e0b894", "accessory": "goggles"},
+    {"id": "phoenix", "name": "Phoenix Knight", "primary": "#d9432e", "secondary": "#7a1f10", "accent": "#ffcf5c", "skin": "#e8b48c", "accessory": "wings"},
+    {"id": "void",    "name": "Void Walker",    "primary": "#5a3fa0", "secondary": "#241a42", "accent": "#00e5ff", "skin": "#b78f6b", "accessory": "hood"},
+]
+
 if "qualities" not in st.session_state:
     st.session_state.qualities = json.loads(json.dumps(DEFAULT_QUALITIES))
 
@@ -127,30 +144,27 @@ st.markdown(
 )
 
 QUALITIES_JSON = json.dumps(qualities, ensure_ascii=False)
+CHARACTERS_JSON = json.dumps(CHARACTERS, ensure_ascii=False)
 
 HTML = f"""
 <div id="appRoot">
 <div id="root">
   <button id="fsBtn" title="Full screen">⛶</button>
+
+  <div id="charStripWrap">
+    <div id="charStripLabel">Select Character</div>
+    <div id="charStrip"></div>
+  </div>
+
   <div id="stage">
     <div id="orbit">
       <div id="figureWrap">
-        <svg width="150" height="320" viewBox="0 0 150 320">
-          <defs>
-            <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#9aa3c9"/>
-              <stop offset="100%" stop-color="#4d5480"/>
-            </linearGradient>
-          </defs>
-          <circle cx="75" cy="55" r="42" fill="url(#bodyGrad)" stroke="#c7cdea" stroke-width="1.5" stroke-opacity="0.4"/>
-          <path d="M75 95 C40 95 22 130 22 175 L22 260 C22 285 40 300 75 300 C110 300 128 285 128 260 L128 175 C128 130 110 95 75 95 Z" fill="url(#bodyGrad)" stroke="#c7cdea" stroke-width="1.5" stroke-opacity="0.4"/>
-          <path d="M22 150 C10 160 4 190 8 225" stroke="#6b7299" stroke-width="16" stroke-linecap="round" fill="none"/>
-          <path d="M128 150 C140 160 146 190 142 225" stroke="#6b7299" stroke-width="16" stroke-linecap="round" fill="none"/>
-        </svg>
+        <svg id="figureSvg" width="180" height="360" viewBox="0 0 180 360"></svg>
       </div>
     </div>
   </div>
-  <div id="hint">drag to rotate • tap a tag for details</div>
+  <div id="poseLabel"></div>
+  <div id="hint">drag to rotate • tap a tag for details • tap an avatar to change character</div>
 
   <div id="overlay">
     <div id="panel">
@@ -180,7 +194,7 @@ HTML = f"""
     border-radius: 20px;
     position: relative;
     width: 100%;
-    height: 640px;
+    height: 680px;
     overflow: hidden;
     user-select: none;
   }}
@@ -207,9 +221,66 @@ HTML = f"""
   }}
   #fsBtn:hover {{ background: rgba(255,255,255,0.16); }}
 
+  #charStripWrap {{
+    position: absolute;
+    top: 14px; left: 14px; right: 64px;
+    z-index: 15;
+  }}
+  #charStripLabel {{
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #9aa0b4;
+    margin-bottom: 8px;
+  }}
+  #charStrip {{
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    scrollbar-width: thin;
+  }}
+  #charStrip::-webkit-scrollbar {{ height: 5px; }}
+  #charStrip::-webkit-scrollbar-thumb {{ background: rgba(255,255,255,0.18); border-radius: 10px; }}
+
+  .avatar {{
+    flex: 0 0 auto;
+    width: 52px; height: 52px;
+    border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    border: 2px solid rgba(255,255,255,0.14);
+    position: relative;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700;
+    font-size: 16px;
+    color: #fff;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }}
+  .avatar:hover {{ transform: translateY(-3px); }}
+  .avatar.active {{
+    border-color: #fff;
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.25), 0 0 16px rgba(255,255,255,0.35);
+    transform: translateY(-3px) scale(1.06);
+  }}
+  .avatarName {{
+    position: absolute;
+    bottom: -20px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 9px;
+    color: #c3c8d9;
+    white-space: nowrap;
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }}
+  .avatar:hover .avatarName, .avatar.active .avatarName {{ opacity: 1; }}
+
   #stage {{
     position: absolute;
-    inset: 0;
+    top: 90px; left: 0; right: 0; bottom: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -230,12 +301,40 @@ HTML = f"""
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
     animation: breathe 4.5s ease-in-out infinite;
-    filter: drop-shadow(0 0 24px rgba(167,139,250,0.45));
   }}
   @keyframes breathe {{
     0%, 100% {{ transform: translate(-50%, -50%) scale(1); }}
     50% {{ transform: translate(-50%, -50%) scale(1.02) translateY(-4px); }}
   }}
+
+  #figureSvg {{
+    transition: opacity 0.28s ease, transform 0.32s cubic-bezier(.34,1.56,.64,1);
+    opacity: 1;
+  }}
+  #figureSvg.posing {{
+    opacity: 0;
+    transform: scale(0.96) translateY(6px);
+  }}
+
+  #poseLabel {{
+    position: absolute;
+    top: 96px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 6;
+    padding: 5px 14px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.16);
+    backdrop-filter: blur(6px);
+    color: #e7e9f5;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 0;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }}
+  #poseLabel.show {{ opacity: 1; transform: translateX(-50%) translateY(0); }}
 
   .tag {{
     position: absolute;
@@ -359,10 +458,205 @@ HTML = f"""
 
 <script>
   const QUALITIES = {QUALITIES_JSON};
+  const CHARACTERS = {CHARACTERS_JSON};
   const names = Object.keys(QUALITIES);
   const root = document.getElementById('root');
   const orbit = document.getElementById('orbit');
+  const figureWrap = document.getElementById('figureWrap');
   const iconAnims = ['pulse', 'glow', 'wave'];
+  let currentCharIndex = 0;
+  let currentPoseIndex = 0;
+
+  // -------------------------------------------------------------------
+  // Pose library — each pose redefines limb paths + a slight torso/head
+  // tilt so every character cycles through several dynamic stances,
+  // Free-Fire-lobby style ("ek se ek pose").
+  // -------------------------------------------------------------------
+  const POSES = [
+    {{
+      label: 'Idle Stance',
+      rotate: 0,
+      backArm:  "M118 118 Q142 130 146 168 Q148 190 138 208",  backArmEnd:  [138, 208],
+      frontArm: "M62 118 Q38 132 34 168 Q32 192 44 210",       frontArmEnd: [44, 210],
+      backLeg:  "M100 232 Q112 268 108 300 Q106 320 116 338",  backLegEnd:  [118, 344],
+      frontLeg: "M80 232 Q66 268 70 300 Q72 320 62 338",       frontLegEnd: [60, 344]
+    }},
+    {{
+      label: 'Hands On Hips',
+      rotate: -2,
+      backArm:  "M118 118 Q152 124 150 152 Q148 170 122 174",  backArmEnd:  [122, 174],
+      frontArm: "M62 118 Q28 124 30 152 Q32 170 58 174",       frontArmEnd: [58, 174],
+      backLeg:  "M100 232 Q110 266 106 300 Q104 322 114 338",  backLegEnd:  [116, 344],
+      frontLeg: "M80 232 Q70 266 74 300 Q76 322 66 338",       frontLegEnd: [64, 344]
+    }},
+    {{
+      label: 'Action Punch',
+      rotate: 5,
+      backArm:  "M118 118 Q96 96 74 88 Q54 82 40 88",          backArmEnd:  [40, 88],
+      frontArm: "M62 118 Q42 142 32 170 Q26 192 36 208",       frontArmEnd: [36, 208],
+      backLeg:  "M100 232 Q132 250 136 286 Q138 312 122 336",  backLegEnd:  [124, 342],
+      frontLeg: "M80 232 Q54 250 46 282 Q40 306 54 336",       frontLegEnd: [56, 342]
+    }},
+    {{
+      label: 'Victory Pose',
+      rotate: 0,
+      backArm:  "M118 118 Q142 88 138 50 Q136 28 118 16",      backArmEnd:  [118, 16],
+      frontArm: "M62 118 Q38 88 42 50 Q44 28 62 16",           frontArmEnd: [62, 16],
+      backLeg:  "M100 232 Q112 266 108 298 Q106 318 116 338",  backLegEnd:  [118, 344],
+      frontLeg: "M80 232 Q66 266 70 298 Q72 318 62 338",       frontLegEnd: [60, 344]
+    }},
+    {{
+      label: 'Battle Stride',
+      rotate: -4,
+      backArm:  "M118 118 Q148 136 154 168 Q156 188 142 202",  backArmEnd:  [142, 202],
+      frontArm: "M62 118 Q34 98 26 128 Q22 150 32 168",        frontArmEnd: [32, 168],
+      backLeg:  "M100 232 Q122 254 130 288 Q134 310 124 336",  backLegEnd:  [126, 342],
+      frontLeg: "M80 232 Q58 254 46 284 Q40 306 50 332",       frontLegEnd: [48, 338]
+    }}
+  ];
+
+  // -------------------------------------------------------------------
+  // Build a jointed, Free-Fire-style character SVG for a given preset
+  // -------------------------------------------------------------------
+  function buildFigureSVG(ch, poseIndex) {{
+    const skin = ch.skin, primary = ch.primary, secondary = ch.secondary, accent = ch.accent;
+    const pose = POSES[(poseIndex || 0) % POSES.length];
+
+    let accessorySVG = '';
+    switch (ch.accessory) {{
+      case 'mask':
+        accessorySVG = `<path d="M55 60 Q90 78 125 60 L125 72 Q90 90 55 72 Z" fill="${{secondary}}" opacity="0.92"/>`;
+        break;
+      case 'headband':
+        accessorySVG = `<rect x="50" y="48" width="80" height="12" rx="6" fill="${{accent}}"/>
+                         <path d="M128 52 L150 46 L150 58 L128 60 Z" fill="${{accent}}"/>`;
+        break;
+      case 'goggles':
+        accessorySVG = `<rect x="52" y="52" width="76" height="20" rx="10" fill="${{secondary}}" stroke="${{accent}}" stroke-width="2"/>
+                         <circle cx="72" cy="62" r="7" fill="${{accent}}" opacity="0.85"/>
+                         <circle cx="108" cy="62" r="7" fill="${{accent}}" opacity="0.85"/>`;
+        break;
+      case 'scarf':
+        accessorySVG = `<path d="M50 100 Q90 118 130 100 L130 116 Q90 132 50 116 Z" fill="${{accent}}"/>`;
+        break;
+      case 'crown':
+        accessorySVG = `<path d="M62 26 L72 6 L90 22 L108 6 L118 26 L118 36 L62 36 Z" fill="${{accent}}" stroke="${{secondary}}" stroke-width="1.5"/>`;
+        break;
+      case 'visor':
+        accessorySVG = `<rect x="50" y="50" width="80" height="16" rx="8" fill="${{accent}}" opacity="0.85"/>`;
+        break;
+      case 'hood':
+        accessorySVG = `<path d="M40 55 Q90 -6 140 55 L140 80 Q90 60 40 80 Z" fill="${{secondary}}" opacity="0.96"/>`;
+        break;
+      case 'wings':
+        accessorySVG = `<path d="M30 140 Q-10 160 10 220 Q30 195 55 190 Z" fill="${{accent}}" opacity="0.9"/>
+                         <path d="M150 140 Q190 160 170 220 Q150 195 125 190 Z" fill="${{accent}}" opacity="0.9"/>`;
+        break;
+      default: accessorySVG = '';
+    }}
+
+    // Cape (drawn first, sits behind everything) for phoenix/gold flair
+    const capeSVG = (ch.accessory === 'wings')
+      ? `<path d="M65 110 Q90 260 65 320 Q90 300 90 300 Q90 300 115 320 Q90 260 115 110 Z" fill="${{secondary}}" opacity="0.55"/>`
+      : '';
+
+    return `
+      <defs>
+        <linearGradient id="torsoGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${{primary}}"/>
+          <stop offset="100%" stop-color="${{secondary}}"/>
+        </linearGradient>
+        <linearGradient id="limbGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="${{secondary}}"/>
+          <stop offset="100%" stop-color="${{primary}}"/>
+        </linearGradient>
+      </defs>
+
+      <g transform="rotate(${{pose.rotate}} 90 180)">
+        ${{capeSVG}}
+
+        <!-- back arm (right, behind torso) -->
+        <path d="${{pose.backArm}}" stroke="url(#limbGrad)" stroke-width="17" stroke-linecap="round" fill="none"/>
+        <circle cx="${{pose.backArmEnd[0]}}" cy="${{pose.backArmEnd[1]}}" r="10" fill="${{skin}}"/>
+
+        <!-- back leg (right) -->
+        <path d="${{pose.backLeg}}" stroke="url(#limbGrad)" stroke-width="20" stroke-linecap="round" fill="none"/>
+        <ellipse cx="${{pose.backLegEnd[0]}}" cy="${{pose.backLegEnd[1]}}" rx="15" ry="8" fill="${{secondary}}"/>
+
+        <!-- front leg (left) -->
+        <path d="${{pose.frontLeg}}" stroke="url(#limbGrad)" stroke-width="20" stroke-linecap="round" fill="none"/>
+        <ellipse cx="${{pose.frontLegEnd[0]}}" cy="${{pose.frontLegEnd[1]}}" rx="15" ry="8" fill="${{primary}}"/>
+
+        <!-- torso -->
+        <path d="M90 82 C60 82 46 108 46 142 L46 210 C46 236 64 250 90 250 C116 250 134 236 134 210 L134 142 C134 108 120 82 90 82 Z"
+              fill="url(#torsoGrad)" stroke="${{accent}}" stroke-width="2" stroke-opacity="0.55"/>
+        <!-- torso panel detail -->
+        <path d="M90 100 L90 230 M62 130 L90 145 L118 130" stroke="${{accent}}" stroke-width="2" fill="none" opacity="0.5"/>
+
+        <!-- neck -->
+        <rect x="80" y="66" width="20" height="20" rx="6" fill="${{skin}}"/>
+
+        <!-- head -->
+        <circle cx="90" cy="46" r="34" fill="${{skin}}" stroke="${{secondary}}" stroke-width="2" stroke-opacity="0.5"/>
+
+        <!-- front arm (left, in front of torso) -->
+        <path d="${{pose.frontArm}}" stroke="url(#limbGrad)" stroke-width="17" stroke-linecap="round" fill="none"/>
+        <circle cx="${{pose.frontArmEnd[0]}}" cy="${{pose.frontArmEnd[1]}}" r="10" fill="${{skin}}"/>
+
+        ${{accessorySVG}}
+      </g>
+    `;
+  }}
+
+  function renderFigure(instant) {{
+    const svgEl = document.getElementById('figureSvg');
+    const ch = CHARACTERS[currentCharIndex];
+    const label = document.getElementById('poseLabel');
+
+    const paint = () => {{
+      svgEl.innerHTML = buildFigureSVG(ch, currentPoseIndex);
+      svgEl.classList.remove('posing');
+      label.textContent = POSES[currentPoseIndex].label;
+      label.classList.add('show');
+    }};
+
+    if (instant) {{
+      paint();
+      return;
+    }}
+    svgEl.classList.add('posing');
+    label.classList.remove('show');
+    setTimeout(paint, 260);
+  }}
+
+  function cyclePose() {{
+    currentPoseIndex = (currentPoseIndex + 1) % POSES.length;
+    renderFigure(false);
+  }}
+
+  function applyCharacter(index) {{
+    currentCharIndex = index;
+    const ch = CHARACTERS[index];
+    figureWrap.style.filter = `drop-shadow(0 0 24px ${{ch.accent}}88)`;
+    document.querySelectorAll('.avatar').forEach((el, i) => {{
+      el.classList.toggle('active', i === index);
+    }});
+    renderFigure(true);
+  }}
+
+  function renderCharStrip() {{
+    const strip = document.getElementById('charStrip');
+    strip.innerHTML = '';
+    CHARACTERS.forEach((ch, i) => {{
+      const av = document.createElement('div');
+      av.className = 'avatar' + (i === 0 ? ' active' : '');
+      av.style.background = `linear-gradient(145deg, ${{ch.primary}}, ${{ch.secondary}})`;
+      av.style.borderColor = i === 0 ? '#fff' : 'rgba(255,255,255,0.14)';
+      av.innerHTML = `${{ch.name.split(' ').map(w => w[0]).join('')}}<span class="avatarName">${{ch.name}}</span>`;
+      av.onclick = () => applyCharacter(i);
+      strip.appendChild(av);
+    }});
+  }}
 
   function getRadius() {{
     return Math.min(220, orbit.clientWidth / 2 - 40);
@@ -465,9 +759,12 @@ HTML = f"""
 
   window.addEventListener('resize', position);
 
+  renderCharStrip();
+  applyCharacter(0);
   layout();
   requestAnimationFrame(tick);
+  setInterval(cyclePose, 2600);
 </script>
 """
 
-components.html(HTML, height=680, scrolling=False)
+components.html(HTML, height=720, scrolling=False)
