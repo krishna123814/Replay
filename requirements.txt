@@ -1,4 +1,1 @@
-streamlit
-pandas
-plotly
-requests
+streamlit>=1.35
