@@ -393,13 +393,19 @@ def shift_month_key(key, delta_months):
     return f"{y2:04d}-{m2 + 1:02d}"
 
 
-def month_keys_for_account(account, years_ahead=10):
-    """All existing months, plus every month for the next `years_ahead`
-    years, so the month picker never needs a manual 'add month' step."""
+def month_keys_for_account(account, years_ahead=10, years_behind=3):
+    """All existing months, plus every month for `years_behind` years before
+    and `years_ahead` years after, so the month picker covers past months
+    (that already went by) as well as future ones — never needs a manual
+    'add month' step."""
     months = account.get("months", {})
     existing = sorted_month_keys(months)
-    start = existing[0] if existing else f"{date.today().year:04d}-{date.today().month:02d}"
-    generated = {shift_month_key(start, i) for i in range(years_ahead * 12)}
+    today_key = f"{date.today().year:04d}-{date.today().month:02d}"
+    anchor = min(existing[0], today_key) if existing else today_key
+    generated = {
+        shift_month_key(anchor, i)
+        for i in range(-years_behind * 12, years_ahead * 12)
+    }
     generated.update(existing)
     return sorted(generated)
 
