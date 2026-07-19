@@ -165,6 +165,54 @@ def save_data():
     st.session_state["_pending_save_json"] = json.dumps(st.session_state.data)
 
 
+def request_fullscreen():
+    """Flag a fullscreen request; actually run on the next rerun."""
+    st.session_state["_pending_fullscreen"] = True
+
+
+def run_pending_fullscreen():
+    """Unconditionally invoke the JS bridge every rerun. When a fullscreen
+    request is pending, ask the browser for real fullscreen (hides the
+    address bar on most mobile browsers) and hide Streamlit Community
+    Cloud's own floating "Manage app" badge, which only the app's owner
+    sees when signed in — visitors never see it.
+    """
+    trigger = st.session_state.pop("_pending_fullscreen", False)
+    counter = st.session_state.get("_fs_counter", 0)
+
+    if trigger:
+        counter += 1
+        st.session_state["_fs_counter"] = counter
+        js_code = """
+        (function() {
+            try {
+                var el = document.documentElement;
+                if (el.requestFullscreen) { el.requestFullscreen(); }
+                else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); }
+            } catch (e) {}
+            try {
+                document.querySelectorAll('*').forEach(function(n) {
+                    if (n.children.length === 0 && n.textContent &&
+                        n.textContent.trim() === 'Manage app') {
+                        var node = n;
+                        for (var i = 0; i < 6 && node; i++) {
+                            node = node.parentElement;
+                            if (node && node.getBoundingClientRect().height < 140) {
+                                node.style.display = 'none';
+                            }
+                        }
+                    }
+                });
+            } catch (e) {}
+            return 'fs-done';
+        })();
+        """
+    else:
+        js_code = "'fs-idle'"
+
+    streamlit_js_eval(js_expressions=js_code, key=f"fullscreen_js_{counter}", want_output=False)
+
+
 # --------------------------------------------------------------------------- #
 # Ledger math helpers
 # --------------------------------------------------------------------------- #
@@ -344,6 +392,23 @@ def inject_css(text_scale=100):
             padding: 0.15rem 0.6rem;
             min-width: 0;
         }}
+
+        /* Keep "account name + add-entry icon" on one line even on narrow
+           phone screens — Streamlit stacks columns by default once they
+           get too narrow, this overrides that just for these rows. */
+        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] {{
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            gap: 0.4rem !important;
+        }}
+        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div {{
+            width: auto !important;
+            min-width: 0 !important;
+            flex: initial !important;
+        }}
+        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] [data-testid="stCaptionContainer"] {{
+            white-space: nowrap;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -391,7 +456,8 @@ def render_overview(data):
         t = latest_total(acc)
         grand_total += t
         with col:
-            name_col, btn_col = st.columns([5, 1])
+            st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
+            name_col, btn_col = st.columns([5, 1], gap="small")
             with name_col:
                 st.caption(acc["name"])
             with btn_col:
@@ -597,20 +663,26 @@ def main():
         unsafe_allow_html=True,
     )
 
-    with st.expander("🔠 Text size"):
-        scale = st.slider(
-            "Sabhi text aur entries ka size",
-            min_value=80,
-            max_value=160,
-            step=10,
-            value=data["settings"].get("text_scale", 100),
-            format="%d%%",
-            key="text_scale_slider",
-        )
-        if scale != data["settings"].get("text_scale", 100):
-            data["settings"]["text_scale"] = scale
-            st.session_state["_pending_save_json"] = json.dumps(data)
-            st.rerun()
+    size_col, fs_col = st.columns([2, 1])
+    with size_col:
+        with st.expander("🔠 Text size"):
+            scale = st.slider(
+                "Sabhi text aur entries ka size",
+                min_value=80,
+                max_value=160,
+                step=10,
+                value=data["settings"].get("text_scale", 100),
+                format="%d%%",
+                key="text_scale_slider",
+            )
+            if scale != data["settings"].get("text_scale", 100):
+                data["settings"]["text_scale"] = scale
+                st.session_state["_pending_save_json"] = json.dumps(data)
+                st.rerun()
+    with fs_col:
+        st.write("")
+        if st.button("⛶ Fullscreen", key="fullscreen_btn", use_container_width=True):
+            request_fullscreen()
 
     render_overview(data)
     st.divider()
@@ -643,8 +715,9 @@ def main():
     )
 
     # Always invoked, at the same point in the script every rerun — this is
-    # required for the JS bridge component to behave reliably.
+    # required for the JS bridge components to behave reliably.
     run_pending_save()
+    run_pending_fullscreen()
 
 
 if __name__ == "__main__":
