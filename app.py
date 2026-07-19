@@ -434,33 +434,49 @@ def inject_css(text_scale=100):
             background: #F6F1E7;
         }}
 
-        /* Top icon nav bar (Family Saving, settings gear) — fixed to the
-           very top of the viewport, grey background, a clean horizontal
-           border line underneath. Everything else stays a normal
-           scrollable page below it. */
+        /* Top header bar (TradingView-style): dark, fixed to the very top
+           of the viewport, "Family Savings" title on the left and a
+           Setting icon+label button on the right. Everything else stays a
+           normal scrollable page below it. */
         div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) {{
             position: fixed;
             top: 0;
             left: 0;
             right: 0;
             z-index: 9999;
-            background: #ECECEC;
+            background: #131722;
             border: none;
-            border-bottom: 1px solid #C7C7C7;
+            border-bottom: 1px solid #2A2E39;
             border-radius: 0;
-            padding: 0.5rem 1rem;
+            padding: 0.65rem 1rem;
             margin-bottom: 0;
             align-items: center !important;
             flex-wrap: nowrap !important;
         }}
+        .top-nav-title {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #EDEDED;
+            font-family: 'Zilla Slab', serif;
+            font-weight: 700;
+            font-size: 1.15rem;
+            white-space: nowrap;
+        }}
         div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) [data-testid="stPopover"] > button {{
-            border-radius: 50%;
-            width: 42px;
-            height: 42px;
-            padding: 0;
-            font-size: 1.05rem;
-            border: 2px solid transparent;
-            background: #FFFFFF;
+            border-radius: 6px;
+            height: 38px;
+            padding: 0 0.9rem;
+            font-size: 0.92rem;
+            font-weight: 600;
+            color: #C7C9CC;
+            border: 1px solid #363A45;
+            background: #1E222D;
+        }}
+        div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) [data-testid="stPopover"] > button:hover {{
+            border-color: #7A1F2B;
+            color: #FFFFFF;
+            background: #2A2E39;
         }}
         .nav-icon {{
             display: flex;
@@ -602,25 +618,20 @@ def inject_css(text_scale=100):
 # --------------------------------------------------------------------------- #
 
 def render_top_nav(data):
-    """Horizontal icon-only nav bar at the very top. 'Family Saving' is the
-    current, active screen. 'Expenses' is just a placeholder icon for now —
-    no screen or functionality behind it yet. A settings gear sits in the
-    right corner and holds the text-size control.
+    """TradingView-style dark header bar, fixed at the very top of the
+    viewport. Just two things live here: the 'Family Savings' title on the
+    left, and a Setting icon+label button on the right that opens the
+    existing settings popover (text size, chart tools).
     """
-    icon_col, exp_col, spacer_col, settings_col = st.columns([1, 1, 6, 1])
-    with icon_col:
+    title_col, spacer_col, settings_col = st.columns([4, 4, 1])
+    with title_col:
         st.markdown(
             '<div class="top-nav-marker"></div>'
-            '<div class="nav-icon nav-icon-active" title="Family Saving">💰</div>',
-            unsafe_allow_html=True,
-        )
-    with exp_col:
-        st.markdown(
-            '<div class="nav-icon" title="Expenses">🧾</div>',
+            '<div class="top-nav-title">💰 Family Savings</div>',
             unsafe_allow_html=True,
         )
     with settings_col:
-        with st.popover("⚙️", help="Settings"):
+        with st.popover("⚙️ Setting", help="Settings"):
             st.caption("Text size")
             scale = st.slider(
                 "Sabhi text aur entries ka size",
