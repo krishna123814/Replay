@@ -169,12 +169,33 @@ def save_data():
 # Ledger math helpers
 # --------------------------------------------------------------------------- #
 
-def month_total(month_obj):
-    return round(
-        float(month_obj.get("previous_balance", 0))
-        + sum(float(e.get("amount", 0)) for e in month_obj.get("entries", [])),
-        2,
-    )
+def month_total(account, key):
+    """Total for `key`, using the auto-carried-forward previous balance."""
+    months = account.get("months", {})
+    month_obj = months.get(key, {"entries": []})
+    prev = previous_balance_for(account, key)
+    entries_sum = sum(float(e.get("amount", 0)) for e in month_obj.get("entries", []))
+    return round(prev + entries_sum, 2)
+
+
+def previous_balance_for(account, key):
+    """Auto-carried-forward balance for `key`: the total of the most recent
+    earlier month that has data. If there is no earlier month at all, this is
+    the account's very first (seed) month, whose opening balance is manually
+    entered.
+    """
+    months = account.get("months", {})
+    prior_keys = [k for k in months if k < key]
+    if prior_keys:
+        return month_total(account, max(prior_keys))
+    return float((months.get(key) or {}).get("previous_balance", 0) or 0)
+
+
+def is_seed_month(account, key):
+    """True if `key` has no earlier month with data — i.e. its opening
+    balance must be entered manually rather than carried forward."""
+    months = account.get("months", {})
+    return not any(k < key for k in months)
 
 
 def sorted_month_keys(months_dict):
@@ -185,30 +206,25 @@ def latest_total(account):
     months = account.get("months", {})
     if not months:
         return 0.0
-    last_key = sorted_month_keys(months)[-1]
-    return month_total(months[last_key])
+    return month_total(account, sorted_month_keys(months)[-1])
 
 
-def add_next_month(account):
-    months = account["months"]
-    keys = sorted_month_keys(months)
-    if keys:
-        last_key = keys[-1]
-        y, m = map(int, last_key.split("-"))
-        m += 1
-        if m > 12:
-            m = 1
-            y += 1
-    else:
-        today = date.today()
-        y, m = today.year, today.month
-    new_key = f"{y:04d}-{m:02d}"
-    if new_key not in months:
-        months[new_key] = {
-            "previous_balance": latest_total(account) if keys else 0.0,
-            "entries": [],
-        }
-    return new_key
+def shift_month_key(key, delta_months):
+    y, m = map(int, key.split("-"))
+    idx = y * 12 + (m - 1) + delta_months
+    y2, m2 = divmod(idx, 12)
+    return f"{y2:04d}-{m2 + 1:02d}"
+
+
+def month_keys_for_account(account, years_ahead=10):
+    """All existing months, plus every month for the next `years_ahead`
+    years, so the month picker never needs a manual 'add month' step."""
+    months = account.get("months", {})
+    existing = sorted_month_keys(months)
+    start = existing[0] if existing else f"{date.today().year:04d}-{date.today().month:02d}"
+    generated = {shift_month_key(start, i) for i in range(years_ahead * 12)}
+    generated.update(existing)
+    return sorted(generated)
 
 
 def month_label(key):
@@ -227,6 +243,15 @@ def inject_css():
         @import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
 
         html, body, [class*="css"]  { font-family: 'Inter', sans-serif; }
+
+        /* Hide Streamlit's own chrome for a more full-screen, app-like feel */
+        #MainMenu { visibility: hidden; }
+        footer { visibility: hidden; }
+        header[data-testid="stHeader"] { height: 0; visibility: hidden; }
+        [data-testid="stToolbar"] { visibility: hidden; height: 0; }
+        [data-testid="stDecoration"] { display: none; }
+        [data-testid="stStatusWidget"] { visibility: hidden; }
+        .block-container { padding-top: 1.2rem; }
 
         .stApp {
             background: #F6F1E7;
@@ -314,6 +339,34 @@ def inject_css():
 # UI sections
 # --------------------------------------------------------------------------- #
 
+def quick_add_entry(account):
+    """Small popover, shown right beside an account's total, to add an entry
+    to its most recent month without opening that account's tab."""
+    months = account["months"]
+    existing_keys = sorted_month_keys(months)
+    target_key = existing_keys[-1] if existing_keys else (
+        f"{date.today().year:04d}-{date.today().month:02d}"
+    )
+    with st.popover("✏️ Add entry", use_container_width=True):
+        st.caption(f"Adding to **{month_label(target_key)}**")
+        desc = st.text_input("Description", key=f"qk_desc_{account['id']}")
+        amt = st.number_input(
+            "Amount", step=1.0, format="%.2f", key=f"qk_amt_{account['id']}"
+        )
+        if st.button("Add", key=f"qk_btn_{account['id']}"):
+            if desc.strip():
+                months.setdefault(target_key, {"entries": []})
+                months[target_key].setdefault("entries", []).append(
+                    {"label": desc.strip(), "amount": float(amt)}
+                )
+                st.session_state.dirty = True
+                st.session_state[f"qk_desc_{account['id']}"] = ""
+                st.session_state[f"qk_amt_{account['id']}"] = 0.0
+                st.rerun()
+            else:
+                st.warning("Description likhein.")
+
+
 def render_overview(data):
     accounts = data["accounts"]
     cols = st.columns(len(accounts) + 1)
@@ -323,6 +376,7 @@ def render_overview(data):
         grand_total += t
         with col:
             st.metric(acc["name"], f"₹ {t:,.2f}")
+            quick_add_entry(acc)
     with cols[-1]:
         st.metric("Family Total", f"₹ {grand_total:,.2f}")
 
@@ -350,61 +404,67 @@ def render_overview(data):
 def render_account(account):
     months = account["months"]
 
-    top_l, top_r = st.columns([3, 1])
-    with top_l:
-        new_name = st.text_input(
-            "Account name", value=account["name"], key=f"name_{account['id']}"
-        )
-        if new_name != account["name"]:
-            account["name"] = new_name
-            st.session_state.dirty = True
-    with top_r:
-        st.write("")
-        st.write("")
-        if st.button("➕ Add next month", key=f"addmonth_{account['id']}"):
-            new_key = add_next_month(account)
-            st.session_state.dirty = True
-            st.session_state[f"selected_month_{account['id']}"] = new_key
-            st.rerun()
+    new_name = st.text_input(
+        "Account name", value=account["name"], key=f"name_{account['id']}"
+    )
+    if new_name != account["name"]:
+        account["name"] = new_name
+        st.session_state.dirty = True
 
-    if not months:
-        st.info("No months yet — click 'Add next month' to start this account.")
-        return
-
-    keys = sorted_month_keys(months)
-    default_idx = len(keys) - 1
+    all_keys = month_keys_for_account(account)
+    existing_keys = sorted_month_keys(months)
     state_key = f"selected_month_{account['id']}"
-    if state_key in st.session_state and st.session_state[state_key] in keys:
-        default_idx = keys.index(st.session_state[state_key])
+
+    if state_key in st.session_state and st.session_state[state_key] in all_keys:
+        default_idx = all_keys.index(st.session_state[state_key])
+    elif existing_keys:
+        default_idx = all_keys.index(existing_keys[-1])
+    else:
+        today_key = f"{date.today().year:04d}-{date.today().month:02d}"
+        default_idx = all_keys.index(today_key) if today_key in all_keys else 0
 
     selected = st.selectbox(
         "Month",
-        options=keys,
+        options=all_keys,
         format_func=month_label,
         index=default_idx,
         key=f"select_{account['id']}",
     )
     st.session_state[state_key] = selected
 
-    month_obj = months[selected]
-
     st.markdown('<div class="ledger-card">', unsafe_allow_html=True)
 
-    pb = st.number_input(
-        "Previous balance (carried forward)",
-        value=float(month_obj.get("previous_balance", 0)),
-        step=1.0,
-        format="%.2f",
-        key=f"pb_{account['id']}_{selected}",
-    )
-    if pb != month_obj.get("previous_balance"):
-        month_obj["previous_balance"] = pb
-        st.session_state.dirty = True
+    if is_seed_month(account, selected):
+        current_pb = float((months.get(selected) or {}).get("previous_balance", 0) or 0)
+        pb = st.number_input(
+            "Opening balance (this is the account's first month)",
+            value=current_pb,
+            step=1.0,
+            format="%.2f",
+            key=f"pb_{account['id']}_{selected}",
+        )
+        if pb != current_pb:
+            months.setdefault(selected, {"entries": []})
+            months[selected]["previous_balance"] = pb
+            st.session_state.dirty = True
+    else:
+        computed_pb = previous_balance_for(account, selected)
+        st.number_input(
+            "Previous balance (auto carried forward)",
+            value=computed_pb,
+            format="%.2f",
+            disabled=True,
+            key=f"pb_ro_{account['id']}_{selected}",
+        )
 
     st.caption("Entries for this month (salary, pension, petrol, interest, etc.)")
-    df = pd.DataFrame(month_obj.get("entries", []))
-    if df.empty:
-        df = pd.DataFrame({"label": [], "amount": []})
+    entries = (months.get(selected) or {}).get("entries", [])
+    if entries:
+        df = pd.DataFrame(entries)
+        df["label"] = df["label"].astype(str)
+        df["amount"] = df["amount"].astype(float)
+    else:
+        df = pd.DataFrame({"label": pd.Series(dtype="str"), "amount": pd.Series(dtype="float")})
     df = df.rename(columns={"label": "Description", "amount": "Amount"})
 
     edited = st.data_editor(
@@ -424,11 +484,12 @@ def render_account(account):
         if pd.notna(row.get("Description")) and str(row.get("Description")).strip() != ""
         and pd.notna(row.get("Amount"))
     ]
-    if new_entries != month_obj.get("entries", []):
-        month_obj["entries"] = new_entries
+    if new_entries != entries:
+        months.setdefault(selected, {"entries": []})
+        months[selected]["entries"] = new_entries
         st.session_state.dirty = True
 
-    total = month_total(month_obj)
+    total = month_total(account, selected)
     st.markdown(
         f'<div class="total-label">Total ({month_label(selected)})</div>'
         f'<div class="total-figure">₹ {total:,.2f}</div>',
@@ -436,15 +497,15 @@ def render_account(account):
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # History table for this account
+    # History table for this account (only months that actually have data)
     with st.expander("Month-by-month history"):
         hist_rows = [
             {
                 "Month": month_label(k),
-                "Previous balance": months[k].get("previous_balance", 0),
-                "Total": month_total(months[k]),
+                "Previous balance": previous_balance_for(account, k),
+                "Total": month_total(account, k),
             }
-            for k in keys
+            for k in sorted_month_keys(months)
         ]
         st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
 
