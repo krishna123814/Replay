@@ -38,7 +38,7 @@ from datetime import date
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit_local_storage import LocalStorage
+from streamlit_js_eval import streamlit_js_eval
 
 # --------------------------------------------------------------------------- #
 # Config & constants
@@ -105,24 +105,21 @@ def default_data():
 # Storage helpers
 # --------------------------------------------------------------------------- #
 
-def get_local_storage():
-    if "ls_instance" not in st.session_state:
-        st.session_state.ls_instance = LocalStorage()
-    return st.session_state.ls_instance
-
-
 def load_data():
     """Load ledger data from the browser's localStorage into session_state.
 
-    streamlit-local-storage fetches the value asynchronously, so the first
-    render (or two) may come back empty even when data exists. We rerun a
-    few times to give it a chance before falling back to the sample data.
+    The JS bridge fetches the value asynchronously, so the first render (or
+    two) may come back empty even when data exists. We rerun a few times to
+    give it a chance before falling back to the sample data.
     """
-    ls = get_local_storage()
     if "data" in st.session_state:
         return
 
-    raw = ls.getItem(STORAGE_KEY, key="load_ghar_khata")
+    raw = streamlit_js_eval(
+        js_expressions=f"localStorage.getItem({json.dumps(STORAGE_KEY)})",
+        key="load_ghar_khata",
+        want_output=True,
+    )
 
     if raw:
         try:
@@ -139,13 +136,33 @@ def load_data():
         st.session_state.data = default_data()
 
 
-def save_data(show_toast=True):
-    """Persist the current session_state.data into the browser's localStorage."""
-    ls = get_local_storage()
-    ls.setItem(STORAGE_KEY, json.dumps(st.session_state.data), key="save_ghar_khata")
-    st.session_state.dirty = False
-    if show_toast:
+def run_pending_save():
+    """Unconditionally invoke the JS bridge every rerun (required for it to
+    work reliably), writing to localStorage only when a save is pending.
+    """
+    pending = st.session_state.pop("_pending_save_json", None)
+    counter = st.session_state.get("_save_counter", 0)
+
+    if pending is not None:
+        counter += 1
+        st.session_state["_save_counter"] = counter
+        js_code = (
+            f"localStorage.setItem({json.dumps(STORAGE_KEY)}, "
+            f"{json.dumps(pending)}); 'saved'"
+        )
+    else:
+        js_code = "'idle'"
+
+    streamlit_js_eval(js_expressions=js_code, key=f"save_ghar_khata_{counter}", want_output=False)
+
+    if pending is not None:
+        st.session_state.dirty = False
         st.toast("Saved to this browser's storage ✔", icon="💾")
+
+
+def save_data():
+    """Queue the current session_state.data to be written to localStorage."""
+    st.session_state["_pending_save_json"] = json.dumps(st.session_state.data)
 
 
 # --------------------------------------------------------------------------- #
@@ -518,6 +535,10 @@ def main():
         "Data lives only in this browser (localStorage) — it is not uploaded anywhere. "
         "Using a different browser or device, or clearing site data, will not show this data."
     )
+
+    # Always invoked, at the same point in the script every rerun — this is
+    # required for the JS bridge component to behave reliably.
+    run_pending_save()
 
 
 if __name__ == "__main__":
