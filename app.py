@@ -166,42 +166,46 @@ def save_data():
     st.session_state["_pending_save_json"] = json.dumps(st.session_state.data)
 
 
-def render_fullscreen_button():
-    """Render a real HTML button whose onclick calls the Fullscreen API
-    directly, in the browser, with no Streamlit rerun in between.
+def inject_auto_fullscreen():
+    """No visible fullscreen button/label anywhere on screen.
 
-    This matters because requestFullscreen() only works when called
-    synchronously inside a genuine user-gesture handler (a real click).
-    Routing the click through st.button() -> session_state flag ->
-    st.rerun() -> streamlit_js_eval loses that gesture (there's a server
-    round-trip in between), so the browser silently rejects the request.
-    It also previously called requestFullscreen() on the *component
-    iframe's own* document instead of the actual app page, so even when
-    the gesture wasn't lost, the wrong element was being fullscreened.
+    Important browser rule: a page cannot go fullscreen the instant it
+    loads, with zero taps — requestFullscreen() only works when it's
+    called synchronously inside a real user gesture (a click/tap).
+    Every browser enforces this for security, so nothing (Streamlit or
+    otherwise) can truly auto-fullscreen on load with no interaction at
+    all.
 
-    window.parent.document targets the real top-level app page (this
-    button's iframe is a direct child of it), and the click happens
-    entirely client-side, so the gesture requirement is satisfied.
+    The closest real equivalent, and what this does: attach one
+    invisible, one-time listener on the very first tap/click ANYWHERE
+    on the page. The moment the user touches the screen at all, it
+    silently requests fullscreen right there and then removes itself.
+    So in practice it feels automatic — there's no button to press.
     """
     components.html(
         """
-        <button id="fs-btn" style="
-            width:100%; padding:0.5rem 0; border-radius:0.5rem;
-            border:1px solid rgba(49,51,63,0.2); background:#fff;
-            font-size:1rem; cursor:pointer;">
-            ⛶ Fullscreen
-        </button>
         <script>
-        document.getElementById('fs-btn').addEventListener('click', function () {
-            try {
-                var el = window.parent.document.documentElement;
-                if (el.requestFullscreen) { el.requestFullscreen(); }
-                else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); }
-            } catch (e) {}
-        });
+        (function() {
+            if (window.parent.__ghk_fs_hooked) { return; }
+            window.parent.__ghk_fs_hooked = true;
+            function goFullscreen() {
+                try {
+                    var el = window.parent.document.documentElement;
+                    if (el.requestFullscreen) {
+                        el.requestFullscreen().catch(function(){});
+                    } else if (el.webkitRequestFullscreen) {
+                        el.webkitRequestFullscreen();
+                    }
+                } catch (e) {}
+                window.parent.document.removeEventListener('click', goFullscreen, true);
+                window.parent.document.removeEventListener('touchend', goFullscreen, true);
+            }
+            window.parent.document.addEventListener('click', goFullscreen, true);
+            window.parent.document.addEventListener('touchend', goFullscreen, true);
+        })();
         </script>
         """,
-        height=48,
+        height=0,
     )
 
 
@@ -318,19 +322,28 @@ def inject_css(text_scale=100):
         [data-testid="stToolbar"] {{ visibility: hidden; height: 0; }}
         [data-testid="stDecoration"] {{ display: none; }}
         [data-testid="stStatusWidget"] {{ visibility: hidden; }}
-        .block-container {{ padding-top: 1.2rem; zoom: {text_scale}%; }}
+        .block-container {{ padding-top: 4.6rem; zoom: {text_scale}%; }}
 
         .stApp {{
             background: #F6F1E7;
         }}
 
-        /* Top icon nav bar (Family Saving, Expenses, settings gear) */
+        /* Top icon nav bar (Family Saving, settings gear) — fixed to the
+           very top of the viewport, grey background, a clean horizontal
+           border line underneath. Everything else stays a normal
+           scrollable page below it. */
         div:has(> div.top-nav-marker) ~ div[data-testid="stHorizontalBlock"] {{
-            background: #FFFDF7;
-            border: 1px solid #E4D8BC;
-            border-radius: 10px;
-            padding: 0.45rem 0.7rem;
-            margin-bottom: 0.9rem;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 9999;
+            background: #ECECEC;
+            border: none;
+            border-bottom: 1px solid #C7C7C7;
+            border-radius: 0;
+            padding: 0.5rem 1rem;
+            margin-bottom: 0;
             align-items: center !important;
             flex-wrap: nowrap !important;
         }}
@@ -341,7 +354,7 @@ def inject_css(text_scale=100):
             padding: 0;
             font-size: 1.05rem;
             border: 2px solid transparent;
-            background: #F3E3C3;
+            background: #FFFFFF;
         }}
         .nav-icon {{
             display: flex;
@@ -395,11 +408,21 @@ def inject_css(text_scale=100):
         }}
 
         /* Compact one-line account rows (Name  —  ₹ Amount  ✏️) */
+        .acct-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            width: 100%;
+            gap: 0.6rem;
+        }}
         .acct-row-label {{
             font-family: 'Inter', sans-serif;
             color: #4A3F2A;
             font-size: 0.95rem;
             padding-top: 0.35rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }}
         .acct-row-figure {{
             font-family: 'IBM Plex Mono', monospace;
@@ -407,9 +430,14 @@ def inject_css(text_scale=100):
             color: #0F5132;
             font-size: 1.05rem;
             padding-top: 0.3rem;
+            white-space: nowrap;
+            flex-shrink: 0;
         }}
         .acct-row-total {{
             font-weight: 700;
+        }}
+        .acct-row-total .acct-row-label,
+        .acct-row-total .acct-row-figure {{
             color: #7A1F2B;
         }}
 
@@ -435,9 +463,11 @@ def inject_css(text_scale=100):
             min-width: 0;
         }}
 
-        /* Keep "account name + add-entry icon" on one line even on narrow
-           phone screens — Streamlit stacks columns by default once they
-           get too narrow, this overrides that just for these rows. */
+        /* Keep "account name+amount" and the add-entry icon on one line
+           even on narrow phone screens — Streamlit stacks columns by
+           default once they get too narrow, this overrides that just for
+           these rows. The text column grows to fill the row; the icon
+           column stays compact on the right. */
         div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] {{
             flex-wrap: nowrap !important;
             align-items: center !important;
@@ -445,15 +475,17 @@ def inject_css(text_scale=100):
             padding: 0.3rem 0;
             border-bottom: 1px solid #E7DFC9;
         }}
-        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div {{
+        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div:first-child {{
+            flex: 1 1 auto !important;
+            min-width: 0 !important;
+        }}
+        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div:last-child {{
             width: auto !important;
             min-width: 0 !important;
             flex: initial !important;
         }}
-        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] [data-testid="stCaptionContainer"] {{
-            white-space: nowrap;
-        }}
         </style>
+
         """,
         unsafe_allow_html=True,
     )
@@ -498,6 +530,19 @@ def render_top_nav(data):
                 st.session_state["_pending_save_json"] = json.dumps(data)
                 st.rerun()
 
+            st.divider()
+            st.caption("Chart tools")
+            show_tools = st.checkbox(
+                "📷 Zoom & download icons on the chart",
+                value=data["settings"].get("show_chart_tools", False),
+                key="show_chart_tools_toggle",
+                help="Shows Plotly's zoom/pan/download toolbar on the comparison chart.",
+            )
+            if show_tools != data["settings"].get("show_chart_tools", False):
+                data["settings"]["show_chart_tools"] = show_tools
+                st.session_state["_pending_save_json"] = json.dumps(data)
+                st.rerun()
+
 
 def quick_add_entry(account):
     """Small icon-only popover, to add an entry to an account's most recent
@@ -536,32 +581,26 @@ def render_overview(data):
         t = latest_total(acc)
         grand_total += t
         st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
-        label_col, val_col, edit_col = st.columns([3, 3, 1], gap="small")
-        with label_col:
+        text_col, edit_col = st.columns([8, 1], gap="small")
+        with text_col:
             st.markdown(
-                f'<div class="acct-row-label">{acc["name"]}</div>',
-                unsafe_allow_html=True,
-            )
-        with val_col:
-            st.markdown(
-                f'<div class="acct-row-figure">₹ {t:,.2f}</div>',
+                f'<div class="acct-row">'
+                f'<span class="acct-row-label">{acc["name"]}</span>'
+                f'<span class="acct-row-figure">₹ {t:,.2f}</span>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
         with edit_col:
             quick_add_entry(acc)
 
     st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
-    total_label_col, total_val_col, _ = st.columns([3, 3, 1], gap="small")
-    with total_label_col:
-        st.markdown(
-            '<div class="acct-row-label acct-row-total">Family Total</div>',
-            unsafe_allow_html=True,
-        )
-    with total_val_col:
-        st.markdown(
-            f'<div class="acct-row-figure acct-row-total">₹ {grand_total:,.2f}</div>',
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f'<div class="acct-row acct-row-total">'
+        f'<span class="acct-row-label">Family Total</span>'
+        f'<span class="acct-row-figure">₹ {grand_total:,.2f}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     # Comparison chart across accounts' latest totals
     fig = go.Figure(
@@ -581,7 +620,11 @@ def render_overview(data):
         yaxis=dict(showgrid=True, gridcolor="#E7DFC9"),
         font=dict(family="Inter", color="#4A3F2A"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": data["settings"].get("show_chart_tools", False)},
+    )
 
 
 def render_account(account):
@@ -737,7 +780,8 @@ def main():
         st.stop()
 
     data = st.session_state.data
-    data.setdefault("settings", {"text_scale": 100})
+    data.setdefault("settings", {"text_scale": 100, "show_chart_tools": False})
+    data["settings"].setdefault("show_chart_tools", False)
     if "dirty" not in st.session_state:
         st.session_state.dirty = False
 
@@ -745,7 +789,7 @@ def main():
 
     render_top_nav(data)
 
-    render_fullscreen_button()
+    inject_auto_fullscreen()
 
     render_overview(data)
     st.divider()
