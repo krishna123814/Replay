@@ -483,6 +483,17 @@ def inject_css(text_scale=100):
             background: #7A1F2B;
         }}
 
+        .ledger-month-header {{
+            font-family: 'Zilla Slab', serif;
+            font-weight: 700;
+            font-size: 1.15rem;
+            color: #7A1F2B;
+            margin-top: 0.6rem;
+            margin-bottom: 0.3rem;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }}
+
         /* Ledger paper card for each account */
         .ledger-card {{
             background: #FFFDF7;
@@ -780,140 +791,136 @@ def render_account(account, key_prefix=""):
         account["name"] = new_name
         st.session_state.dirty = True
 
-    all_keys = month_keys_for_account(account)
     existing_keys = sorted_month_keys(months)
-    state_key = f"{key_prefix}selected_month_{account['id']}"
-
-    if state_key in st.session_state and st.session_state[state_key] in all_keys:
-        default_idx = all_keys.index(st.session_state[state_key])
-    elif existing_keys:
-        default_idx = all_keys.index(existing_keys[-1])
-    else:
+    if not existing_keys:
         today_key = f"{date.today().year:04d}-{date.today().month:02d}"
-        default_idx = all_keys.index(today_key) if today_key in all_keys else 0
-
-    selected = st.selectbox(
-        "Month",
-        options=all_keys,
-        format_func=month_label,
-        index=default_idx,
-        key=f"{key_prefix}select_{account['id']}",
-    )
-    st.session_state[state_key] = selected
-
-    st.markdown('<div class="ledger-card">', unsafe_allow_html=True)
-
-    if is_seed_month(account, selected):
-        current_pb = float((months.get(selected) or {}).get("previous_balance", 0) or 0)
-        pb = st.number_input(
-            "Opening balance (this is the account's first month)",
-            value=current_pb,
-            step=1.0,
-            format="%.2f",
-            key=f"{key_prefix}pb_{account['id']}_{selected}",
-        )
-        if pb != current_pb:
-            months.setdefault(selected, {"entries": []})
-            months[selected]["previous_balance"] = pb
-            st.session_state.dirty = True
-    else:
-        computed_pb = previous_balance_for(account, selected)
-        st.number_input(
-            "Previous balance (auto carried forward)",
-            value=computed_pb,
-            format="%.2f",
-            disabled=True,
-            key=f"{key_prefix}pb_ro_{account['id']}_{selected}",
-        )
-
-    st.caption("Entries for this month (salary, pension, petrol, interest, etc.)")
-    entries = (months.get(selected) or {}).get("entries", [])
-    if entries:
-        df = pd.DataFrame(entries)
-        df["label"] = df["label"].astype(str)
-        df["amount"] = df["amount"].astype(float)
-    else:
-        df = pd.DataFrame({"label": pd.Series(dtype="str"), "amount": pd.Series(dtype="float")})
-    df = df.rename(columns={"label": "Description", "amount": "Amount"})
-
-    edited = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key=f"{key_prefix}editor_{account['id']}_{selected}",
-        column_config={
-            "Description": st.column_config.TextColumn(required=True),
-            "Amount": st.column_config.NumberColumn(format="%.2f", required=True),
-        },
-    )
-
-    new_entries = [
-        {"label": row["Description"], "amount": float(row["Amount"])}
-        for _, row in edited.iterrows()
-        if pd.notna(row.get("Description")) and str(row.get("Description")).strip() != ""
-        and pd.notna(row.get("Amount"))
-    ]
-    if new_entries != entries:
-        months.setdefault(selected, {"entries": []})
-        months[selected]["entries"] = new_entries
+        months[today_key] = {"entries": [], "previous_balance": 0}
+        existing_keys = [today_key]
         st.session_state.dirty = True
 
-    added_entries = [e for e in new_entries if e["amount"] > 0]
-    gaya_entries = [e for e in new_entries if e["amount"] < 0]
-    total_added = sum(e["amount"] for e in added_entries)
-    total_gaya = sum(-e["amount"] for e in gaya_entries)
-
-    st.caption(
-        f"💡 Amount **positive** likhein toh wo entry 'Added' maana jaata hai, "
-        f"**negative** (jaise -500) likhein toh 'Gaya' — dono neeche alag dikhte hain."
-    )
-    added_col, gaya_col = st.columns(2)
-    with added_col:
+    for mkey in existing_keys:
         st.markdown(
-            f'<div class="addgone-label addgone-added">➕ Added — ₹ {total_added:,.2f}</div>',
+            f'<div class="ledger-month-header">{month_label(mkey)}</div>',
             unsafe_allow_html=True,
         )
-        if added_entries:
-            for e in added_entries:
-                st.markdown(
-                    f'<div class="addgone-item">{e["label"]} — ₹ {e["amount"]:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
+        st.markdown('<div class="ledger-card">', unsafe_allow_html=True)
+
+        if is_seed_month(account, mkey):
+            current_pb = float((months.get(mkey) or {}).get("previous_balance", 0) or 0)
+            pb = st.number_input(
+                "Opening balance (this is the account's first month)",
+                value=current_pb,
+                step=1.0,
+                format="%.2f",
+                key=f"{key_prefix}pb_{account['id']}_{mkey}",
+            )
+            if pb != current_pb:
+                months.setdefault(mkey, {"entries": []})
+                months[mkey]["previous_balance"] = pb
+                st.session_state.dirty = True
         else:
-            st.caption("Kuch nahi")
-    with gaya_col:
+            computed_pb = previous_balance_for(account, mkey)
+            st.number_input(
+                "Previous balance (auto carried forward)",
+                value=computed_pb,
+                format="%.2f",
+                disabled=True,
+                key=f"{key_prefix}pb_ro_{account['id']}_{mkey}",
+            )
+
+        st.caption("Entries for this month (salary, pension, petrol, interest, etc.)")
+        entries = (months.get(mkey) or {}).get("entries", [])
+        if entries:
+            df = pd.DataFrame(entries)
+            df["label"] = df["label"].astype(str)
+            df["amount"] = df["amount"].astype(float)
+        else:
+            df = pd.DataFrame({"label": pd.Series(dtype="str"), "amount": pd.Series(dtype="float")})
+        df = df.rename(columns={"label": "Description", "amount": "Amount"})
+
+        edited = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=f"{key_prefix}editor_{account['id']}_{mkey}",
+            column_config={
+                "Description": st.column_config.TextColumn(required=True),
+                "Amount": st.column_config.NumberColumn(format="%.2f", required=True),
+            },
+        )
+
+        new_entries = [
+            {"label": row["Description"], "amount": float(row["Amount"])}
+            for _, row in edited.iterrows()
+            if pd.notna(row.get("Description")) and str(row.get("Description")).strip() != ""
+            and pd.notna(row.get("Amount"))
+        ]
+        if new_entries != entries:
+            months.setdefault(mkey, {"entries": []})
+            months[mkey]["entries"] = new_entries
+            st.session_state.dirty = True
+
+        added_entries = [e for e in new_entries if e["amount"] > 0]
+        gaya_entries = [e for e in new_entries if e["amount"] < 0]
+        total_added = sum(e["amount"] for e in added_entries)
+        total_gaya = sum(-e["amount"] for e in gaya_entries)
+
+        st.caption(
+            "💡 Amount **positive** likhein toh 'Added', **negative** (jaise -500) likhein toh 'Gaya'."
+        )
+        added_col, gaya_col = st.columns(2)
+        with added_col:
+            st.markdown(
+                f'<div class="addgone-label addgone-added">➕ Added — ₹ {total_added:,.2f}</div>',
+                unsafe_allow_html=True,
+            )
+            if added_entries:
+                for e in added_entries:
+                    st.markdown(
+                        f'<div class="addgone-item">{e["label"]} — ₹ {e["amount"]:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("Kuch nahi")
+        with gaya_col:
+            st.markdown(
+                f'<div class="addgone-label addgone-gaya">➖ Gaya — ₹ {total_gaya:,.2f}</div>',
+                unsafe_allow_html=True,
+            )
+            if gaya_entries:
+                for e in gaya_entries:
+                    st.markdown(
+                        f'<div class="addgone-item">{e["label"]} — ₹ {-e["amount"]:,.2f}</div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.caption("Kuch nahi")
+
+        month_tot = month_total(account, mkey)
         st.markdown(
-            f'<div class="addgone-label addgone-gaya">➖ Gaya — ₹ {total_gaya:,.2f}</div>',
+            f'<div class="total-label">Total ({month_label(mkey)})</div>'
+            f'<div class="total-figure">₹ {month_tot:,.2f}</div>',
             unsafe_allow_html=True,
         )
-        if gaya_entries:
-            for e in gaya_entries:
-                st.markdown(
-                    f'<div class="addgone-item">{e["label"]} — ₹ {-e["amount"]:,.2f}</div>',
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.caption("Kuch nahi")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.write("")
 
-    total = month_total(account, selected)
+    next_key = shift_month_key(existing_keys[-1], 1)
+    if st.button(
+        f"+ Add {month_label(next_key)}",
+        key=f"{key_prefix}add_month_{account['id']}",
+    ):
+        months[next_key] = {"entries": []}
+        st.session_state.dirty = True
+        st.rerun()
+
+    st.divider()
+    current_balance = latest_total(account)
     st.markdown(
-        f'<div class="total-label">Total ({month_label(selected)})</div>'
-        f'<div class="total-figure">₹ {total:,.2f}</div>',
+        f'<div class="total-label">Current Balance</div>'
+        f'<div class="total-figure">₹ {current_balance:,.2f}</div>',
         unsafe_allow_html=True,
     )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # History table for this account (only months that actually have data)
-    with st.expander("Month-by-month history"):
-        hist_rows = [
-            {
-                "Month": month_label(k),
-                "Previous balance": previous_balance_for(account, k),
-                "Total": month_total(account, k),
-            }
-            for k in sorted_month_keys(months)
-        ]
-        st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
 
 
 def render_manage_accounts(data):
