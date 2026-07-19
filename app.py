@@ -53,8 +53,20 @@ MAX_LOAD_RETRIES = 3  # streamlit-local-storage needs a couple of reruns
 # Uses Google Identity Services (browser-side OAuth token flow) + the Drive
 # API's private "appDataFolder" — a hidden folder only this app can see, not
 # the user's regular Drive files. No client secret is needed for this flow.
-GOOGLE_CLIENT_ID = "585903901756-7eldm0nsmhnvomra9393qcjngjajvu92.apps.googleusercontent.com"
-GOOGLE_API_KEY = "AIzaSyDqbpt6CzWF8RLW7iaX7cVqrvKXWY2Qoac"
+# Values are read from Streamlit Cloud's "Secrets" (st.secrets) so they don't
+# have to live in the source code; falls back to hardcoded values for local
+# testing if secrets aren't configured.
+try:
+    GOOGLE_CLIENT_ID = st.secrets.get(
+        "GOOGLE_CLIENT_ID",
+        "585903901756-7eldm0nsmhnvomra9393qcjngjajvu92.apps.googleusercontent.com",
+    )
+    GOOGLE_API_KEY = st.secrets.get(
+        "GOOGLE_API_KEY", "AIzaSyDqbpt6CzWF8RLW7iaX7cVqrvKXWY2Qoac"
+    )
+except Exception:
+    GOOGLE_CLIENT_ID = "585903901756-7eldm0nsmhnvomra9393qcjngjajvu92.apps.googleusercontent.com"
+    GOOGLE_API_KEY = "AIzaSyDqbpt6CzWF8RLW7iaX7cVqrvKXWY2Qoac"
 DRIVE_FILE_NAME = "ghar_khata_data_v1.json"
 DRIVE_RESTORE_KEY = "ghar_khata_drive_restore_payload"  # bridge key used to
                                                           # hand restored JSON
@@ -181,37 +193,55 @@ def render_drive_sync(data):
     """Optional Google Drive sync — connect once, then Save/Restore the whole
     ledger as a single JSON file in the app's private, hidden Drive folder
     (appDataFolder). This never touches the rest of the user's Drive.
+
+    IMPORTANT: Google's Identity Services refuses to run a sign-in flow
+    inside an embedded iframe ("Access blocked: Authorization Error" /
+    Error 400: invalid_request). Streamlit's components.html() always
+    renders inside an iframe, so instead of building the button/script
+    there, we inject a real <script> tag into the TOP-LEVEL page
+    (window.parent.document) — same trick used by inject_auto_fullscreen()
+    below. That script builds a small floating panel directly on the real
+    page, so Google sees a genuine top-level sign-in, not an iframe one.
     """
     st.markdown("### ☁️ Google Drive Sync")
     st.caption(
-        "Google account connect karke data Drive ki private app-folder mein "
-        "save/restore karein — kisi bhi device/browser se access ho jayega."
+        "Screen ke sabse neeche ek floating panel dikhega — 'Connect Google Drive' "
+        "se login karein, phir 'Save to Drive' / 'Restore from Drive' use karein."
     )
 
     current_data_json = json.dumps(json.dumps(data))  # embed as a JS string literal
 
-    html = f"""
-    <div id="ghk-drive-widget" style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
-      <div id="ghk-drive-status" style="margin-bottom:10px;font-size:14px;color:#666;">Not connected</div>
-      <button id="ghk-connect-btn" style="padding:9px 16px;border-radius:8px;border:none;
-        background:#1f6feb;color:white;font-size:14px;margin-right:8px;margin-bottom:8px;cursor:pointer;">
-        Connect Google Drive</button>
-      <button id="ghk-save-btn" disabled style="padding:9px 16px;border-radius:8px;border:none;
-        background:#2e7d32;color:white;font-size:14px;margin-right:8px;margin-bottom:8px;cursor:pointer;
-        opacity:0.5;">☁️ Save to Drive</button>
-      <button id="ghk-restore-btn" disabled style="padding:9px 16px;border-radius:8px;border:none;
-        background:#b26a00;color:white;font-size:14px;margin-bottom:8px;cursor:pointer;opacity:0.5;">
-        ⬇️ Restore from Drive</button>
-      <div id="ghk-drive-msg" style="margin-top:6px;font-size:13px;min-height:18px;"></div>
-    </div>
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script>
+    inner_js = f"""
     (function() {{
+      // Refresh the latest ledger data every rerun, even though the panel
+      // itself (below) is only built once per page load.
+      window.__ghkCurrentDataJson = {current_data_json};
+      if (window.__ghkDriveHooked) {{ return; }}
+      window.__ghkDriveHooked = true;
+
       const CLIENT_ID = {json.dumps(GOOGLE_CLIENT_ID)};
       const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
       const FILE_NAME = {json.dumps(DRIVE_FILE_NAME)};
       const RESTORE_KEY = {json.dumps(DRIVE_RESTORE_KEY)};
-      const currentDataJson = {current_data_json};
+
+      const panel = document.createElement('div');
+      panel.id = 'ghk-drive-panel';
+      panel.style.cssText =
+        'position:fixed;left:0;right:0;bottom:0;z-index:999999;' +
+        'background:#ffffff;border-top:2px solid #1f6feb;padding:10px 14px 12px;' +
+        'font-family:-apple-system,Segoe UI,Roboto,sans-serif;' +
+        'box-shadow:0 -2px 10px rgba(0,0,0,0.15);';
+      panel.innerHTML =
+        '<div id="ghk-drive-status" style="font-size:13px;color:#666;margin-bottom:6px;">Google Drive: Not connected</div>' +
+        '<button id="ghk-connect-btn" style="padding:8px 14px;border-radius:8px;border:none;background:#1f6feb;color:#fff;font-size:13px;margin-right:6px;margin-bottom:6px;cursor:pointer;">Connect Google Drive</button>' +
+        '<button id="ghk-save-btn" disabled style="padding:8px 14px;border-radius:8px;border:none;background:#2e7d32;color:#fff;font-size:13px;margin-right:6px;margin-bottom:6px;opacity:0.5;cursor:pointer;">☁️ Save to Drive</button>' +
+        '<button id="ghk-restore-btn" disabled style="padding:8px 14px;border-radius:8px;border:none;background:#b26a00;color:#fff;font-size:13px;margin-bottom:6px;opacity:0.5;cursor:pointer;">⬇️ Restore from Drive</button>' +
+        '<button id="ghk-close-btn" style="float:right;padding:6px 10px;border-radius:8px;border:1px solid #ccc;background:#f5f5f5;color:#333;font-size:13px;cursor:pointer;">✕</button>' +
+        '<div id="ghk-drive-msg" style="font-size:12px;min-height:16px;margin-top:2px;"></div>';
+      document.body.appendChild(panel);
+      document.getElementById('ghk-close-btn').addEventListener('click', function() {{
+        panel.style.display = 'none';
+      }});
 
       const statusEl = document.getElementById('ghk-drive-status');
       const msgEl = document.getElementById('ghk-drive-msg');
@@ -228,7 +258,7 @@ def render_drive_sync(data):
       }}
       function haveValidToken() {{ return accessToken && Date.now() < tokenExpiry; }}
       function markConnected() {{
-        statusEl.textContent = 'Connected ✔';
+        statusEl.textContent = 'Google Drive: Connected ✔';
         statusEl.style.color = '#2e7d32';
         saveBtn.disabled = false; saveBtn.style.opacity = 1;
         restoreBtn.disabled = false; restoreBtn.style.opacity = 1;
@@ -237,9 +267,9 @@ def render_drive_sync(data):
       if (haveValidToken()) {{ markConnected(); }}
 
       let tokenClient = null;
-      function initTokenClient() {{
+      function bootTokenClient() {{
         if (!window.google || !google.accounts || !google.accounts.oauth2) {{
-          setTimeout(initTokenClient, 200);
+          setTimeout(bootTokenClient, 200);
           return;
         }}
         tokenClient = google.accounts.oauth2.initTokenClient({{
@@ -252,11 +282,20 @@ def render_drive_sync(data):
             window.sessionStorage.setItem('ghk_drive_token', accessToken);
             window.sessionStorage.setItem('ghk_drive_token_exp', String(tokenExpiry));
             markConnected();
-            setMsg('Google Drive se connect ho gaya ✔');
+            setMsg('Connect ho gaya ✔');
           }},
         }});
       }}
-      initTokenClient();
+      if (!document.getElementById('ghk-gis-script')) {{
+        const s = document.createElement('script');
+        s.id = 'ghk-gis-script';
+        s.src = 'https://accounts.google.com/gsi/client';
+        s.async = true; s.defer = true;
+        s.onload = bootTokenClient;
+        document.head.appendChild(s);
+      }} else {{
+        bootTokenClient();
+      }}
 
       connectBtn.addEventListener('click', function() {{
         setMsg('Connecting...');
@@ -264,7 +303,7 @@ def render_drive_sync(data):
           if (tokenClient) {{
             tokenClient.requestAccessToken({{ prompt: haveValidToken() ? '' : 'consent' }});
           }} else {{
-            setTimeout(tryRequest, 200);
+            setTimeout(tryRequest, 150);
           }}
         }};
         tryRequest();
@@ -285,19 +324,20 @@ def render_drive_sync(data):
         setMsg('Saving to Drive...');
         try {{
           const fileId = await findFileId();
+          const bodyJson = window.__ghkCurrentDataJson;
           let res;
           if (fileId) {{
             res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=media', {{
               method: 'PATCH',
               headers: {{ Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' }},
-              body: currentDataJson,
+              body: bodyJson,
             }});
           }} else {{
             const boundary = 'ghk_boundary_xyz';
             const metadata = JSON.stringify({{ name: FILE_NAME, parents: ['appDataFolder'] }});
             const body = '--' + boundary + '\\r\\nContent-Type: application/json; charset=UTF-8\\r\\n\\r\\n' +
               metadata + '\\r\\n--' + boundary + '\\r\\nContent-Type: application/json\\r\\n\\r\\n' +
-              currentDataJson + '\\r\\n--' + boundary + '--';
+              bodyJson + '\\r\\n--' + boundary + '--';
             res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {{
               method: 'POST',
               headers: {{ Authorization: 'Bearer ' + accessToken,
@@ -322,13 +362,26 @@ def render_drive_sync(data):
           if (!res.ok) {{ setMsg('Restore fail: ' + res.status, true); return; }}
           const text = await res.text();
           window.localStorage.setItem(RESTORE_KEY, text);
-          setMsg('Data mil gaya — neeche "Apply restored data" button dabayein ⬇️');
+          setMsg('Data mil gaya — Streamlit page mein "Apply restored data" button dabayein ⬇️');
         }} catch (e) {{ setMsg('Error: ' + e.message, true); }}
       }});
     }})();
-    </script>
     """
-    components.html(html, height=170, scrolling=False)
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            try {{
+                var s = window.parent.document.createElement('script');
+                s.textContent = {json.dumps(inner_js)};
+                window.parent.document.head.appendChild(s);
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
     if st.button("✅ Apply restored data from Drive"):
         st.session_state["_apply_drive_restore"] = True
@@ -360,13 +413,14 @@ def render_drive_sync(data):
                 st.session_state["_drive_restore_tries"] = tries + 1
                 st.rerun()
             else:
-                st.warning("Koi restored data nahi mila. Pehle upar 'Restore from Drive' dabayein.")
+                st.warning("Koi restored data nahi mila. Pehle neeche floating panel me 'Restore from Drive' dabayein.")
                 st.session_state["_apply_drive_restore"] = False
 
     st.caption(
-        "Pehli baar: 'Connect Google Drive' dabayein aur apne Google account se login karein "
-        "(sirf ek chhoti hidden app-folder access hoti hai, aapki asli Drive files nahi). "
-        "Uske baad 'Save to Drive' se upload aur 'Restore from Drive' se kisi bhi device par wapas laayein."
+        "Pehli baar: floating panel me 'Connect Google Drive' dabayein aur apne Google "
+        "account se login karein (sirf ek chhoti hidden app-folder access hoti hai, "
+        "aapki asli Drive files nahi). Uske baad 'Save to Drive' se upload aur "
+        "'Restore from Drive' se kisi bhi device par wapas laayein."
     )
 
 
