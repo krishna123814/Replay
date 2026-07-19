@@ -236,29 +236,29 @@ def month_label(key):
 # Styling
 # --------------------------------------------------------------------------- #
 
-def inject_css():
+def inject_css(text_scale=100):
     st.markdown(
-        """
+        f"""
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
 
-        html, body, [class*="css"]  { font-family: 'Inter', sans-serif; }
+        html, body, [class*="css"]  {{ font-family: 'Inter', sans-serif; }}
 
         /* Hide Streamlit's own chrome for a more full-screen, app-like feel */
-        #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
-        header[data-testid="stHeader"] { height: 0; visibility: hidden; }
-        [data-testid="stToolbar"] { visibility: hidden; height: 0; }
-        [data-testid="stDecoration"] { display: none; }
-        [data-testid="stStatusWidget"] { visibility: hidden; }
-        .block-container { padding-top: 1.2rem; }
+        #MainMenu {{ visibility: hidden; }}
+        footer {{ visibility: hidden; }}
+        header[data-testid="stHeader"] {{ height: 0; visibility: hidden; }}
+        [data-testid="stToolbar"] {{ visibility: hidden; height: 0; }}
+        [data-testid="stDecoration"] {{ display: none; }}
+        [data-testid="stStatusWidget"] {{ visibility: hidden; }}
+        .block-container {{ padding-top: 1.2rem; zoom: {text_scale}%; }}
 
-        .stApp {
+        .stApp {{
             background: #F6F1E7;
-        }
+        }}
 
         /* Ledger-style header */
-        .khata-header {
+        .khata-header {{
             background: #7A1F2B;
             color: #F3E3C3;
             padding: 1.4rem 1.6rem;
@@ -266,22 +266,22 @@ def inject_css():
             margin-bottom: 1.2rem;
             border-left: 8px solid #D4A017;
             box-shadow: 0 3px 10px rgba(0,0,0,0.15);
-        }
-        .khata-header h1 {
+        }}
+        .khata-header h1 {{
             font-family: 'Zilla Slab', serif;
             font-weight: 700;
             font-size: 1.9rem;
             margin: 0;
             letter-spacing: 0.3px;
-        }
-        .khata-header p {
+        }}
+        .khata-header p {{
             margin: 0.25rem 0 0 0;
             color: #E9D9AF;
             font-size: 0.92rem;
-        }
+        }}
 
         /* Ledger paper card for each account */
-        .ledger-card {
+        .ledger-card {{
             background: #FFFDF7;
             border: 1px solid #E4D8BC;
             border-left: 5px solid #7A1F2B;
@@ -289,8 +289,8 @@ def inject_css():
             padding: 1rem 1.3rem;
             margin-bottom: 1rem;
             position: relative;
-        }
-        .ledger-card::before {
+        }}
+        .ledger-card::before {{
             content: "";
             position: absolute;
             left: 46px;
@@ -298,37 +298,52 @@ def inject_css():
             bottom: 0;
             width: 1px;
             background: #E7B7B7;
-        }
+        }}
 
-        .total-figure {
+        .total-figure {{
             font-family: 'IBM Plex Mono', monospace;
             font-weight: 600;
             color: #0F5132;
             font-size: 1.6rem;
-        }
-        .total-label {
+        }}
+        .total-label {{
             font-family: 'Inter', sans-serif;
             color: #6B5B3E;
             font-size: 0.8rem;
             text-transform: uppercase;
             letter-spacing: 0.6px;
-        }
+        }}
 
-        .stButton>button {
+        /* Compact overview figures (Savings Account / Mummy Account / etc.) */
+        .overview-figure {{
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 600;
+            color: #0F5132;
+            font-size: 1.25rem;
+            margin-top: -0.4rem;
+        }}
+
+        .stButton>button {{
             border-radius: 5px;
             border: 1px solid #7A1F2B;
             color: #7A1F2B;
             font-weight: 600;
-        }
-        .stButton>button:hover {
+        }}
+        .stButton>button:hover {{
             background: #7A1F2B;
             color: #F3E3C3;
             border-color: #7A1F2B;
-        }
-        div[data-testid="stMetricValue"] {
+        }}
+        div[data-testid="stMetricValue"] {{
             font-family: 'IBM Plex Mono', monospace;
             color: #0F5132;
-        }
+        }}
+
+        /* Icon-only popover trigger buttons (Add entry) — keep them small */
+        [data-testid="stPopover"] button {{
+            padding: 0.15rem 0.6rem;
+            min-width: 0;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -340,14 +355,15 @@ def inject_css():
 # --------------------------------------------------------------------------- #
 
 def quick_add_entry(account):
-    """Small popover, shown right beside an account's total, to add an entry
-    to its most recent month without opening that account's tab."""
+    """Small icon-only popover, to add an entry to an account's most recent
+    month without opening that account's tab. Kept icon-only (no label) so
+    it takes minimal space next to the account name."""
     months = account["months"]
     existing_keys = sorted_month_keys(months)
     target_key = existing_keys[-1] if existing_keys else (
         f"{date.today().year:04d}-{date.today().month:02d}"
     )
-    with st.popover("✏️ Add entry", use_container_width=True):
+    with st.popover("✏️", help="Add entry"):
         st.caption(f"Adding to **{month_label(target_key)}**")
         desc = st.text_input("Description", key=f"qk_desc_{account['id']}")
         amt = st.number_input(
@@ -375,10 +391,21 @@ def render_overview(data):
         t = latest_total(acc)
         grand_total += t
         with col:
-            st.metric(acc["name"], f"₹ {t:,.2f}")
-            quick_add_entry(acc)
+            name_col, btn_col = st.columns([5, 1])
+            with name_col:
+                st.caption(acc["name"])
+            with btn_col:
+                quick_add_entry(acc)
+            st.markdown(
+                f'<div class="overview-figure">₹ {t:,.2f}</div>',
+                unsafe_allow_html=True,
+            )
     with cols[-1]:
-        st.metric("Family Total", f"₹ {grand_total:,.2f}")
+        st.caption("Family Total")
+        st.markdown(
+            f'<div class="overview-figure">₹ {grand_total:,.2f}</div>',
+            unsafe_allow_html=True,
+        )
 
     # Comparison chart across accounts' latest totals
     fig = go.Figure(
@@ -546,16 +573,19 @@ def render_manage_accounts(data):
 
 def main():
     st.set_page_config(page_title="Ghar Khata — Family Ledger", page_icon="📒", layout="wide")
-    inject_css()
     load_data()
 
     if "data" not in st.session_state:
+        inject_css()
         st.info("Loading your saved data from this browser...")
         st.stop()
 
     data = st.session_state.data
+    data.setdefault("settings", {"text_scale": 100})
     if "dirty" not in st.session_state:
         st.session_state.dirty = False
+
+    inject_css(data["settings"].get("text_scale", 100))
 
     st.markdown(
         """
@@ -566,6 +596,21 @@ def main():
         """,
         unsafe_allow_html=True,
     )
+
+    with st.expander("🔠 Text size"):
+        scale = st.slider(
+            "Sabhi text aur entries ka size",
+            min_value=80,
+            max_value=160,
+            step=10,
+            value=data["settings"].get("text_scale", 100),
+            format="%d%%",
+            key="text_scale_slider",
+        )
+        if scale != data["settings"].get("text_scale", 100):
+            data["settings"]["text_scale"] = scale
+            st.session_state["_pending_save_json"] = json.dumps(data)
+            st.rerun()
 
     render_overview(data)
     st.divider()
