@@ -517,6 +517,21 @@ def inject_css(text_scale=100):
             letter-spacing: 0.6px;
         }}
 
+        .addgone-label {{
+            font-family: 'Inter', sans-serif;
+            font-weight: 700;
+            font-size: 0.9rem;
+            margin-bottom: 0.3rem;
+        }}
+        .addgone-added {{ color: #0F5132; }}
+        .addgone-gaya {{ color: #7A1F2B; }}
+        .addgone-item {{
+            font-family: 'Inter', sans-serif;
+            font-size: 0.85rem;
+            color: #4A3F2A;
+            padding: 0.1rem 0;
+        }}
+
         /* Compact one-line account rows (Name  —  ₹ Amount  ✏️) */
         .acct-row {{
             display: flex;
@@ -585,14 +600,20 @@ def inject_css(text_scale=100):
             padding: 0.3rem 0;
             border-bottom: 1px solid #E7DFC9;
         }}
-        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:first-child {{
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:nth-child(1) {{
             flex: 1 1 auto !important;
             min-width: 0 !important;
         }}
-        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:last-child {{
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:nth-child(2),
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:nth-child(3) {{
             width: auto !important;
             min-width: 0 !important;
-            flex: initial !important;
+            flex: 0 0 auto !important;
+        }}
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) [data-testid="stButton"] > button {{
+            padding: 0.15rem 0.6rem;
+            min-width: 0;
+            border-radius: 6px;
         }}
         </style>
 
@@ -836,6 +857,43 @@ def render_account(account, key_prefix=""):
         months.setdefault(selected, {"entries": []})
         months[selected]["entries"] = new_entries
         st.session_state.dirty = True
+
+    added_entries = [e for e in new_entries if e["amount"] > 0]
+    gaya_entries = [e for e in new_entries if e["amount"] < 0]
+    total_added = sum(e["amount"] for e in added_entries)
+    total_gaya = sum(-e["amount"] for e in gaya_entries)
+
+    st.caption(
+        f"💡 Amount **positive** likhein toh wo entry 'Added' maana jaata hai, "
+        f"**negative** (jaise -500) likhein toh 'Gaya' — dono neeche alag dikhte hain."
+    )
+    added_col, gaya_col = st.columns(2)
+    with added_col:
+        st.markdown(
+            f'<div class="addgone-label addgone-added">➕ Added — ₹ {total_added:,.2f}</div>',
+            unsafe_allow_html=True,
+        )
+        if added_entries:
+            for e in added_entries:
+                st.markdown(
+                    f'<div class="addgone-item">{e["label"]} — ₹ {e["amount"]:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("Kuch nahi")
+    with gaya_col:
+        st.markdown(
+            f'<div class="addgone-label addgone-gaya">➖ Gaya — ₹ {total_gaya:,.2f}</div>',
+            unsafe_allow_html=True,
+        )
+        if gaya_entries:
+            for e in gaya_entries:
+                st.markdown(
+                    f'<div class="addgone-item">{e["label"]} — ₹ {-e["amount"]:,.2f}</div>',
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("Kuch nahi")
 
     total = month_total(account, selected)
     st.markdown(
