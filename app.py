@@ -166,6 +166,71 @@ def save_data():
     st.session_state["_pending_save_json"] = json.dumps(st.session_state.data)
 
 
+def inject_pwa_manifest():
+    """Make the app installable as a PWA on Android so that opening it from
+    the home-screen icon launches with ZERO taps and NO browser chrome —
+    this is the only real way to get true "opens already fullscreen"
+    behavior, because requestFullscreen() can never fire without a genuine
+    user gesture (see inject_auto_fullscreen() docstring below).
+
+    Once the user does "Add to Home screen" from Chrome once, every
+    future launch from that icon is chrome-less automatically.
+    """
+    icon_192 = "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAACDElEQVR4nO3UsQ3CUAxAQYIYgT5smIzCiPRhCBaggack+tJd6cYunjzNy3aBf13PPoCxCYhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQye34la/n/filP3ms76/zcS/fjw9EIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRTPOynX0DA/OBSAREIiASAZEIiERAJAIiERCJgEgERCIgEgGRCIhEQCQCIhEQiYBIBEQiIBIBkQiIREAkAiIREImASAREIiASAZEIiOQDcdYKc0/De0MAAAAASUVORK5CYII="
+    icon_512 = "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAIAAAB7GkOtAAAHRUlEQVR4nO3XwQnCUBRFQSOW4D52mJRiie5jEbYgZPEIZ6aAz4W3OPxl3Y4bAD336QEAzBAAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgKjH9IDr+byf0xP412v/nnzBuS/k/Llr/AAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAopZ1O6Y3ADDADwAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAon6wewzzYj9AZAAAAABJRU5ErkJggg=="
+    manifest = {
+        "name": "Ghar Khata — Family Ledger",
+        "short_name": "Ghar Khata",
+        "start_url": ".",
+        "display": "fullscreen",
+        "background_color": "#1f6feb",
+        "theme_color": "#1f6feb",
+        "icons": [
+            {"src": f"data:image/png;base64,{icon_192}", "sizes": "192x192", "type": "image/png"},
+            {"src": f"data:image/png;base64,{icon_512}", "sizes": "512x512", "type": "image/png"},
+        ],
+    }
+    manifest_json = json.dumps(manifest)
+    js = """
+    (function() {
+        if (window.__ghk_manifest_hooked) { return; }
+        window.__ghk_manifest_hooked = true;
+        try {
+            var head = document.head;
+            var link = document.createElement('link');
+            link.rel = 'manifest';
+            link.href = 'data:application/manifest+json,' + encodeURIComponent(%s);
+            head.appendChild(link);
+
+            var meta1 = document.createElement('meta');
+            meta1.name = 'mobile-web-app-capable';
+            meta1.content = 'yes';
+            head.appendChild(meta1);
+
+            var meta2 = document.createElement('meta');
+            meta2.name = 'theme-color';
+            meta2.content = '#1f6feb';
+            head.appendChild(meta2);
+        } catch (e) {}
+    })();
+    """ % json.dumps(manifest_json)
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            try {{
+                var s = window.parent.document.createElement('script');
+                s.textContent = {json.dumps(js)};
+                window.parent.document.head.appendChild(s);
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def inject_auto_fullscreen():
     """No visible fullscreen button/label anywhere on screen.
 
@@ -816,6 +881,7 @@ def main():
 
     if "data" not in st.session_state:
         inject_css()
+        inject_pwa_manifest()
         st.info("Loading your saved data from this browser...")
         st.stop()
 
@@ -829,6 +895,7 @@ def main():
 
     render_top_nav(data)
 
+    inject_pwa_manifest()
     inject_auto_fullscreen()
 
     render_overview(data)
