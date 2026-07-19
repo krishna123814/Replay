@@ -243,7 +243,13 @@ def render_drive_sync(data):
         '<button id="ghk-save-btn" disabled style="padding:8px 14px;border-radius:8px;border:none;background:#2e7d32;color:#fff;font-size:13px;margin-right:6px;margin-bottom:6px;opacity:0.5;cursor:pointer;">☁️ Save to Drive</button>' +
         '<button id="ghk-restore-btn" disabled style="padding:8px 14px;border-radius:8px;border:none;background:#b26a00;color:#fff;font-size:13px;margin-bottom:6px;opacity:0.5;cursor:pointer;">⬇️ Restore from Drive</button>' +
         '<button id="ghk-close-btn" style="float:right;padding:6px 10px;border-radius:8px;border:1px solid #ccc;background:#f5f5f5;color:#333;font-size:13px;cursor:pointer;">✕</button>' +
-        '<div id="ghk-drive-msg" style="font-size:12px;min-height:16px;margin-top:2px;"></div>';
+        '<div id="ghk-drive-msg" style="font-size:12px;min-height:16px;margin-top:2px;"></div>' +
+        '<div style="margin-top:6px;">' +
+        '<button id="ghk-debug-toggle" style="padding:5px 10px;border-radius:6px;border:1px solid #ccc;background:#fafafa;color:#555;font-size:11px;cursor:pointer;">🐞 Debug log</button> ' +
+        '<button id="ghk-debug-copy" style="padding:5px 10px;border-radius:6px;border:1px solid #ccc;background:#fafafa;color:#555;font-size:11px;cursor:pointer;">📋 Copy log</button>' +
+        '</div>' +
+        '<pre id="ghk-debug-log" style="display:none;max-height:160px;overflow:auto;background:#111;color:#0f0;' +
+        'font-size:10px;line-height:1.4;padding:6px;border-radius:6px;margin-top:6px;white-space:pre-wrap;word-break:break-all;"></pre>';
       document.body.appendChild(panel);
       document.getElementById('ghk-close-btn').addEventListener('click', function() {{
         panel.style.display = 'none';
@@ -254,9 +260,64 @@ def render_drive_sync(data):
       const connectBtn = document.getElementById('ghk-connect-btn');
       const saveBtn = document.getElementById('ghk-save-btn');
       const restoreBtn = document.getElementById('ghk-restore-btn');
+      const debugLogEl = document.getElementById('ghk-debug-log');
+      const debugToggleBtn = document.getElementById('ghk-debug-toggle');
+      const debugCopyBtn = document.getElementById('ghk-debug-copy');
+
+      window.__ghkLog = window.__ghkLog || [];
+      function log(msg) {{
+        const t = new Date().toISOString().slice(11, 19);
+        const line = '[' + t + '] ' + msg;
+        window.__ghkLog.push(line);
+        if (debugLogEl) {{
+          debugLogEl.textContent += line + '\\n';
+          debugLogEl.scrollTop = debugLogEl.scrollHeight;
+        }}
+        try {{ console.log('[GhK Drive]', msg); }} catch (e) {{}}
+      }}
+      debugToggleBtn.addEventListener('click', function() {{
+        debugLogEl.style.display = debugLogEl.style.display === 'none' ? 'block' : 'none';
+      }});
+      debugCopyBtn.addEventListener('click', function() {{
+        const text = window.__ghkLog.join('\\n') || '(log khali hai)';
+        function fallbackCopy() {{
+          // execCommand fallback — works even when the async Clipboard API
+          // is blocked/unsupported (common in some mobile browser contexts).
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.top = '-9999px';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          ta.setSelectionRange(0, text.length);
+          let ok = false;
+          try {{ ok = document.execCommand('copy'); }} catch (e) {{ ok = false; }}
+          document.body.removeChild(ta);
+          if (ok) {{
+            setMsg('Log copied — paste karke bhej dein.', false);
+          }} else {{
+            debugLogEl.style.display = 'block';
+            setMsg('Copy fail — log khud select karke copy karein (neeche khul gaya).', true);
+          }}
+        }}
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+          navigator.clipboard.writeText(text).then(
+            function() {{ setMsg('Log copied — paste karke bhej dein.', false); }},
+            function() {{ fallbackCopy(); }}
+          );
+        }} else {{
+          fallbackCopy();
+        }}
+      }});
+
+      log('Panel loaded. origin=' + window.location.origin + ' UA=' + navigator.userAgent.slice(0, 80));
+      log('window.opener=' + (window.opener ? 'present' : 'null') + ' isSecureContext=' + window.isSecureContext);
 
       let accessToken = window.sessionStorage.getItem('ghk_drive_token') || null;
       let tokenExpiry = parseInt(window.sessionStorage.getItem('ghk_drive_token_exp') || '0', 10);
+      if (accessToken) {{ log('Found existing token in sessionStorage, expiry=' + new Date(tokenExpiry).toISOString()); }}
 
       function setMsg(text, isError) {{
         msgEl.style.color = isError ? '#b3261e' : '#2e7d32';
@@ -270,57 +331,87 @@ def render_drive_sync(data):
         restoreBtn.disabled = false; restoreBtn.style.opacity = 1;
         connectBtn.textContent = 'Reconnect';
       }}
-      if (haveValidToken()) {{ markConnected(); }}
+      if (haveValidToken()) {{ markConnected(); log('Valid token already present — marked connected without new login.'); }}
 
       let tokenClient = null;
+      let gisBootAttempts = 0;
       function bootTokenClient() {{
         if (!window.google || !google.accounts || !google.accounts.oauth2) {{
+          gisBootAttempts++;
+          if (gisBootAttempts === 1 || gisBootAttempts % 10 === 0) {{
+            log('Waiting for GIS library... attempt ' + gisBootAttempts +
+                ' (window.google=' + (!!window.google) + ')');
+          }}
+          if (gisBootAttempts > 100) {{
+            log('ERROR: GIS library never became available after 100 attempts (~20s). ' +
+                'gsi/client script may be blocked (ad-blocker, network, or CSP).');
+            setMsg('Google login library load nahi hui — network/ad-blocker check karein.', true);
+            return;
+          }}
           setTimeout(bootTokenClient, 200);
           return;
         }}
-        tokenClient = google.accounts.oauth2.initTokenClient({{
-          client_id: CLIENT_ID,
-          scope: SCOPE,
-          callback: (resp) => {{
-            window.__ghkConnecting = false;
-            if (resp.error) {{ setMsg('Login fail: ' + resp.error, true); return; }}
-            accessToken = resp.access_token;
-            tokenExpiry = Date.now() + (resp.expires_in * 1000) - 30000;
-            window.sessionStorage.setItem('ghk_drive_token', accessToken);
-            window.sessionStorage.setItem('ghk_drive_token_exp', String(tokenExpiry));
-            markConnected();
-            setMsg('Connect ho gaya ✔');
-          }},
-          error_callback: (err) => {{
-            // Fires when the popup itself fails (blocked, closed early, or
-            // the browser severed window.opener so GIS can't deliver the
-            // token back — common on mobile Chrome / Cross-Origin-Opener-
-            // Policy issues). Without this, the UI just silently stayed
-            // "Not connected" with zero explanation.
-            window.__ghkConnecting = false;
-            const t = (err && err.type) || 'unknown';
-            setMsg('Popup issue (' + t + '). Try: allow popups for this site, ' +
-                   'or open in a normal (non-incognito) tab and retry.', true);
-          }},
-        }});
+        try {{
+          tokenClient = google.accounts.oauth2.initTokenClient({{
+            client_id: CLIENT_ID,
+            scope: SCOPE,
+            callback: (resp) => {{
+              window.__ghkConnecting = false;
+              if (resp.error) {{
+                log('TOKEN CALLBACK ERROR: ' + resp.error + ' | ' + (resp.error_description || ''));
+                setMsg('Login fail: ' + resp.error, true);
+                return;
+              }}
+              log('TOKEN CALLBACK SUCCESS: received access_token, expires_in=' + resp.expires_in);
+              accessToken = resp.access_token;
+              tokenExpiry = Date.now() + (resp.expires_in * 1000) - 30000;
+              window.sessionStorage.setItem('ghk_drive_token', accessToken);
+              window.sessionStorage.setItem('ghk_drive_token_exp', String(tokenExpiry));
+              markConnected();
+              setMsg('Connect ho gaya ✔');
+            }},
+            error_callback: (err) => {{
+              // Fires when the popup itself fails (blocked, closed early, or
+              // the browser severed window.opener so GIS can't deliver the
+              // token back — common on mobile Chrome / Cross-Origin-Opener-
+              // Policy issues). Without this, the UI just silently stayed
+              // "Not connected" with zero explanation.
+              window.__ghkConnecting = false;
+              const t = (err && err.type) || 'unknown';
+              log('ERROR_CALLBACK fired: type=' + t + ' full=' + JSON.stringify(err));
+              setMsg('Popup issue (' + t + '). Try: allow popups for this site, ' +
+                     'or open in a normal (non-incognito) tab and retry.', true);
+            }},
+          }});
+          log('tokenClient initialized OK.');
+        }} catch (e) {{
+          log('EXCEPTION during initTokenClient: ' + e.message);
+          setMsg('Setup error: ' + e.message, true);
+        }}
       }}
       if (!document.getElementById('ghk-gis-script')) {{
+        log('Injecting GIS script tag (gsi/client)...');
         const s = document.createElement('script');
         s.id = 'ghk-gis-script';
         s.src = 'https://accounts.google.com/gsi/client';
         s.async = true; s.defer = true;
-        s.onload = bootTokenClient;
+        s.onload = function() {{ log('GIS script onload fired.'); bootTokenClient(); }};
+        s.onerror = function() {{ log('ERROR: GIS script failed to load (network/CSP/ad-blocker).'); setMsg('Google script load fail hui.', true); }};
         document.head.appendChild(s);
       }} else {{
+        log('GIS script tag already present, booting token client directly.');
         bootTokenClient();
       }}
 
       connectBtn.addEventListener('click', function() {{
+        log('Connect button clicked. tokenClient ready=' + (!!tokenClient) + ' haveValidToken=' + haveValidToken());
         setMsg('Connecting...');
         window.__ghkConnecting = true;
         setTimeout(function() {{
           if (window.__ghkConnecting) {{
             window.__ghkConnecting = false;
+            log('WATCHDOG: 15s passed with no callback/error_callback at all — token client is ' +
+                'completely silent. Strong sign of window.opener / COOP being blocked by the browser.');
             setMsg(
               'Google se koi reply nahi aaya (15 sec). Ye aksar tab hota hai jab ' +
               'popup band ho gaya par browser wapas token deliver nahi kar paaya. ' +
@@ -331,8 +422,16 @@ def render_drive_sync(data):
         }}, 15000);
         const tryRequest = () => {{
           if (tokenClient) {{
-            tokenClient.requestAccessToken({{ prompt: haveValidToken() ? '' : 'consent' }});
+            log('Calling tokenClient.requestAccessToken() with prompt=' + (haveValidToken() ? '(empty)' : 'consent'));
+            try {{
+              tokenClient.requestAccessToken({{ prompt: haveValidToken() ? '' : 'consent' }});
+            }} catch (e) {{
+              window.__ghkConnecting = false;
+              log('EXCEPTION calling requestAccessToken: ' + e.message);
+              setMsg('Error: ' + e.message, true);
+            }}
           }} else {{
+            log('tokenClient not ready yet, retrying in 150ms...');
             setTimeout(tryRequest, 150);
           }}
         }};
@@ -340,16 +439,21 @@ def render_drive_sync(data):
       }});
 
       async function findFileId() {{
+        log('findFileId: querying appDataFolder for ' + FILE_NAME);
         const res = await fetch(
           'https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=' +
           encodeURIComponent("name='" + FILE_NAME + "'") + '&fields=files(id)',
           {{ headers: {{ Authorization: 'Bearer ' + accessToken }} }}
         );
+        if (!res.ok) {{ log('findFileId: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 150)); }}
         const j = await res.json();
-        return (j.files && j.files.length > 0) ? j.files[0].id : null;
+        const id = (j.files && j.files.length > 0) ? j.files[0].id : null;
+        log('findFileId: result=' + (id || 'none found'));
+        return id;
       }}
 
       saveBtn.addEventListener('click', async function() {{
+        log('Save to Drive clicked. haveValidToken=' + haveValidToken());
         if (!haveValidToken()) {{ setMsg('Pehle Connect karein.', true); return; }}
         setMsg('Saving to Drive...');
         try {{
@@ -357,12 +461,14 @@ def render_drive_sync(data):
           const bodyJson = window.__ghkCurrentDataJson;
           let res;
           if (fileId) {{
+            log('Save: PATCHing existing file ' + fileId);
             res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=media', {{
               method: 'PATCH',
               headers: {{ Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' }},
               body: bodyJson,
             }});
           }} else {{
+            log('Save: creating new file via multipart POST');
             const boundary = 'ghk_boundary_xyz';
             const metadata = JSON.stringify({{ name: FILE_NAME, parents: ['appDataFolder'] }});
             const body = '--' + boundary + '\\r\\nContent-Type: application/json; charset=UTF-8\\r\\n\\r\\n' +
@@ -375,25 +481,29 @@ def render_drive_sync(data):
               body: body,
             }});
           }}
+          log('Save response: HTTP ' + res.status);
           if (res.ok) {{ setMsg('Google Drive par save ho gaya ✔'); }}
-          else {{ const t = await res.text(); setMsg('Save fail: ' + res.status + ' ' + t.slice(0,150), true); }}
-        }} catch (e) {{ setMsg('Error: ' + e.message, true); }}
+          else {{ const t = await res.text(); log('Save fail body: ' + t.slice(0, 200)); setMsg('Save fail: ' + res.status + ' ' + t.slice(0,150), true); }}
+        }} catch (e) {{ log('EXCEPTION during save: ' + e.message); setMsg('Error: ' + e.message, true); }}
       }});
 
       restoreBtn.addEventListener('click', async function() {{
+        log('Restore from Drive clicked. haveValidToken=' + haveValidToken());
         if (!haveValidToken()) {{ setMsg('Pehle Connect karein.', true); return; }}
         setMsg('Restoring from Drive...');
         try {{
           const fileId = await findFileId();
-          if (!fileId) {{ setMsg('Drive par abhi koi saved file nahi mili.', true); return; }}
+          if (!fileId) {{ log('Restore: no file found in appDataFolder.'); setMsg('Drive par abhi koi saved file nahi mili.', true); return; }}
           const res = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media', {{
             headers: {{ Authorization: 'Bearer ' + accessToken }},
           }});
+          log('Restore fetch response: HTTP ' + res.status);
           if (!res.ok) {{ setMsg('Restore fail: ' + res.status, true); return; }}
           const text = await res.text();
+          log('Restore: got ' + text.length + ' chars, writing to localStorage key=' + RESTORE_KEY);
           window.localStorage.setItem(RESTORE_KEY, text);
           setMsg('Data mil gaya — Streamlit page mein "Apply restored data" button dabayein ⬇️');
-        }} catch (e) {{ setMsg('Error: ' + e.message, true); }}
+        }} catch (e) {{ log('EXCEPTION during restore: ' + e.message); setMsg('Error: ' + e.message, true); }}
       }});
     }})();
     """
