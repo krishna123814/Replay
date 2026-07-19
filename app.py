@@ -171,38 +171,53 @@ def inject_auto_fullscreen():
 
     Important browser rule: a page cannot go fullscreen the instant it
     loads, with zero taps — requestFullscreen() only works when it's
-    called synchronously inside a real user gesture (a click/tap).
-    Every browser enforces this for security, so nothing (Streamlit or
-    otherwise) can truly auto-fullscreen on load with no interaction at
-    all.
+    called synchronously inside a real user gesture (a click/tap), and
+    only when that call happens in the actual top-level page's own
+    script context. Every browser enforces this for security, so
+    nothing (Streamlit or otherwise) can truly auto-fullscreen on load
+    with no interaction at all.
 
-    The closest real equivalent, and what this does: attach one
-    invisible, one-time listener on the very first tap/click ANYWHERE
-    on the page. The moment the user touches the screen at all, it
-    silently requests fullscreen right there and then removes itself.
-    So in practice it feels automatic — there's no button to press.
+    Why the previous version didn't work: streamlit_js_eval / components
+    run inside a separate iframe. Even when that iframe's script called
+    window.parent.document.documentElement.requestFullscreen(), browsers
+    evaluate the user-gesture / permission check against the *calling
+    frame*, not just the target document — so the request from inside a
+    nested iframe gets silently rejected.
+
+    Fix: instead of running the code inside the iframe, we build a real
+    <script> tag and insert it directly into the parent page's own DOM
+    (createElement + appendChild — this is the one way an injected
+    script tag actually executes, unlike innerHTML). That script then
+    runs as genuine top-level page code, so the first tap/click
+    anywhere on the page triggers real fullscreen, no button needed.
+    """
+    js = """
+    (function() {
+        if (window.__ghk_fs_hooked) { return; }
+        window.__ghk_fs_hooked = true;
+        function goFullscreen() {
+            try {
+                var el = document.documentElement;
+                if (el.requestFullscreen) { el.requestFullscreen().catch(function(){}); }
+                else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); }
+            } catch (e) {}
+            document.removeEventListener('click', goFullscreen, true);
+            document.removeEventListener('touchend', goFullscreen, true);
+        }
+        document.addEventListener('click', goFullscreen, true);
+        document.addEventListener('touchend', goFullscreen, true);
+    })();
     """
     components.html(
-        """
+        f"""
         <script>
-        (function() {
-            if (window.parent.__ghk_fs_hooked) { return; }
-            window.parent.__ghk_fs_hooked = true;
-            function goFullscreen() {
-                try {
-                    var el = window.parent.document.documentElement;
-                    if (el.requestFullscreen) {
-                        el.requestFullscreen().catch(function(){});
-                    } else if (el.webkitRequestFullscreen) {
-                        el.webkitRequestFullscreen();
-                    }
-                } catch (e) {}
-                window.parent.document.removeEventListener('click', goFullscreen, true);
-                window.parent.document.removeEventListener('touchend', goFullscreen, true);
-            }
-            window.parent.document.addEventListener('click', goFullscreen, true);
-            window.parent.document.addEventListener('touchend', goFullscreen, true);
-        })();
+        (function() {{
+            try {{
+                var s = window.parent.document.createElement('script');
+                s.textContent = {json.dumps(js)};
+                window.parent.document.body.appendChild(s);
+            }} catch (e) {{}}
+        }})();
         </script>
         """,
         height=0,
@@ -212,28 +227,54 @@ def inject_auto_fullscreen():
 def hide_manage_app_badge():
     """Hide Streamlit Community Cloud's floating "Manage app" badge, which
     only the app's owner sees when signed in — visitors never see it.
-    Runs unconditionally (no user gesture needed for this one).
+
+    Same fix as above: the script now runs directly in the parent
+    page's own DOM (not the component iframe), and keeps re-checking
+    with a MutationObserver + interval, since Streamlit Cloud can
+    (re)inject that badge after our first pass already ran.
     """
-    js_code = """
+    js = """
     (function() {
-        try {
-            document.querySelectorAll('*').forEach(function(n) {
-                if (n.children.length === 0 && n.textContent &&
-                    n.textContent.trim() === 'Manage app') {
-                    var node = n;
-                    for (var i = 0; i < 6 && node; i++) {
-                        node = node.parentElement;
-                        if (node && node.getBoundingClientRect().height < 140) {
-                            node.style.display = 'none';
+        if (window.__ghk_badge_hooked) { return; }
+        window.__ghk_badge_hooked = true;
+        function hideBadge() {
+            try {
+                document.querySelectorAll('*').forEach(function(n) {
+                    if (n.children.length === 0 && n.textContent &&
+                        n.textContent.trim() === 'Manage app') {
+                        var node = n;
+                        for (var i = 0; i < 6 && node; i++) {
+                            node = node.parentElement;
+                            if (node && node.getBoundingClientRect().height < 140) {
+                                node.style.display = 'none';
+                            }
                         }
                     }
-                }
-            });
+                });
+            } catch (e) {}
+        }
+        hideBadge();
+        try {
+            var obs = new MutationObserver(hideBadge);
+            obs.observe(document.body, {childList: true, subtree: true});
         } catch (e) {}
-        return 'badge-done';
+        setInterval(hideBadge, 1500);
     })();
     """
-    streamlit_js_eval(js_expressions=js_code, key="hide_manage_app_badge", want_output=False)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            try {{
+                var s = window.parent.document.createElement('script');
+                s.textContent = {json.dumps(js)};
+                window.parent.document.body.appendChild(s);
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -332,7 +373,7 @@ def inject_css(text_scale=100):
            very top of the viewport, grey background, a clean horizontal
            border line underneath. Everything else stays a normal
            scrollable page below it. */
-        div:has(> div.top-nav-marker) ~ div[data-testid="stHorizontalBlock"] {{
+        div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) {{
             position: fixed;
             top: 0;
             left: 0;
@@ -347,7 +388,7 @@ def inject_css(text_scale=100):
             align-items: center !important;
             flex-wrap: nowrap !important;
         }}
-        div:has(> div.top-nav-marker) ~ div[data-testid="stHorizontalBlock"] [data-testid="stPopover"] > button {{
+        div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) [data-testid="stPopover"] > button {{
             border-radius: 50%;
             width: 42px;
             height: 42px;
@@ -468,18 +509,18 @@ def inject_css(text_scale=100):
            default once they get too narrow, this overrides that just for
            these rows. The text column grows to fill the row; the icon
            column stays compact on the right. */
-        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] {{
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) {{
             flex-wrap: nowrap !important;
             align-items: center !important;
             gap: 0.5rem !important;
             padding: 0.3rem 0;
             border-bottom: 1px solid #E7DFC9;
         }}
-        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div:first-child {{
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:first-child {{
             flex: 1 1 auto !important;
             min-width: 0 !important;
         }}
-        div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div:last-child {{
+        div[data-testid="stHorizontalBlock"]:has(div.ov-row-marker) > div:last-child {{
             width: auto !important;
             min-width: 0 !important;
             flex: initial !important;
@@ -501,10 +542,10 @@ def render_top_nav(data):
     no screen or functionality behind it yet. A settings gear sits in the
     right corner and holds the text-size control.
     """
-    st.markdown('<div class="top-nav-marker"></div>', unsafe_allow_html=True)
     icon_col, exp_col, spacer_col, settings_col = st.columns([1, 1, 6, 1])
     with icon_col:
         st.markdown(
+            '<div class="top-nav-marker"></div>'
             '<div class="nav-icon nav-icon-active" title="Family Saving">💰</div>',
             unsafe_allow_html=True,
         )
@@ -580,10 +621,10 @@ def render_overview(data):
     for acc in accounts:
         t = latest_total(acc)
         grand_total += t
-        st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
         text_col, edit_col = st.columns([8, 1], gap="small")
         with text_col:
             st.markdown(
+                f'<div class="ov-row-marker"></div>'
                 f'<div class="acct-row">'
                 f'<span class="acct-row-label">{acc["name"]}</span>'
                 f'<span class="acct-row-figure">₹ {t:,.2f}</span>'
@@ -593,7 +634,6 @@ def render_overview(data):
         with edit_col:
             quick_add_entry(acc)
 
-    st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="acct-row acct-row-total">'
         f'<span class="acct-row-label">Family Total</span>'
