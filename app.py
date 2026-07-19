@@ -53,20 +53,17 @@ MAX_LOAD_RETRIES = 3  # streamlit-local-storage needs a couple of reruns
 # Uses Google Identity Services (browser-side OAuth token flow) + the Drive
 # API's private "appDataFolder" — a hidden folder only this app can see, not
 # the user's regular Drive files. No client secret is needed for this flow.
-# Values are read from Streamlit Cloud's "Secrets" (st.secrets) so they don't
-# have to live in the source code; falls back to hardcoded values for local
-# testing if secrets aren't configured.
+# Values are read ONLY from Streamlit Cloud's "Secrets" (st.secrets) —
+# nothing sensitive is hardcoded in this file. Set these under your app's
+# Settings → Secrets on Streamlit Cloud:
+#   GOOGLE_CLIENT_ID = "your-client-id.apps.googleusercontent.com"
+#   GOOGLE_API_KEY = "your-api-key"
 try:
-    GOOGLE_CLIENT_ID = st.secrets.get(
-        "GOOGLE_CLIENT_ID",
-        "585903901756-7eldm0nsmhnvomra9393qcjngjajvu92.apps.googleusercontent.com",
-    )
-    GOOGLE_API_KEY = st.secrets.get(
-        "GOOGLE_API_KEY", "AIzaSyDqbpt6CzWF8RLW7iaX7cVqrvKXWY2Qoac"
-    )
+    GOOGLE_CLIENT_ID = st.secrets.get("GOOGLE_CLIENT_ID", "")
+    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
 except Exception:
-    GOOGLE_CLIENT_ID = "585903901756-7eldm0nsmhnvomra9393qcjngjajvu92.apps.googleusercontent.com"
-    GOOGLE_API_KEY = "AIzaSyDqbpt6CzWF8RLW7iaX7cVqrvKXWY2Qoac"
+    GOOGLE_CLIENT_ID = ""
+    GOOGLE_API_KEY = ""
 DRIVE_FILE_NAME = "ghar_khata_data_v1.json"
 DRIVE_RESTORE_KEY = "ghar_khata_drive_restore_payload"  # bridge key used to
                                                           # hand restored JSON
@@ -204,6 +201,15 @@ def render_drive_sync(data):
     page, so Google sees a genuine top-level sign-in, not an iframe one.
     """
     st.markdown("### ☁️ Google Drive Sync")
+
+    if not GOOGLE_CLIENT_ID:
+        st.info(
+            "Google Drive sync abhi setup nahi hai — Streamlit Cloud app ke "
+            "**Settings → Secrets** mein `GOOGLE_CLIENT_ID` aur `GOOGLE_API_KEY` "
+            "daalne ke baad ye section active ho jayega."
+        )
+        return
+
     st.caption(
         "Screen ke sabse neeche ek floating panel dikhega — 'Connect Google Drive' "
         "se login karein, phir 'Save to Drive' / 'Restore from Drive' use karein."
