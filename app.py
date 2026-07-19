@@ -49,6 +49,17 @@ STORAGE_KEY = "ghar_khata_data_v1"
 MAX_LOAD_RETRIES = 3  # streamlit-local-storage needs a couple of reruns
                        # before the value actually comes back from the browser
 
+# --- Google Drive sync (optional) ------------------------------------------
+# Uses Google Identity Services (browser-side OAuth token flow) + the Drive
+# API's private "appDataFolder" — a hidden folder only this app can see, not
+# the user's regular Drive files. No client secret is needed for this flow.
+GOOGLE_CLIENT_ID = "585903901756-7eldm0nsmhnvomra9393qcjngjajvu92.apps.googleusercontent.com"
+GOOGLE_API_KEY = "AIzaSyDqbpt6CzWF8RLW7iaX7cVqrvKXWY2Qoac"
+DRIVE_FILE_NAME = "ghar_khata_data_v1.json"
+DRIVE_RESTORE_KEY = "ghar_khata_drive_restore_payload"  # bridge key used to
+                                                          # hand restored JSON
+                                                          # from JS back to Python
+
 MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
@@ -164,6 +175,199 @@ def run_pending_save():
 def save_data():
     """Queue the current session_state.data to be written to localStorage."""
     st.session_state["_pending_save_json"] = json.dumps(st.session_state.data)
+
+
+def render_drive_sync(data):
+    """Optional Google Drive sync — connect once, then Save/Restore the whole
+    ledger as a single JSON file in the app's private, hidden Drive folder
+    (appDataFolder). This never touches the rest of the user's Drive.
+    """
+    st.markdown("### ☁️ Google Drive Sync")
+    st.caption(
+        "Google account connect karke data Drive ki private app-folder mein "
+        "save/restore karein — kisi bhi device/browser se access ho jayega."
+    )
+
+    current_data_json = json.dumps(json.dumps(data))  # embed as a JS string literal
+
+    html = f"""
+    <div id="ghk-drive-widget" style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;">
+      <div id="ghk-drive-status" style="margin-bottom:10px;font-size:14px;color:#666;">Not connected</div>
+      <button id="ghk-connect-btn" style="padding:9px 16px;border-radius:8px;border:none;
+        background:#1f6feb;color:white;font-size:14px;margin-right:8px;margin-bottom:8px;cursor:pointer;">
+        Connect Google Drive</button>
+      <button id="ghk-save-btn" disabled style="padding:9px 16px;border-radius:8px;border:none;
+        background:#2e7d32;color:white;font-size:14px;margin-right:8px;margin-bottom:8px;cursor:pointer;
+        opacity:0.5;">☁️ Save to Drive</button>
+      <button id="ghk-restore-btn" disabled style="padding:9px 16px;border-radius:8px;border:none;
+        background:#b26a00;color:white;font-size:14px;margin-bottom:8px;cursor:pointer;opacity:0.5;">
+        ⬇️ Restore from Drive</button>
+      <div id="ghk-drive-msg" style="margin-top:6px;font-size:13px;min-height:18px;"></div>
+    </div>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+    (function() {{
+      const CLIENT_ID = {json.dumps(GOOGLE_CLIENT_ID)};
+      const SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+      const FILE_NAME = {json.dumps(DRIVE_FILE_NAME)};
+      const RESTORE_KEY = {json.dumps(DRIVE_RESTORE_KEY)};
+      const currentDataJson = {current_data_json};
+
+      const statusEl = document.getElementById('ghk-drive-status');
+      const msgEl = document.getElementById('ghk-drive-msg');
+      const connectBtn = document.getElementById('ghk-connect-btn');
+      const saveBtn = document.getElementById('ghk-save-btn');
+      const restoreBtn = document.getElementById('ghk-restore-btn');
+
+      let accessToken = window.sessionStorage.getItem('ghk_drive_token') || null;
+      let tokenExpiry = parseInt(window.sessionStorage.getItem('ghk_drive_token_exp') || '0', 10);
+
+      function setMsg(text, isError) {{
+        msgEl.style.color = isError ? '#b3261e' : '#2e7d32';
+        msgEl.textContent = text;
+      }}
+      function haveValidToken() {{ return accessToken && Date.now() < tokenExpiry; }}
+      function markConnected() {{
+        statusEl.textContent = 'Connected ✔';
+        statusEl.style.color = '#2e7d32';
+        saveBtn.disabled = false; saveBtn.style.opacity = 1;
+        restoreBtn.disabled = false; restoreBtn.style.opacity = 1;
+        connectBtn.textContent = 'Reconnect';
+      }}
+      if (haveValidToken()) {{ markConnected(); }}
+
+      let tokenClient = null;
+      function initTokenClient() {{
+        if (!window.google || !google.accounts || !google.accounts.oauth2) {{
+          setTimeout(initTokenClient, 200);
+          return;
+        }}
+        tokenClient = google.accounts.oauth2.initTokenClient({{
+          client_id: CLIENT_ID,
+          scope: SCOPE,
+          callback: (resp) => {{
+            if (resp.error) {{ setMsg('Login fail: ' + resp.error, true); return; }}
+            accessToken = resp.access_token;
+            tokenExpiry = Date.now() + (resp.expires_in * 1000) - 30000;
+            window.sessionStorage.setItem('ghk_drive_token', accessToken);
+            window.sessionStorage.setItem('ghk_drive_token_exp', String(tokenExpiry));
+            markConnected();
+            setMsg('Google Drive se connect ho gaya ✔');
+          }},
+        }});
+      }}
+      initTokenClient();
+
+      connectBtn.addEventListener('click', function() {{
+        setMsg('Connecting...');
+        const tryRequest = () => {{
+          if (tokenClient) {{
+            tokenClient.requestAccessToken({{ prompt: haveValidToken() ? '' : 'consent' }});
+          }} else {{
+            setTimeout(tryRequest, 200);
+          }}
+        }};
+        tryRequest();
+      }});
+
+      async function findFileId() {{
+        const res = await fetch(
+          'https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=' +
+          encodeURIComponent("name='" + FILE_NAME + "'") + '&fields=files(id)',
+          {{ headers: {{ Authorization: 'Bearer ' + accessToken }} }}
+        );
+        const j = await res.json();
+        return (j.files && j.files.length > 0) ? j.files[0].id : null;
+      }}
+
+      saveBtn.addEventListener('click', async function() {{
+        if (!haveValidToken()) {{ setMsg('Pehle Connect karein.', true); return; }}
+        setMsg('Saving to Drive...');
+        try {{
+          const fileId = await findFileId();
+          let res;
+          if (fileId) {{
+            res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=media', {{
+              method: 'PATCH',
+              headers: {{ Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' }},
+              body: currentDataJson,
+            }});
+          }} else {{
+            const boundary = 'ghk_boundary_xyz';
+            const metadata = JSON.stringify({{ name: FILE_NAME, parents: ['appDataFolder'] }});
+            const body = '--' + boundary + '\\r\\nContent-Type: application/json; charset=UTF-8\\r\\n\\r\\n' +
+              metadata + '\\r\\n--' + boundary + '\\r\\nContent-Type: application/json\\r\\n\\r\\n' +
+              currentDataJson + '\\r\\n--' + boundary + '--';
+            res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {{
+              method: 'POST',
+              headers: {{ Authorization: 'Bearer ' + accessToken,
+                          'Content-Type': 'multipart/related; boundary=' + boundary }},
+              body: body,
+            }});
+          }}
+          if (res.ok) {{ setMsg('Google Drive par save ho gaya ✔'); }}
+          else {{ const t = await res.text(); setMsg('Save fail: ' + res.status + ' ' + t.slice(0,150), true); }}
+        }} catch (e) {{ setMsg('Error: ' + e.message, true); }}
+      }});
+
+      restoreBtn.addEventListener('click', async function() {{
+        if (!haveValidToken()) {{ setMsg('Pehle Connect karein.', true); return; }}
+        setMsg('Restoring from Drive...');
+        try {{
+          const fileId = await findFileId();
+          if (!fileId) {{ setMsg('Drive par abhi koi saved file nahi mili.', true); return; }}
+          const res = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media', {{
+            headers: {{ Authorization: 'Bearer ' + accessToken }},
+          }});
+          if (!res.ok) {{ setMsg('Restore fail: ' + res.status, true); return; }}
+          const text = await res.text();
+          window.localStorage.setItem(RESTORE_KEY, text);
+          setMsg('Data mil gaya — neeche "Apply restored data" button dabayein ⬇️');
+        }} catch (e) {{ setMsg('Error: ' + e.message, true); }}
+      }});
+    }})();
+    </script>
+    """
+    components.html(html, height=170, scrolling=False)
+
+    if st.button("✅ Apply restored data from Drive"):
+        st.session_state["_apply_drive_restore"] = True
+        st.session_state["_drive_restore_tries"] = 0
+        st.rerun()
+
+    if st.session_state.get("_apply_drive_restore"):
+        raw = streamlit_js_eval(
+            js_expressions=f"localStorage.getItem({json.dumps(DRIVE_RESTORE_KEY)})",
+            key=f"ghk_read_drive_restore_{st.session_state.get('_drive_restore_tries', 0)}",
+            want_output=True,
+        )
+        if raw:
+            try:
+                st.session_state.data = json.loads(raw)
+                st.session_state.dirty = True
+                st.session_state["_apply_drive_restore"] = False
+                st.success(
+                    "Drive se data restore ho gaya! Ab neeche 'Save to browser storage' "
+                    "bhi dabakar isko is browser mein bhi save kar lein."
+                )
+                st.rerun()
+            except (json.JSONDecodeError, TypeError):
+                st.error("Restored data padhne mein error aayi — dobara 'Restore from Drive' try karein.")
+                st.session_state["_apply_drive_restore"] = False
+        else:
+            tries = st.session_state.get("_drive_restore_tries", 0)
+            if tries < MAX_LOAD_RETRIES:
+                st.session_state["_drive_restore_tries"] = tries + 1
+                st.rerun()
+            else:
+                st.warning("Koi restored data nahi mila. Pehle upar 'Restore from Drive' dabayein.")
+                st.session_state["_apply_drive_restore"] = False
+
+    st.caption(
+        "Pehli baar: 'Connect Google Drive' dabayein aur apne Google account se login karein "
+        "(sirf ek chhoti hidden app-folder access hoti hai, aapki asli Drive files nahi). "
+        "Uske baad 'Save to Drive' se upload aur 'Restore from Drive' se kisi bhi device par wapas laayein."
+    )
 
 
 def inject_pwa_manifest():
@@ -1006,6 +1210,9 @@ def main():
 
     st.divider()
     render_manage_accounts(data)
+
+    st.divider()
+    render_drive_sync(data)
 
     st.divider()
     save_col, status_col = st.columns([1, 3])
