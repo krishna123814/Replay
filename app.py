@@ -282,6 +282,7 @@ def render_drive_sync(data):
           client_id: CLIENT_ID,
           scope: SCOPE,
           callback: (resp) => {{
+            window.__ghkConnecting = false;
             if (resp.error) {{ setMsg('Login fail: ' + resp.error, true); return; }}
             accessToken = resp.access_token;
             tokenExpiry = Date.now() + (resp.expires_in * 1000) - 30000;
@@ -289,6 +290,17 @@ def render_drive_sync(data):
             window.sessionStorage.setItem('ghk_drive_token_exp', String(tokenExpiry));
             markConnected();
             setMsg('Connect ho gaya ✔');
+          }},
+          error_callback: (err) => {{
+            // Fires when the popup itself fails (blocked, closed early, or
+            // the browser severed window.opener so GIS can't deliver the
+            // token back — common on mobile Chrome / Cross-Origin-Opener-
+            // Policy issues). Without this, the UI just silently stayed
+            // "Not connected" with zero explanation.
+            window.__ghkConnecting = false;
+            const t = (err && err.type) || 'unknown';
+            setMsg('Popup issue (' + t + '). Try: allow popups for this site, ' +
+                   'or open in a normal (non-incognito) tab and retry.', true);
           }},
         }});
       }}
@@ -305,6 +317,18 @@ def render_drive_sync(data):
 
       connectBtn.addEventListener('click', function() {{
         setMsg('Connecting...');
+        window.__ghkConnecting = true;
+        setTimeout(function() {{
+          if (window.__ghkConnecting) {{
+            window.__ghkConnecting = false;
+            setMsg(
+              'Google se koi reply nahi aaya (15 sec). Ye aksar tab hota hai jab ' +
+              'popup band ho gaya par browser wapas token deliver nahi kar paaya. ' +
+              'Popups allow karke aur normal (non-incognito) tab mein dobara try karein.',
+              true
+            );
+          }}
+        }}, 15000);
         const tryRequest = () => {{
           if (tokenClient) {{
             tokenClient.requestAccessToken({{ prompt: haveValidToken() ? '' : 'consent' }});
