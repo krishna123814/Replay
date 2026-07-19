@@ -428,7 +428,7 @@ def inject_css(text_scale=100):
         [data-testid="stToolbar"] {{ visibility: hidden; height: 0; }}
         [data-testid="stDecoration"] {{ display: none; }}
         [data-testid="stStatusWidget"] {{ visibility: hidden; }}
-        .block-container {{ padding-top: 4.6rem; zoom: {text_scale}%; }}
+        .block-container {{ padding-top: 2.6rem; zoom: {text_scale}%; }}
 
         .stApp {{
             background: #F6F1E7;
@@ -448,44 +448,32 @@ def inject_css(text_scale=100):
             border: none;
             border-bottom: 1px solid #2A2E39;
             border-radius: 0;
-            padding: 0.65rem 1rem;
+            padding: 0.25rem 1rem;
             margin-bottom: 0;
             align-items: center !important;
             flex-wrap: nowrap !important;
         }}
-        .top-nav-title {{
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            color: #EDEDED;
-            font-family: 'Zilla Slab', serif;
-            font-weight: 700;
-            font-size: 1.15rem;
-            white-space: nowrap;
-        }}
         div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) [data-testid="stPopover"] > button {{
-            border-radius: 6px;
-            height: 38px;
-            padding: 0 0.9rem;
-            font-size: 0.92rem;
-            font-weight: 600;
-            color: #C7C9CC;
-            border: 1px solid #363A45;
+            border-radius: 50%;
+            width: 26px;
+            height: 26px;
+            padding: 0;
+            font-size: 0.85rem;
+            border: 2px solid transparent;
             background: #1E222D;
         }}
         div[data-testid="stHorizontalBlock"]:has(div.top-nav-marker) [data-testid="stPopover"] > button:hover {{
             border-color: #7A1F2B;
-            color: #FFFFFF;
             background: #2A2E39;
         }}
         .nav-icon {{
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 42px;
-            height: 42px;
+            width: 26px;
+            height: 26px;
             border-radius: 50%;
-            font-size: 1.25rem;
+            font-size: 0.85rem;
             background: #F3E3C3;
             border: 2px solid transparent;
             flex-shrink: 0;
@@ -619,19 +607,19 @@ def inject_css(text_scale=100):
 
 def render_top_nav(data):
     """TradingView-style dark header bar, fixed at the very top of the
-    viewport. Just two things live here: the 'Family Savings' title on the
-    left, and a Setting icon+label button on the right that opens the
+    viewport, half-height. Just two icons live here: the money-bag icon on
+    the left, and a settings gear icon on the right that opens the
     existing settings popover (text size, chart tools).
     """
-    title_col, spacer_col, settings_col = st.columns([4, 4, 1])
-    with title_col:
+    icon_col, spacer_col, settings_col = st.columns([1, 6, 1])
+    with icon_col:
         st.markdown(
             '<div class="top-nav-marker"></div>'
-            '<div class="top-nav-title">💰 Family Savings</div>',
+            '<div class="nav-icon nav-icon-active" title="Family Savings">💰</div>',
             unsafe_allow_html=True,
         )
     with settings_col:
-        with st.popover("⚙️ Setting", help="Settings"):
+        with st.popover("⚙️", help="Settings"):
             st.caption("Text size")
             scale = st.slider(
                 "Sabhi text aur entries ka size",
@@ -690,6 +678,21 @@ def quick_add_entry(account):
                 st.warning("Description likhein.")
 
 
+def open_account_detail(account):
+    """Opens a popup with the full month-wise ledger (previous balance,
+    entries editable table with add/edit/delete rows, running total, and
+    month-by-month history) for a single account — same underlying data
+    as the account's own tab further down the page, so any change made
+    here immediately adds/subtracts from that account's saving total.
+    """
+
+    @st.dialog(f"📋 {account['name']}", width="large")
+    def _dialog():
+        render_account(account, key_prefix="dialog_")
+
+    _dialog()
+
+
 def render_overview(data):
     accounts = data["accounts"]
     grand_total = 0.0
@@ -697,7 +700,7 @@ def render_overview(data):
     for acc in accounts:
         t = latest_total(acc)
         grand_total += t
-        text_col, edit_col = st.columns([8, 1], gap="small")
+        text_col, edit_col, detail_col = st.columns([7, 1, 1], gap="small")
         with text_col:
             st.markdown(
                 f'<div class="ov-row-marker"></div>'
@@ -709,6 +712,9 @@ def render_overview(data):
             )
         with edit_col:
             quick_add_entry(acc)
+        with detail_col:
+            if st.button("📋", key=f"detail_btn_{acc['id']}", help="Month-wise details"):
+                open_account_detail(acc)
 
     st.markdown(
         f'<div class="acct-row acct-row-total">'
@@ -743,11 +749,11 @@ def render_overview(data):
     )
 
 
-def render_account(account):
+def render_account(account, key_prefix=""):
     months = account["months"]
 
     new_name = st.text_input(
-        "Account name", value=account["name"], key=f"name_{account['id']}"
+        "Account name", value=account["name"], key=f"{key_prefix}name_{account['id']}"
     )
     if new_name != account["name"]:
         account["name"] = new_name
@@ -755,7 +761,7 @@ def render_account(account):
 
     all_keys = month_keys_for_account(account)
     existing_keys = sorted_month_keys(months)
-    state_key = f"selected_month_{account['id']}"
+    state_key = f"{key_prefix}selected_month_{account['id']}"
 
     if state_key in st.session_state and st.session_state[state_key] in all_keys:
         default_idx = all_keys.index(st.session_state[state_key])
@@ -770,7 +776,7 @@ def render_account(account):
         options=all_keys,
         format_func=month_label,
         index=default_idx,
-        key=f"select_{account['id']}",
+        key=f"{key_prefix}select_{account['id']}",
     )
     st.session_state[state_key] = selected
 
@@ -783,7 +789,7 @@ def render_account(account):
             value=current_pb,
             step=1.0,
             format="%.2f",
-            key=f"pb_{account['id']}_{selected}",
+            key=f"{key_prefix}pb_{account['id']}_{selected}",
         )
         if pb != current_pb:
             months.setdefault(selected, {"entries": []})
@@ -796,7 +802,7 @@ def render_account(account):
             value=computed_pb,
             format="%.2f",
             disabled=True,
-            key=f"pb_ro_{account['id']}_{selected}",
+            key=f"{key_prefix}pb_ro_{account['id']}_{selected}",
         )
 
     st.caption("Entries for this month (salary, pension, petrol, interest, etc.)")
@@ -813,7 +819,7 @@ def render_account(account):
         df,
         num_rows="dynamic",
         use_container_width=True,
-        key=f"editor_{account['id']}_{selected}",
+        key=f"{key_prefix}editor_{account['id']}_{selected}",
         column_config={
             "Description": st.column_config.TextColumn(required=True),
             "Amount": st.column_config.NumberColumn(format="%.2f", required=True),
