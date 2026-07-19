@@ -38,6 +38,7 @@ from datetime import date
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_js_eval import streamlit_js_eval
 
 # --------------------------------------------------------------------------- #
@@ -165,52 +166,70 @@ def save_data():
     st.session_state["_pending_save_json"] = json.dumps(st.session_state.data)
 
 
-def request_fullscreen():
-    """Flag a fullscreen request; actually run on the next rerun."""
-    st.session_state["_pending_fullscreen"] = True
+def render_fullscreen_button():
+    """Render a real HTML button whose onclick calls the Fullscreen API
+    directly, in the browser, with no Streamlit rerun in between.
 
+    This matters because requestFullscreen() only works when called
+    synchronously inside a genuine user-gesture handler (a real click).
+    Routing the click through st.button() -> session_state flag ->
+    st.rerun() -> streamlit_js_eval loses that gesture (there's a server
+    round-trip in between), so the browser silently rejects the request.
+    It also previously called requestFullscreen() on the *component
+    iframe's own* document instead of the actual app page, so even when
+    the gesture wasn't lost, the wrong element was being fullscreened.
 
-def run_pending_fullscreen():
-    """Unconditionally invoke the JS bridge every rerun. When a fullscreen
-    request is pending, ask the browser for real fullscreen (hides the
-    address bar on most mobile browsers) and hide Streamlit Community
-    Cloud's own floating "Manage app" badge, which only the app's owner
-    sees when signed in — visitors never see it.
+    window.parent.document targets the real top-level app page (this
+    button's iframe is a direct child of it), and the click happens
+    entirely client-side, so the gesture requirement is satisfied.
     """
-    trigger = st.session_state.pop("_pending_fullscreen", False)
-    counter = st.session_state.get("_fs_counter", 0)
-
-    if trigger:
-        counter += 1
-        st.session_state["_fs_counter"] = counter
-        js_code = """
-        (function() {
+    components.html(
+        """
+        <button id="fs-btn" style="
+            width:100%; padding:0.5rem 0; border-radius:0.5rem;
+            border:1px solid rgba(49,51,63,0.2); background:#fff;
+            font-size:1rem; cursor:pointer;">
+            ⛶ Fullscreen
+        </button>
+        <script>
+        document.getElementById('fs-btn').addEventListener('click', function () {
             try {
-                var el = document.documentElement;
+                var el = window.parent.document.documentElement;
                 if (el.requestFullscreen) { el.requestFullscreen(); }
                 else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); }
             } catch (e) {}
-            try {
-                document.querySelectorAll('*').forEach(function(n) {
-                    if (n.children.length === 0 && n.textContent &&
-                        n.textContent.trim() === 'Manage app') {
-                        var node = n;
-                        for (var i = 0; i < 6 && node; i++) {
-                            node = node.parentElement;
-                            if (node && node.getBoundingClientRect().height < 140) {
-                                node.style.display = 'none';
-                            }
+        });
+        </script>
+        """,
+        height=48,
+    )
+
+
+def hide_manage_app_badge():
+    """Hide Streamlit Community Cloud's floating "Manage app" badge, which
+    only the app's owner sees when signed in — visitors never see it.
+    Runs unconditionally (no user gesture needed for this one).
+    """
+    js_code = """
+    (function() {
+        try {
+            document.querySelectorAll('*').forEach(function(n) {
+                if (n.children.length === 0 && n.textContent &&
+                    n.textContent.trim() === 'Manage app') {
+                    var node = n;
+                    for (var i = 0; i < 6 && node; i++) {
+                        node = node.parentElement;
+                        if (node && node.getBoundingClientRect().height < 140) {
+                            node.style.display = 'none';
                         }
                     }
-                });
-            } catch (e) {}
-            return 'fs-done';
-        })();
-        """
-    else:
-        js_code = "'fs-idle'"
-
-    streamlit_js_eval(js_expressions=js_code, key=f"fullscreen_js_{counter}", want_output=False)
+                }
+            });
+        } catch (e) {}
+        return 'badge-done';
+    })();
+    """
+    streamlit_js_eval(js_expressions=js_code, key="hide_manage_app_badge", want_output=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -305,27 +324,40 @@ def inject_css(text_scale=100):
             background: #F6F1E7;
         }}
 
-        /* Ledger-style header */
-        .khata-header {{
+        /* Top icon nav bar (Family Saving, Expenses, settings gear) */
+        div:has(> div.top-nav-marker) ~ div[data-testid="stHorizontalBlock"] {{
+            background: #FFFDF7;
+            border: 1px solid #E4D8BC;
+            border-radius: 10px;
+            padding: 0.45rem 0.7rem;
+            margin-bottom: 0.9rem;
+            align-items: center !important;
+            flex-wrap: nowrap !important;
+        }}
+        div:has(> div.top-nav-marker) ~ div[data-testid="stHorizontalBlock"] [data-testid="stPopover"] > button {{
+            border-radius: 50%;
+            width: 42px;
+            height: 42px;
+            padding: 0;
+            font-size: 1.05rem;
+            border: 2px solid transparent;
+            background: #F3E3C3;
+        }}
+        .nav-icon {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            font-size: 1.25rem;
+            background: #F3E3C3;
+            border: 2px solid transparent;
+            flex-shrink: 0;
+        }}
+        .nav-icon-active {{
+            border-color: #7A1F2B;
             background: #7A1F2B;
-            color: #F3E3C3;
-            padding: 1.4rem 1.6rem;
-            border-radius: 6px;
-            margin-bottom: 1.2rem;
-            border-left: 8px solid #D4A017;
-            box-shadow: 0 3px 10px rgba(0,0,0,0.15);
-        }}
-        .khata-header h1 {{
-            font-family: 'Zilla Slab', serif;
-            font-weight: 700;
-            font-size: 1.9rem;
-            margin: 0;
-            letter-spacing: 0.3px;
-        }}
-        .khata-header p {{
-            margin: 0.25rem 0 0 0;
-            color: #E9D9AF;
-            font-size: 0.92rem;
         }}
 
         /* Ledger paper card for each account */
@@ -362,13 +394,23 @@ def inject_css(text_scale=100):
             letter-spacing: 0.6px;
         }}
 
-        /* Compact overview figures (Savings Account / Mummy Account / etc.) */
-        .overview-figure {{
+        /* Compact one-line account rows (Name  —  ₹ Amount  ✏️) */
+        .acct-row-label {{
+            font-family: 'Inter', sans-serif;
+            color: #4A3F2A;
+            font-size: 0.95rem;
+            padding-top: 0.35rem;
+        }}
+        .acct-row-figure {{
             font-family: 'IBM Plex Mono', monospace;
             font-weight: 600;
             color: #0F5132;
-            font-size: 1.25rem;
-            margin-top: -0.4rem;
+            font-size: 1.05rem;
+            padding-top: 0.3rem;
+        }}
+        .acct-row-total {{
+            font-weight: 700;
+            color: #7A1F2B;
         }}
 
         .stButton>button {{
@@ -399,7 +441,9 @@ def inject_css(text_scale=100):
         div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] {{
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 0.4rem !important;
+            gap: 0.5rem !important;
+            padding: 0.3rem 0;
+            border-bottom: 1px solid #E7DFC9;
         }}
         div:has(> div.ov-row-marker) ~ div[data-testid="stHorizontalBlock"] > div {{
             width: auto !important;
@@ -418,6 +462,42 @@ def inject_css(text_scale=100):
 # --------------------------------------------------------------------------- #
 # UI sections
 # --------------------------------------------------------------------------- #
+
+def render_top_nav(data):
+    """Horizontal icon-only nav bar at the very top. 'Family Saving' is the
+    current, active screen. 'Expenses' is just a placeholder icon for now —
+    no screen or functionality behind it yet. A settings gear sits in the
+    right corner and holds the text-size control.
+    """
+    st.markdown('<div class="top-nav-marker"></div>', unsafe_allow_html=True)
+    icon_col, exp_col, spacer_col, settings_col = st.columns([1, 1, 6, 1])
+    with icon_col:
+        st.markdown(
+            '<div class="nav-icon nav-icon-active" title="Family Saving">💰</div>',
+            unsafe_allow_html=True,
+        )
+    with exp_col:
+        st.markdown(
+            '<div class="nav-icon" title="Expenses">🧾</div>',
+            unsafe_allow_html=True,
+        )
+    with settings_col:
+        with st.popover("⚙️", help="Settings"):
+            st.caption("Text size")
+            scale = st.slider(
+                "Sabhi text aur entries ka size",
+                min_value=80,
+                max_value=160,
+                step=10,
+                value=data["settings"].get("text_scale", 100),
+                format="%d%%",
+                key="text_scale_slider",
+            )
+            if scale != data["settings"].get("text_scale", 100):
+                data["settings"]["text_scale"] = scale
+                st.session_state["_pending_save_json"] = json.dumps(data)
+                st.rerun()
+
 
 def quick_add_entry(account):
     """Small icon-only popover, to add an entry to an account's most recent
@@ -450,26 +530,36 @@ def quick_add_entry(account):
 
 def render_overview(data):
     accounts = data["accounts"]
-    cols = st.columns(len(accounts) + 1)
     grand_total = 0.0
-    for col, acc in zip(cols, accounts):
+
+    for acc in accounts:
         t = latest_total(acc)
         grand_total += t
-        with col:
-            st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
-            name_col, btn_col = st.columns([5, 1], gap="small")
-            with name_col:
-                st.caption(acc["name"])
-            with btn_col:
-                quick_add_entry(acc)
+        st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
+        label_col, val_col, edit_col = st.columns([3, 3, 1], gap="small")
+        with label_col:
             st.markdown(
-                f'<div class="overview-figure">₹ {t:,.2f}</div>',
+                f'<div class="acct-row-label">{acc["name"]}</div>',
                 unsafe_allow_html=True,
             )
-    with cols[-1]:
-        st.caption("Family Total")
+        with val_col:
+            st.markdown(
+                f'<div class="acct-row-figure">₹ {t:,.2f}</div>',
+                unsafe_allow_html=True,
+            )
+        with edit_col:
+            quick_add_entry(acc)
+
+    st.markdown('<div class="ov-row-marker"></div>', unsafe_allow_html=True)
+    total_label_col, total_val_col, _ = st.columns([3, 3, 1], gap="small")
+    with total_label_col:
         st.markdown(
-            f'<div class="overview-figure">₹ {grand_total:,.2f}</div>',
+            '<div class="acct-row-label acct-row-total">Family Total</div>',
+            unsafe_allow_html=True,
+        )
+    with total_val_col:
+        st.markdown(
+            f'<div class="acct-row-figure acct-row-total">₹ {grand_total:,.2f}</div>',
             unsafe_allow_html=True,
         )
 
@@ -653,36 +743,9 @@ def main():
 
     inject_css(data["settings"].get("text_scale", 100))
 
-    st.markdown(
-        """
-        <div class="khata-header">
-            <h1>📒 Ghar Khata — Family Ledger</h1>
-            <p>Savings &amp; pension accounts for the whole family, saved right here in this browser.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    render_top_nav(data)
 
-    size_col, fs_col = st.columns([2, 1])
-    with size_col:
-        with st.expander("🔠 Text size"):
-            scale = st.slider(
-                "Sabhi text aur entries ka size",
-                min_value=80,
-                max_value=160,
-                step=10,
-                value=data["settings"].get("text_scale", 100),
-                format="%d%%",
-                key="text_scale_slider",
-            )
-            if scale != data["settings"].get("text_scale", 100):
-                data["settings"]["text_scale"] = scale
-                st.session_state["_pending_save_json"] = json.dumps(data)
-                st.rerun()
-    with fs_col:
-        st.write("")
-        if st.button("⛶ Fullscreen", key="fullscreen_btn", use_container_width=True):
-            request_fullscreen()
+    render_fullscreen_button()
 
     render_overview(data)
     st.divider()
@@ -717,7 +780,7 @@ def main():
     # Always invoked, at the same point in the script every rerun — this is
     # required for the JS bridge components to behave reliably.
     run_pending_save()
-    run_pending_fullscreen()
+    hide_manage_app_badge()
 
 
 if __name__ == "__main__":
