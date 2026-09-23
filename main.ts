@@ -14,7 +14,7 @@ const WS_MAP: Record<string, string> = {
   "/ws/spot":  "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
 };
 
-Deno.serve(async (req: Request) => {
+Deno.serve({ port: Number(Deno.env.get("PORT") ?? 8000) }, async (req: Request) => {
   const url = new URL(req.url);
 
   // ── WebSocket relay ───────────────────────────────────────────────────
