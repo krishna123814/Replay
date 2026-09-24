@@ -15,6 +15,8 @@
 //   4. LEGACY  →  purane /ws/mark, /ws/trade, /ws/spot relay abhi bhi maujood hain
 //      (rollback ke liye) — par ye poora data forward karte hain, bandwidth zyada.
 //
+// NEW: /trade/... endpoints (Binance Options, token-protected) — neeche "TRADE MODULE" dekho.
+//
 // Env vars (sab optional):
 //   PORT             (Render khud deta hai)
 //   IDLE_STOP_SEC    default 60   — itni der /snapshot na aaye to Binance WS band
@@ -477,6 +479,308 @@ function filterRest(pathname: string, data: any): any {
   return data;
 }
 
+// ── TRADE MODULE (Binance Options, eapi) ──────────────────────────────────
+// Phase 1: read-only endpoints + guarded order/cancel.
+// Secrets sirf Render env mein: OPT_API_KEY, OPT_SECRET_KEY, TRADE_TOKEN.
+// Ye endpoints (/trade/...) sirf header `X-Trade-Token` sahi hone par chalte hain.
+// Koi CORS header nahi — browser se nahi, sirf server-to-server (HF Python) use ke liye.
+//
+// Env vars:
+//   OPT_API_KEY / OPT_SECRET_KEY   Binance Options key (Withdrawal OFF rakho)
+//   TRADE_TOKEN                    lamba random secret (HF ke paas bhi wahi hoga)
+//   TRADING_ENABLED                "true" ho tabhi naye orders jayenge (default false)
+//   MAX_ORDER_QTY                  default 0.01   — ek order ki max quantity
+//   MAX_ORDER_USDT                 default 3      — BUY order ka max premium (price*qty)
+//   MAX_PRICE_DEV_PCT              default 50     — order price mark se itne % se zyada door nahi
+//   MAX_ORDERS_PER_MIN             default 6      — rate limit
+//
+// Rules: shuru mein sirf BUY. SELL sirf reduceOnly=true (position band karne ke liye).
+// Cancel / cancel-all hamesha allowed hain (kill-switch se bhi nahi rukte).
+
+const EAPI = "https://eapi.binance.com";
+const OPT_API_KEY = (Deno.env.get("OPT_API_KEY") ?? "").trim();
+const OPT_SECRET_KEY = (Deno.env.get("OPT_SECRET_KEY") ?? "").trim();
+const TRADE_TOKEN = (Deno.env.get("TRADE_TOKEN") ?? "").trim();
+const TRADING_ENABLED = (Deno.env.get("TRADING_ENABLED") ?? "false").trim().toLowerCase() === "true";
+const MAX_ORDER_QTY = envNum("MAX_ORDER_QTY", 0.01);
+const MAX_ORDER_USDT = envNum("MAX_ORDER_USDT", 3);
+const MAX_PRICE_DEV_PCT = envNum("MAX_PRICE_DEV_PCT", 50);
+const MAX_ORDERS_PER_MIN = envNum("MAX_ORDERS_PER_MIN", 6);
+
+function envNum(name: string, def: number): number {
+  const v = parseFloat(Deno.env.get(name) ?? "");
+  return Number.isFinite(v) && v > 0 ? v : def;
+}
+
+const OPTION_SYMBOL_RE = /^BTC-\d{6}-\d{3,7}-[CP]$/;
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,36}$/;
+const textEnc = new TextEncoder();
+
+function tradeJson(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
+async function sha256Bytes(s: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", textEnc.encode(s)));
+}
+
+async function hmacHex(secret: string, msg: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw", textEnc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, textEnc.encode(msg)));
+  return [...sig].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Token compare (constant-time, hash ke through)
+async function tokenOk(provided: string): Promise<boolean> {
+  if (!TRADE_TOKEN || !provided) return false;
+  const [a, b] = await Promise.all([sha256Bytes(provided), sha256Bytes(TRADE_TOKEN)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+// Galat token bar-bar aaye to us IP ko thodi der ke liye rok do
+const authFails = new Map<string, { n: number; first: number; lockUntil: number }>();
+function clientIp(req: Request): string {
+  return (req.headers.get("x-forwarded-for") ?? "unknown").split(",")[0].trim();
+}
+function isLocked(ip: string): boolean {
+  const f = authFails.get(ip);
+  return !!f && f.lockUntil > nowMs();
+}
+function noteAuthFail(ip: string) {
+  const t = nowMs();
+  let f = authFails.get(ip);
+  if (!f || t - f.first > 10 * 60_000) f = { n: 0, first: t, lockUntil: 0 };
+  f.n++;
+  if (f.n >= 10) f.lockUntil = t + 10 * 60_000;
+  authFails.set(ip, f);
+}
+
+// Binance server time offset (timestamp galat na jaye)
+let timeOffsetMs = 0;
+let timeSyncedAt = 0;
+async function syncTime() {
+  if (nowMs() - timeSyncedAt < 10 * 60_000) return;
+  try {
+    const r = await fetch(`${EAPI}/eapi/v1/time`, { signal: AbortSignal.timeout(5000) });
+    if (r.ok) {
+      const j = await r.json();
+      if (Number.isFinite(Number(j?.serverTime))) {
+        timeOffsetMs = Number(j.serverTime) - nowMs();
+        timeSyncedAt = nowMs();
+      }
+    }
+  } catch { /* ignore, purana offset chalega */ }
+}
+
+type Params = Record<string, string | number | boolean | undefined>;
+
+function buildQuery(p: Params): string {
+  return Object.entries(p)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join("&");
+}
+
+async function signedCall(method: "GET" | "POST" | "DELETE", path: string, params: Params) {
+  await syncTime();
+  const qs = buildQuery({ ...params, recvWindow: 5000, timestamp: nowMs() + timeOffsetMs });
+  const sig = await hmacHex(OPT_SECRET_KEY, qs);
+  const r = await fetch(`${EAPI}${path}?${qs}&signature=${sig}`, {
+    method,
+    headers: { "X-MBX-APIKEY": OPT_API_KEY },
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await r.text();
+  let data: unknown;
+  try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 500) }; }
+  return { status: r.status, data };
+}
+
+// URL se sirf allowed query params uthao
+function pick(url: URL, names: string[]): Params {
+  const out: Params = {};
+  for (const n of names) {
+    const v = url.searchParams.get(n);
+    if (v !== null && v !== "") out[n] = v;
+  }
+  return out;
+}
+
+async function readBody(req: Request): Promise<Record<string, unknown> | null> {
+  const text = await req.text();
+  if (text.length > 2000) return null;
+  try {
+    const j = JSON.parse(text);
+    return j && typeof j === "object" && !Array.isArray(j) ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+// Order safety state
+const recentClientIds = new Map<string, number>();
+const orderTimes: number[] = [];
+
+function newClientId(): string {
+  return `rn${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function getMarkPrice(symbol: string): Promise<number | null> {
+  try {
+    const r = await fetch(`${EAPI}/eapi/v1/mark?symbol=${encodeURIComponent(symbol)}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const row = Array.isArray(j) ? j[0] : j;
+    const p = parseFloat(row?.markPrice);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handlePlaceOrder(req: Request): Promise<Response> {
+  if (!TRADING_ENABLED) return tradeJson(403, { error: "Trading disabled (TRADING_ENABLED != true)" });
+
+  const b = await readBody(req);
+  if (!b) return tradeJson(400, { error: "Bad JSON body" });
+
+  const symbol = String(b.symbol ?? "");
+  const side = String(b.side ?? "").toUpperCase();
+  const qty = Number(b.quantity);
+  const price = Number(b.price);
+  const tif = String(b.timeInForce ?? "GTC").toUpperCase();
+  const reduceOnly = b.reduceOnly === true;
+  const postOnly = b.postOnly === true;
+  const clientOrderId = b.clientOrderId ? String(b.clientOrderId) : newClientId();
+
+  if (!OPTION_SYMBOL_RE.test(symbol)) return tradeJson(400, { error: "Symbol invalid (sirf BTC-YYMMDD-STRIKE-C|P)" });
+  if (side !== "BUY" && side !== "SELL") return tradeJson(400, { error: "side BUY ya SELL" });
+  if (side === "SELL" && !reduceOnly) return tradeJson(403, { error: "SELL sirf reduceOnly=true ke saath allowed hai" });
+  if (!Number.isFinite(qty) || qty <= 0) return tradeJson(400, { error: "quantity invalid" });
+  if (qty > MAX_ORDER_QTY) return tradeJson(403, { error: `quantity limit se zyada (max ${MAX_ORDER_QTY})` });
+  if (!Number.isFinite(price) || price <= 0) return tradeJson(400, { error: "price invalid (LIMIT order ke liye zaroori)" });
+  if (!["GTC", "IOC", "FOK"].includes(tif)) return tradeJson(400, { error: "timeInForce GTC/IOC/FOK" });
+  if (!CLIENT_ID_RE.test(clientOrderId)) return tradeJson(400, { error: "clientOrderId invalid" });
+  if (side === "BUY" && price * qty > MAX_ORDER_USDT) {
+    return tradeJson(403, { error: `premium limit se zyada (price*qty > ${MAX_ORDER_USDT} USDT)` });
+  }
+
+  // Duplicate + rate limit (sab await se pehle, taaki race na ho)
+  const t = nowMs();
+  for (const [id, ts] of recentClientIds) if (t - ts > 10 * 60_000) recentClientIds.delete(id);
+  if (recentClientIds.has(clientOrderId)) return tradeJson(409, { error: "Duplicate clientOrderId" });
+  while (orderTimes.length && t - orderTimes[0] > 60_000) orderTimes.shift();
+  if (orderTimes.length >= MAX_ORDERS_PER_MIN) return tradeJson(429, { error: "Order rate limit (per minute) cross" });
+  recentClientIds.set(clientOrderId, t);
+  orderTimes.push(t);
+
+  // Fat-finger check: price mark se bahut door na ho
+  const mark = await getMarkPrice(symbol);
+  if (mark === null) {
+    recentClientIds.delete(clientOrderId);
+    return tradeJson(502, { error: "Mark price nahi mila — order roka gaya" });
+  }
+  const dev = MAX_PRICE_DEV_PCT / 100;
+  if ((side === "BUY" && price > mark * (1 + dev)) || (side === "SELL" && price < mark * (1 - dev))) {
+    recentClientIds.delete(clientOrderId);
+    return tradeJson(403, { error: `price mark (${mark}) se ${MAX_PRICE_DEV_PCT}% se zyada door hai` });
+  }
+
+  const res = await signedCall("POST", "/eapi/v1/order", {
+    symbol, side, type: "LIMIT", quantity: qty, price, timeInForce: tif,
+    reduceOnly: reduceOnly ? "true" : undefined,
+    postOnly: postOnly ? "true" : undefined,
+    clientOrderId, newOrderRespType: "RESULT",
+  });
+  console.log(`[trade] order ${side} ${symbol} q=${qty} p=${price} cid=${clientOrderId} -> HTTP ${res.status}`);
+  return tradeJson(res.status, res.data);
+}
+
+async function handleCancel(req: Request): Promise<Response> {
+  const b = await readBody(req);
+  if (!b) return tradeJson(400, { error: "Bad JSON body" });
+  const symbol = String(b.symbol ?? "");
+  if (!OPTION_SYMBOL_RE.test(symbol)) return tradeJson(400, { error: "Symbol invalid" });
+  if (!b.orderId && !b.clientOrderId) return tradeJson(400, { error: "orderId ya clientOrderId do" });
+  const res = await signedCall("DELETE", "/eapi/v1/order", {
+    symbol,
+    orderId: b.orderId ? String(b.orderId) : undefined,
+    clientOrderId: b.clientOrderId ? String(b.clientOrderId) : undefined,
+  });
+  console.log(`[trade] cancel ${symbol} -> HTTP ${res.status}`);
+  return tradeJson(res.status, res.data);
+}
+
+async function handleTrade(req: Request, url: URL): Promise<Response> {
+  const ip = clientIp(req);
+  if (isLocked(ip)) return tradeJson(429, { error: "Bahut galat attempts — thodi der baad try karo" });
+  if (!TRADE_TOKEN) return tradeJson(503, { error: "TRADE_TOKEN set nahi hai" });
+  if (!(await tokenOk(req.headers.get("x-trade-token") ?? ""))) {
+    noteAuthFail(ip);
+    return tradeJson(401, { error: "Unauthorized" });
+  }
+  if (!OPT_API_KEY || !OPT_SECRET_KEY) return tradeJson(503, { error: "OPT_API_KEY / OPT_SECRET_KEY set nahi hain" });
+
+  const path = url.pathname;
+  const m = req.method;
+  try {
+    if (path === "/trade/status" && m === "GET") {
+      return tradeJson(200, {
+        trading_enabled: TRADING_ENABLED,
+        keys_configured: true,
+        limits: {
+          max_order_qty: MAX_ORDER_QTY,
+          max_order_usdt: MAX_ORDER_USDT,
+          max_price_dev_pct: MAX_PRICE_DEV_PCT,
+          max_orders_per_min: MAX_ORDERS_PER_MIN,
+        },
+        rules: "BUY + reduceOnly SELL only, LIMIT only",
+      });
+    }
+    if (path === "/trade/account" && m === "GET") {
+      const r = await signedCall("GET", "/eapi/v1/account", {});
+      return tradeJson(r.status, r.data);
+    }
+    if (path === "/trade/positions" && m === "GET") {
+      const r = await signedCall("GET", "/eapi/v1/position", pick(url, ["symbol"]));
+      return tradeJson(r.status, r.data);
+    }
+    if (path === "/trade/orders/open" && m === "GET") {
+      const r = await signedCall("GET", "/eapi/v1/openOrders", pick(url, ["symbol", "orderId", "limit"]));
+      return tradeJson(r.status, r.data);
+    }
+    if (path === "/trade/orders/history" && m === "GET") {
+      const r = await signedCall("GET", "/eapi/v1/historyOrders", pick(url, ["symbol", "orderId", "startTime", "endTime", "limit"]));
+      return tradeJson(r.status, r.data);
+    }
+    if (path === "/trade/fills" && m === "GET") {
+      const r = await signedCall("GET", "/eapi/v1/userTrades", pick(url, ["symbol", "fromId", "startTime", "endTime", "limit"]));
+      return tradeJson(r.status, r.data);
+    }
+    if (path === "/trade/order" && m === "POST") return await handlePlaceOrder(req);
+    if (path === "/trade/cancel" && m === "POST") return await handleCancel(req);
+    if (path === "/trade/cancel-all" && m === "POST") {
+      const r = await signedCall("DELETE", "/eapi/v1/allOpenOrdersByUnderlying", { underlying: "BTCUSDT" });
+      console.log(`[trade] cancel-all -> HTTP ${r.status}`);
+      return tradeJson(r.status, r.data);
+    }
+    return tradeJson(404, { error: "Unknown /trade path or method" });
+  } catch (e) {
+    // Error message mein secret nahi hota (key sirf header mein jaati hai)
+    return tradeJson(502, { error: `Trade call failed: ${String(e).slice(0, 200)}` });
+  }
+}
+
+
 // ── Server ────────────────────────────────────────────────────────────────
 Deno.serve({ port: PORT }, async (req: Request) => {
   const url = new URL(req.url);
@@ -531,6 +835,11 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     // ── On-demand snapshot ──
     if (url.pathname === "/snapshot") {
       return await handleSnapshot(req, url);
+    }
+
+    // ── Trade (Options) — token-protected ──
+    if (url.pathname.startsWith("/trade/")) {
+      return await handleTrade(req, url);
     }
 
     // ── REST forward ──
