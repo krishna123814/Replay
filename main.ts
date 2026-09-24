@@ -523,6 +523,13 @@ function tradeJson(status: number, body: unknown): Response {
   });
 }
 
+function tradeRaw(status: number, bodyText: string): Response {
+  return new Response(bodyText, {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+  });
+}
+
 async function sha256Bytes(s: string): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", textEnc.encode(s)));
 }
@@ -598,9 +605,11 @@ async function signedCall(method: "GET" | "POST" | "DELETE", path: string, param
     signal: AbortSignal.timeout(15000),
   });
   const text = await r.text();
-  let data: unknown;
-  try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 500) }; }
-  return { status: r.status, data };
+  // Binance ka jawab bina parse/stringify kiye seedha aage jaata hai — 19-digit
+  // orderId jaise bade numbers JS mein precision kho dete hain.
+  let body: string;
+  try { JSON.parse(text); body = text; } catch { body = JSON.stringify({ raw: text.slice(0, 500) }); }
+  return { status: r.status, body };
 }
 
 // URL se sirf allowed query params uthao
@@ -702,7 +711,7 @@ async function handlePlaceOrder(req: Request): Promise<Response> {
     clientOrderId, newOrderRespType: "RESULT",
   });
   console.log(`[trade] order ${side} ${symbol} q=${qty} p=${price} cid=${clientOrderId} -> HTTP ${res.status}`);
-  return tradeJson(res.status, res.data);
+  return tradeRaw(res.status, res.body);
 }
 
 async function handleCancel(req: Request): Promise<Response> {
@@ -717,7 +726,7 @@ async function handleCancel(req: Request): Promise<Response> {
     clientOrderId: b.clientOrderId ? String(b.clientOrderId) : undefined,
   });
   console.log(`[trade] cancel ${symbol} -> HTTP ${res.status}`);
-  return tradeJson(res.status, res.data);
+  return tradeRaw(res.status, res.body);
 }
 
 async function handleTrade(req: Request, url: URL): Promise<Response> {
@@ -748,30 +757,30 @@ async function handleTrade(req: Request, url: URL): Promise<Response> {
     }
     if (path === "/trade/account" && m === "GET") {
       const r = await signedCall("GET", "/eapi/v1/marginAccount", {});
-      return tradeJson(r.status, r.data);
+      return tradeRaw(r.status, r.body);
     }
     if (path === "/trade/positions" && m === "GET") {
       const r = await signedCall("GET", "/eapi/v1/position", pick(url, ["symbol"]));
-      return tradeJson(r.status, r.data);
+      return tradeRaw(r.status, r.body);
     }
     if (path === "/trade/orders/open" && m === "GET") {
       const r = await signedCall("GET", "/eapi/v1/openOrders", pick(url, ["symbol", "orderId", "limit"]));
-      return tradeJson(r.status, r.data);
+      return tradeRaw(r.status, r.body);
     }
     if (path === "/trade/orders/history" && m === "GET") {
       const r = await signedCall("GET", "/eapi/v1/historyOrders", pick(url, ["symbol", "orderId", "startTime", "endTime", "limit"]));
-      return tradeJson(r.status, r.data);
+      return tradeRaw(r.status, r.body);
     }
     if (path === "/trade/fills" && m === "GET") {
       const r = await signedCall("GET", "/eapi/v1/userTrades", pick(url, ["symbol", "fromId", "startTime", "endTime", "limit"]));
-      return tradeJson(r.status, r.data);
+      return tradeRaw(r.status, r.body);
     }
     if (path === "/trade/order" && m === "POST") return await handlePlaceOrder(req);
     if (path === "/trade/cancel" && m === "POST") return await handleCancel(req);
     if (path === "/trade/cancel-all" && m === "POST") {
       const r = await signedCall("DELETE", "/eapi/v1/allOpenOrdersByUnderlying", { underlying: "BTCUSDT" });
       console.log(`[trade] cancel-all -> HTTP ${r.status}`);
-      return tradeJson(r.status, r.data);
+      return tradeRaw(r.status, r.body);
     }
     return tradeJson(404, { error: "Unknown /trade path or method" });
   } catch (e) {
