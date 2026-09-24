@@ -747,7 +747,7 @@ async function handleTrade(req: Request, url: URL): Promise<Response> {
       });
     }
     if (path === "/trade/account" && m === "GET") {
-      const r = await signedCall("GET", "/eapi/v1/account", {});
+      const r = await signedCall("GET", "/eapi/v1/marginAccount", {});
       return tradeJson(r.status, r.data);
     }
     if (path === "/trade/positions" && m === "GET") {
