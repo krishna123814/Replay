@@ -1436,8 +1436,200 @@ async function handleTrade(req: Request, url: URL): Promise<Response> {
 }
 
 
+// ── DAILY P&L SUMMARY EMAIL ─────────────────────────────────────────────────
+// Roz ek baar (IST) ek mail: aaj ke fills se realized P&L + fees, symbol-wise
+// breakup, aur abhi ke open positions ka unrealized P&L. Data Binance
+// /eapi/v1/userTrades + /eapi/v1/position se aata hai (koi extra table nahi).
+// Trade na ho tab bhi mail JAATI hai — sab columns 0 dikhte hain, balance change
+// "No change", aur neeche roz ek nayi motivation line (har mail mein).
+// Env vars (optional):
+//   DAILY_SUMMARY_TIME_IST     default "23:55"  — roz is IST time ke baad bhejo; "off" = band
+// Din = IST 00:00 se ab tak. Roz max 1 mail (Brevo 300/day par asar nahi).
+// LIMITATION: Render instance us waqt so raha ho to us din ka summary nahi jaata
+// (external keep-alive ping ya paid plan se theek hota hai). Bhejne ke baad
+// isi din process restart ho to wahi mail dobara ja sakti hai (flag memory mein hai).
+const SUMMARY_TIME_RAW = (Deno.env.get("DAILY_SUMMARY_TIME_IST") ?? "23:55").trim().toLowerCase();
+
+// Roz ki motivation line — date ke hisaab se rotate (30 din tak repeat nahi hoti).
+const MOTIVATION_LINES: string[] = [
+  "Aaj trade nahi li? Koi baat nahi — capital bachana bhi ek jeet hai.",
+  "Har trade ka size chhota, har rule ka respect bada. Yahi long game hai.",
+  "Stop-loss haar nahi hai, ye aapki insurance hai.",
+  "Market kal bhi khulega. Aaj ka loss kal ki galti sudharne ka mauka hai.",
+  "Jaldi ameer banne wale aksar jaldi khatam ho jaate hain. Dheere par tikke raho.",
+  "Plan ke bina trade sirf jua hai. Plan ke saath trade business hai.",
+  "Ek achhi trade ke liye kabhi kabhi 10 mauke chhodne padte hain.",
+  "Loss ko personal mat lo — data samjho, agla setup dhundho.",
+  "Discipline wo hai jo aap tab karte ho jab koi dekh nahi raha.",
+  "Profit ka lalach aur loss ka darr — dono ko rules se control karo.",
+  "Revenge trade ka koi fayda nahi. Ek saans lo, screen se hato.",
+  "Consistency bade ek-do wins se nahi, hazaar chhote sahi faislon se banti hai.",
+  "Aaj jo seekha wahi aaj ki asli kamai hai.",
+  "Risk pehle sochte hain, reward baad me. Ulta karoge to market sikha dega.",
+  "Sabse achha trader wo hai jo apna capital zinda rakhta hai.",
+  "Overtrading se broker kamata hai, patience se aap.",
+  "Har din green hona zaroori nahi. Har din rule me rehna zaroori hai.",
+  "Achha setup aayega. Jab tak nahi aata, wait karna bhi ek position hai.",
+  "Journal likho. Jo naapa nahi jaata wo sudhaara nahi jaata.",
+  "Bade loss ek galti se nahi, ek galti ko na maanne se hote hain.",
+  "Emotion se nahi, edge se trade karo.",
+  "Chhota profit lena galat nahi, bada loss rokna sahi hai.",
+  "Market ko predict nahi karna — uske hisaab se react karna hai.",
+  "Aaj ki thakaan kal ki clarity banegi. Aaram bhi trading ka hissa hai.",
+  "Jitna sabr, utna sasta entry.",
+  "Ek mahine ka result nahi, ek saal ka process dekho.",
+  "Position size wahi rakho jisme neend aaye.",
+  "Rules banana aasan hai, todna aasan hai, nibhana asli kaam hai.",
+  "Har loss ek fees hai jo aap market ko sikhne ke liye dete ho. Value nikaalo.",
+  "Kal fir ek naya din, naya chart, naya mauka. Bas apna plan saath rakhna.",
+];
+function motivationForDay(day: string): string {
+  const dayNum = Math.floor(Date.parse(`${day}T00:00:00Z`) / 86400000);
+  return MOTIVATION_LINES[((dayNum % MOTIVATION_LINES.length) + MOTIVATION_LINES.length) % MOTIVATION_LINES.length];
+}
+const IST_OFFSET_MS = 330 * 60 * 1000;
+const SUMMARY_MINUTE_OF_DAY: number | null = (() => {
+  if (SUMMARY_TIME_RAW === "off" || SUMMARY_TIME_RAW === "false") return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(SUMMARY_TIME_RAW);
+  const h = m ? Number(m[1]) : NaN;
+  const mi = m ? Number(m[2]) : NaN;
+  if (m && h >= 0 && h <= 23 && mi >= 0 && mi <= 59) return h * 60 + mi;
+  console.log(`[summary] DAILY_SUMMARY_TIME_IST "${SUMMARY_TIME_RAW}" samajh nahi aaya — default 23:55 use ho raha hai`);
+  return 23 * 60 + 55;
+})();
+
+function istDayInfo(ms: number): { day: string; minuteOfDay: number } {
+  const d = new Date(ms + IST_OFFSET_MS);
+  return { day: d.toISOString().slice(0, 10), minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes() };
+}
+const sgn2 = (v: number): string => (v >= 0 ? "+" : "") + v.toFixed(2);
+const hhmmIst = (ms: number): string => {
+  const i = istDayInfo(ms);
+  return `${String(Math.floor(i.minuteOfDay / 60)).padStart(2, "0")}:${String(i.minuteOfDay % 60).padStart(2, "0")}`;
+};
+
+// true = kaam ho gaya (mail gayi ya jaanbujh kar skip), false = phir try karo
+async function sendDailySummary(day: string, startMs: number, endMs: number): Promise<boolean> {
+  const tr = await signedCall("GET", "/eapi/v1/userTrades", { startTime: startMs, endTime: endMs, limit: 1000 });
+  if (tr.status < 200 || tr.status >= 300) {
+    console.log(`[summary] userTrades HTTP ${tr.status} ${tr.body.slice(0, 150)}`);
+    return false;
+  }
+  let trades: Record<string, unknown>[];
+  try {
+    const j = JSON.parse(tr.body);
+    if (!Array.isArray(j)) { console.log("[summary] userTrades array nahi mila"); return false; }
+    trades = j as Record<string, unknown>[];
+  } catch { console.log("[summary] userTrades parse fail"); return false; }
+
+  // Trade na ho tab bhi mail jaati hai — loops khaali rahenge, isliye sab values 0 aayengi.
+
+  const per = new Map<string, { fills: number; realized: number; fee: number }>();
+  let realized = 0, fees = 0, wins = 0, losses = 0;
+  for (const t of trades) {
+    const sym = String(t.symbol ?? "?");
+    const rp = num(t.realizedProfit);
+    const fee = Math.abs(num(t.fee));
+    const row = per.get(sym) ?? { fills: 0, realized: 0, fee: 0 };
+    row.fills++; row.realized += rp; row.fee += fee;
+    per.set(sym, row);
+    realized += rp; fees += fee;
+    if (rp > 0) wins++; else if (rp < 0) losses++;
+  }
+
+  // Open positions (fail ho to summary phir bhi jaati hai, bas ye hissa chhoot jaata hai)
+  let posText = "  (positions fetch nahi ho paye)";
+  let totalUnreal = 0;
+  try {
+    const ps = await signedCall("GET", "/eapi/v1/position", {});
+    if (ps.status >= 200 && ps.status < 300) {
+      const arr = JSON.parse(ps.body);
+      const open = (Array.isArray(arr) ? arr : []).filter((x: Record<string, unknown>) => num(x.quantity) !== 0);
+      totalUnreal = open.reduce((a: number, x: Record<string, unknown>) => a + num(x.unrealizedPNL), 0);
+      posText = open.length
+        ? open.map((x: Record<string, unknown>) =>
+            `  ${x.symbol} ${x.side ?? ""} qty ${num(x.quantity)} entry ${num(x.entryPrice)} mark ${num(x.markPrice)} uPnL ${sgn2(num(x.unrealizedPNL))}`
+          ).join("\n") + `\n  Total unrealized: ${sgn2(totalUnreal)} USDT`
+        : "  Koi open position nahi\n  Total unrealized: +0.00 USDT";
+    }
+  } catch { /* posText default rahega */ }
+
+  // Current balance (best effort — na mile to ye line chhoot jaati hai)
+  let balLine = "";
+  try {
+    const ac = await signedCall("GET", "/eapi/v1/marginAccount", {});
+    if (ac.status >= 200 && ac.status < 300) {
+      const j = JSON.parse(ac.body) as { asset?: Record<string, unknown>[] };
+      const a = (Array.isArray(j?.asset) ? j.asset : []).find((x) => String(x.asset) === "USDT");
+      const eq = a ? (a.equity ?? a.marginBalance) : undefined;
+      if (eq !== undefined) balLine = `Current balance: ${num(eq).toFixed(2)} USDT\n`;
+    }
+  } catch { /* balLine khaali rahegi */ }
+
+  const rows = [...per.entries()].sort((a, b) => Math.abs(b[1].realized) - Math.abs(a[1].realized));
+  const shown = rows.slice(0, 15).map(([sym, r]) =>
+    `  ${sym}  fills ${r.fills}  realized ${sgn2(r.realized)}  fee ${r.fee.toFixed(2)}`);
+  if (rows.length > 15) shown.push(`  ... +${rows.length - 15} aur symbols`);
+
+  const net = Math.round((realized - fees) * 100) / 100;
+  const balChange = net > 0 ? `📈 Increased ${sgn2(net)} USDT`
+    : net < 0 ? `📉 Decreased ${sgn2(net)} USDT`
+    : "➖ No change (0.00 USDT)";
+  const noTrade = trades.length === 0;
+
+  const body =
+    `📊 Daily P&L Summary — ${day} (IST)\n` +
+    `Window: 00:00 – ${hhmmIst(endMs)} IST\n` +
+    (noTrade ? "ℹ️ Aaj koi trade nahi hui — sab values 0.\n" : "") +
+    `\nRealized P&L  : ${sgn2(realized)} USDT\n` +
+    `Fees          : ${fees > 0 ? "-" : ""}${fees.toFixed(2)} USDT\n` +
+    `Net (approx)  : ${sgn2(net)} USDT\n` +
+    `Balance change: ${balChange}\n` +
+    balLine +
+    `Fills: ${trades.length} | Closing trades: ${wins + losses} (Win ${wins} / Loss ${losses})\n` +
+    (trades.length >= 1000 ? "⚠️ 1000+ fills — list kat gayi, total kam dikh sakta hai\n" : "") +
+    `\nSymbol-wise:\n${shown.length ? shown.join("\n") : "  (koi trade nahi — sab 0)"}\n` +
+    `\nOpen positions:\n${posText}\n` +
+    `\n💬 Aaj ki line: ${motivationForDay(day)}\n`;
+
+  return await sendEmailAlert(
+    `summary:${day}`,
+    `[Trade] Daily P&L ${day}: ${sgn2(net)} USDT (${trades.length} fills${noTrade ? " — aaj trade nahi" : ""})`,
+    body,
+    0,
+    true,   // critical: fail-alert daily cap se nahi rukegi
+  );
+}
+
+let summarySentDay = "";
+let summaryTriesDay = "";
+let summaryTries = 0;
+let summaryNextTryMs = 0;
+async function dailySummaryLoop(): Promise<void> {
+  if (SUMMARY_MINUTE_OF_DAY === null) { console.log("[summary] band (DAILY_SUMMARY_TIME_IST=off)"); return; }
+  console.log(`[summary] daily P&L mail chalu — roz ${String(Math.floor(SUMMARY_MINUTE_OF_DAY / 60)).padStart(2, "0")}:${String(SUMMARY_MINUTE_OF_DAY % 60).padStart(2, "0")} IST ke baad`);
+  while (true) {
+    try {
+      const now = nowMs();
+      const { day, minuteOfDay } = istDayInfo(now);
+      if (day !== summaryTriesDay) { summaryTriesDay = day; summaryTries = 0; }
+      if (minuteOfDay >= SUMMARY_MINUTE_OF_DAY && summarySentDay !== day && summaryTries < 3 && now >= summaryNextTryMs) {
+        summaryTries++;
+        const startMs = Date.parse(`${day}T00:00:00+05:30`);
+        const ok = await sendDailySummary(day, startMs, now);
+        if (ok) summarySentDay = day; else summaryNextTryMs = nowMs() + 10 * 60 * 1000;
+      }
+    } catch (e) {
+      console.log(`[summary] error: ${String(e).slice(0, 200)}`);
+      summaryNextTryMs = nowMs() + 10 * 60 * 1000;
+    }
+    await sleep(60_000);
+  }
+}
+
 // ── Rules engine startup — background, IDLE_STOP se independent ────────────
 rulesMonitorLoop();
+dailySummaryLoop();
 
 // ── Server ────────────────────────────────────────────────────────────────
 Deno.serve({ port: PORT }, async (req: Request) => {
