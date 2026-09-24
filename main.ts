@@ -544,6 +544,74 @@ function envNum(name: string, def: number): number {
   return Number.isFinite(v) && v > 0 ? v : def;
 }
 
+// ── EMAIL ALERTS (Brevo HTTPS API) ─────────────────────────────────────────
+// app.py ke send_alert() jaisa hi, sirf email. Render → Environment mein ye
+// 3 env vars daalo (HF wale secrets ki same values):
+//   BREVO_API_KEY       = xkeysib-...
+//   ALERT_EMAIL_TO      = jis email par alert chahiye
+//   BREVO_SENDER_EMAIL  = Brevo mein VERIFIED sender (optional — na ho to ALERT_EMAIL_TO)
+//   ALERT_FAIL_COOLDOWN_SEC = (optional, default 3600) ek hi rule ka "close fail"
+//                         alert itne second mein max 1 baar (loop har 2s retry karta hai)
+//   ALERT_DAILY_MAX     = (optional, default 30) ek din (UTC) mein max itni mails —
+//                         Brevo free ki 300/day limit bachane ke liye. Ye cap sirf
+//                         FAIL alerts par lagta hai; SL/Target/Trailing "HIT" mail
+//                         (compulsory) cap se nahi rukti.
+// Ye kabhi throw nahi karta aur trade/exit flow ko block nahi karta (caller
+// isse `void` karke chalata hai). Env vars set na hon to chupchaap skip.
+const BREVO_API_KEY = (Deno.env.get("BREVO_API_KEY") ?? "").trim();
+const ALERT_EMAIL_TO = (Deno.env.get("ALERT_EMAIL_TO") ?? "").trim();
+const BREVO_SENDER_EMAIL = (Deno.env.get("BREVO_SENDER_EMAIL") ?? "").trim() || ALERT_EMAIL_TO;
+const ALERT_FAIL_COOLDOWN_MS = envNum("ALERT_FAIL_COOLDOWN_SEC", 3600) * 1000;
+const ALERT_DAILY_MAX = envNum("ALERT_DAILY_MAX", 30);
+const alertLastSent = new Map<string, number>();   // {key: last_success_ts}
+let alertDay = "";        // UTC date (YYYY-MM-DD) jiska count neeche chal raha hai
+let alertDayCount = 0;    // us din ab tak ki successful mails
+
+// critical=true → daily cap ignore (sirf trade-HIT jaisi compulsory mails ke liye)
+async function sendEmailAlert(
+  key: string, subject: string, message: string, cooldownMs: number, critical = false,
+): Promise<boolean> {
+  const last = alertLastSent.get(key) ?? 0;
+  try {
+    if (!BREVO_API_KEY || !ALERT_EMAIL_TO || !BREVO_SENDER_EMAIL) {
+      console.log(`[alert] skip (${key}): BREVO_API_KEY / ALERT_EMAIL_TO / BREVO_SENDER_EMAIL set nahi`);
+      return false;
+    }
+    const now = nowMs();
+    if (cooldownMs > 0 && now - last < cooldownMs) return false;
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (day !== alertDay) { alertDay = day; alertDayCount = 0; }
+    if (!critical && alertDayCount >= ALERT_DAILY_MAX) {
+      console.log(`[alert] daily cap ${ALERT_DAILY_MAX} poora — skip (${key})`);
+      return false;
+    }
+    alertLastSent.set(key, now);   // race se bachne ke liye pehle mark; fail hua to neeche wapas
+    const r = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: { "api-key": BREVO_API_KEY, "accept": "application/json", "content-type": "application/json" },
+      body: JSON.stringify({
+        sender: { name: "Trading Alerts", email: BREVO_SENDER_EMAIL },
+        to: [{ email: ALERT_EMAIL_TO }],
+        subject,
+        textContent: message,
+      }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (r.status === 200 || r.status === 201 || r.status === 202) {
+      alertDayCount++;
+      console.log(`[alert] sent (${key}) — aaj ${alertDayCount} mail`);
+      return true;
+    }
+    alertLastSent.set(key, last);  // fail → agli baar phir try hoga
+    console.log(`[alert] FAILED (${key}) HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+    return false;
+  } catch (e) {
+    alertLastSent.set(key, last);
+    console.log(`[alert] FAILED (${key}): ${String(e).slice(0, 200)}`);
+    return false;
+  }
+}
+
 // ── Rules engine (SL / Target / Trailing) — Supabase-backed ────────────────
 // Secrets naam jaanbujh kar app.py ke REPLAY/TEST Supabase project jaise hi
 // rakhe hain (TEST_SUPABASE_URL / TEST_SUPABASE_ANON_KEY) — user ke ask par.
@@ -1113,14 +1181,48 @@ async function closeRuleReduceOnly(rule: TradeRule, reason: string): Promise<voi
     }, { bypassBackoff: true });
     const ok = res.status >= 200 && res.status < 300;
     console.log(`[rules] ${reason} close ${symbol} ${isShort ? "BUY" : "SELL"} q=${rule.entry_qty} p=${price} -> HTTP ${res.status}`);
+    const ruleInfo =
+      `Symbol: ${symbol}\nSide: ${rule.side}\nQty: ${rule.entry_qty}\nEntry: ${rule.entry_price}\n` +
+      `SL: ${rule.sl_price ?? "-"} | Target: ${rule.target_price ?? "-"} | Trail pts: ${rule.trailing_points ?? "-"}\n` +
+      `Close order: ${isShort ? "BUY" : "SELL"} LIMIT reduceOnly @ ${price}`;
     if (ok) {
       const orderId = pickOrderId(res.body);
-      await supaUpdateRule(rule.id, { status: "triggered", close_order_id: orderId });
+      const dbOk = await supaUpdateRule(rule.id, { status: "triggered", close_order_id: orderId });
       rulesCache.delete(rule.id);
+      // Trigger alert (background — exit flow ko block nahi karta). Per-rule key + 10 min
+      // cooldown: agar DB update fail ho gaya aur rule dobara trigger ho, to duplicate mail na aaye.
+      void sendEmailAlert(
+        `trigger:${rule.id}`,
+        `[Trade] ${reason} HIT — ${symbol} ${rule.side}`,
+        `${reason} trigger hua, close order bhej diya gaya.\n\n${ruleInfo}\nOrder ID: ${orderId ?? "?"}\n` +
+          (dbOk ? "" : "\n⚠️ Supabase mein rule status update NAHI hua — rule dobara trigger ho sakta hai, check karo.\n") +
+          `\nTime (UTC): ${new Date().toISOString()}`,
+        10 * 60 * 1000,
+        true,   // critical: daily cap se nahi rukegi
+      );
+    } else {
+      // fail ho to rule "active" hi rehta hai — agla loop-pass phir try karega
+      // (isliye alert per-rule cooldown ke saath, warna har 2s mein mail jaati)
+      void sendEmailAlert(
+        `closefail:${rule.id}`,
+        `[Trade] ⚠️ ${reason} close order FAIL — ${symbol}`,
+        `${reason} trigger hua par close order REJECT/FAIL hua (HTTP ${res.status}). ` +
+          `Engine har ~2s retry kar raha hai — par manual check karo!\n\n${ruleInfo}\n\n` +
+          `Binance response: ${String(res.body).slice(0, 300)}\n\nTime (UTC): ${new Date().toISOString()}`,
+        ALERT_FAIL_COOLDOWN_MS,
+      );
     }
-    // fail ho to rule "active" hi rehta hai — agla loop-pass phir try karega
   } catch (e) {
     console.log(`[rules] close FAILED ${symbol}: ${String(e).slice(0, 200)}`);
+    void sendEmailAlert(
+      `closefail:${rule.id}`,
+      `[Trade] ⚠️ ${reason} close order FAIL — ${symbol}`,
+      `${reason} trigger hua par close order bhejte waqt error aaya. Engine retry kar raha hai — par manual check karo!\n\n` +
+        `Symbol: ${symbol}\nSide: ${rule.side}\nQty: ${rule.entry_qty}\nEntry: ${rule.entry_price}\n` +
+        `SL: ${rule.sl_price ?? "-"} | Target: ${rule.target_price ?? "-"} | Trail pts: ${rule.trailing_points ?? "-"}\n\n` +
+        `Error: ${String(e).slice(0, 300)}\n\nTime (UTC): ${new Date().toISOString()}`,
+      ALERT_FAIL_COOLDOWN_MS,
+    );
   } finally {
     closingSymbols.delete(symbol);
   }
