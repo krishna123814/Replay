@@ -568,8 +568,27 @@ let alertDay = "";        // UTC date (YYYY-MM-DD) jiska count neeche chal raha 
 let alertDayCount = 0;    // us din ab tak ki successful mails
 
 // critical=true → daily cap ignore (sirf trade-HIT jaisi compulsory mails ke liye)
+// Plain text alert message ko ek basic par saaf-suthri HTML card mein wrap karta hai
+// (jab kisi call-site ne apna khud ka HTML nahi diya). Monospace block + subject-jaisi
+// heading, taaki har mail (trigger/fail alerts) bhi Gmail mein professional dikhe.
+function autoHtmlFromText(subject: string, message: string): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const accent = /FAIL|⚠️/.test(subject) ? "#dc2626" : /HIT/.test(subject) ? "#16a34a" : "#334155";
+  return `<!doctype html><html><body style="margin:0;padding:24px;background:#f1f5f9;font-family:Segoe UI,Roboto,Arial,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+    <div style="background:${accent};padding:16px 20px;">
+      <span style="color:#ffffff;font-size:15px;font-weight:600;">${esc(subject)}</span>
+    </div>
+    <div style="padding:20px;">
+      <pre style="margin:0;white-space:pre-wrap;font-family:'Consolas','Menlo',monospace;font-size:13px;line-height:1.6;color:#1e293b;">${esc(message)}</pre>
+    </div>
+  </div>
+</body></html>`;
+}
+
 async function sendEmailAlert(
   key: string, subject: string, message: string, cooldownMs: number, critical = false,
+  html?: string,
 ): Promise<boolean> {
   const last = alertLastSent.get(key) ?? 0;
   try {
@@ -594,6 +613,7 @@ async function sendEmailAlert(
         to: [{ email: ALERT_EMAIL_TO }],
         subject,
         textContent: message,
+        htmlContent: html ?? autoHtmlFromText(subject, message),
       }),
       signal: AbortSignal.timeout(12000),
     });
@@ -1419,6 +1439,18 @@ async function handleTrade(req: Request, url: URL): Promise<Response> {
       const r = await signedCall("GET", "/eapi/v1/userTrades", pick(url, ["symbol", "fromId", "startTime", "endTime", "limit"]));
       return tradeRaw(r.status, r.body);
     }
+    // Account bills: fees, contract (premium/settlement) flows, transfers — read-only
+    if (path === "/trade/bill" && m === "GET") {
+      const params = pick(url, ["currency", "recordId", "startTime", "endTime", "limit"]);
+      if (!params.currency) params.currency = "USDT";
+      const r = await signedCall("GET", "/eapi/v1/bill", params);
+      return tradeRaw(r.status, r.body);
+    }
+    // Exercise / expiry (settlement) records — read-only
+    if (path === "/trade/exercise" && m === "GET") {
+      const r = await signedCall("GET", "/eapi/v1/exerciseRecord", pick(url, ["symbol", "startTime", "endTime", "limit"]));
+      return tradeRaw(r.status, r.body);
+    }
     if (path === "/trade/order" && m === "POST") return await handlePlaceOrder(req);
     if (path === "/trade/cancel" && m === "POST") return await handleCancel(req);
     if (path === "/trade/cancel-all" && m === "POST") {
@@ -1503,6 +1535,121 @@ function istDayInfo(ms: number): { day: string; minuteOfDay: number } {
   return { day: d.toISOString().slice(0, 10), minuteOfDay: d.getUTCHours() * 60 + d.getUTCMinutes() };
 }
 const sgn2 = (v: number): string => (v >= 0 ? "+" : "") + v.toFixed(2);
+
+// ── Daily summary ka HTML email template ────────────────────────────────────
+// Plain-text jaisa hi data, bas Gmail mein ek proper card/table ki tarah dikhta
+// hai: profit green, loss red, header colored net ke hisaab se.
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function pnlColor(v: number): string {
+  return v > 0 ? "#16a34a" : v < 0 ? "#dc2626" : "#64748b";
+}
+function buildSummaryHtml(p: {
+  day: string; endMs: number; noTrade: boolean;
+  realized: number; fees: number; net: number; balChange: string;
+  fillsCount: number; wins: number; losses: number; capped: boolean;
+  shownRows: [string, { fills: number; realized: number; fee: number }][];
+  extraSymbolCount: number;
+  posOpen: { symbol: string; side: string; qty: number; entry: number; mark: number; uPnl: number }[];
+  totalUnreal: number; currentBalance: number | null;
+}): string {
+  const headerColor = p.net > 0 ? "#16a34a" : p.net < 0 ? "#dc2626" : "#475569";
+  const windowStr = `00:00 – ${hhmmIst(p.endMs)} IST`;
+
+  const symbolRows = p.shownRows.length
+    ? p.shownRows.map(([sym, r]) => `
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-weight:600;color:#1e293b;">${escHtml(sym)}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:center;color:#475569;">${r.fills}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:600;color:${pnlColor(r.realized)};">${sgn2(r.realized)}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${r.fee.toFixed(2)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="4" style="padding:12px 10px;text-align:center;color:#94a3b8;">Koi trade nahi — sab 0</td></tr>`;
+  const extraRow = p.extraSymbolCount > 0
+    ? `<tr><td colspan="4" style="padding:8px 10px;text-align:center;color:#94a3b8;font-style:italic;">... +${p.extraSymbolCount} aur symbols</td></tr>` : "";
+
+  const posRows = p.posOpen.length
+    ? p.posOpen.map((x) => `
+      <tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-weight:600;color:#1e293b;">${escHtml(x.symbol)}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:center;color:#475569;">${escHtml(x.side)}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${x.qty}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${x.entry}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${x.mark}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:600;color:${pnlColor(x.uPnl)};">${sgn2(x.uPnl)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="6" style="padding:12px 10px;text-align:center;color:#94a3b8;">Koi open position nahi</td></tr>`;
+
+  const statRow = (label: string, value: string, color = "#1e293b") => `
+    <tr>
+      <td style="padding:7px 0;color:#64748b;font-size:13px;">${label}</td>
+      <td style="padding:7px 0;text-align:right;font-weight:600;color:${color};font-size:13px;">${value}</td>
+    </tr>`;
+
+  return `<!doctype html><html><body style="margin:0;padding:24px;background:#f1f5f9;font-family:Segoe UI,Roboto,Arial,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+
+    <div style="background:${headerColor};padding:20px 24px;">
+      <div style="color:#ffffff;font-size:17px;font-weight:700;">📊 Daily P&amp;L Summary — ${escHtml(p.day)}</div>
+      <div style="color:rgba(255,255,255,0.85);font-size:12px;margin-top:4px;">${windowStr}</div>
+    </div>
+
+    ${p.noTrade ? `<div style="margin:16px 24px 0;padding:10px 14px;background:#eff6ff;border-left:3px solid #3b82f6;border-radius:6px;color:#1e40af;font-size:13px;">ℹ️ Aaj koi trade nahi hui — sab values 0.</div>` : ""}
+
+    <div style="padding:20px 24px 8px;">
+      <table style="width:100%;border-collapse:collapse;">
+        ${statRow("Realized P&amp;L", sgn2(p.realized) + " USDT", pnlColor(p.realized))}
+        ${statRow("Fees", (p.fees > 0 ? "-" : "") + p.fees.toFixed(2) + " USDT", "#dc2626")}
+        ${statRow("Net (approx)", sgn2(p.net) + " USDT", pnlColor(p.net))}
+        ${statRow("Balance change", escHtml(p.balChange))}
+        ${p.currentBalance !== null ? statRow("Current balance", p.currentBalance.toFixed(2) + " USDT") : ""}
+        ${statRow("Fills / Closing trades", `${p.fillsCount} / ${p.wins + p.losses} (W${p.wins} L${p.losses})`)}
+      </table>
+      ${p.capped ? `<div style="margin-top:8px;font-size:12px;color:#b45309;">⚠️ 1000+ fills — list kat gayi, total kam dikh sakta hai</div>` : ""}
+    </div>
+
+    <div style="padding:8px 24px 4px;">
+      <div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:6px;">Symbol-wise</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:#f8fafc;">
+            <th style="padding:8px 10px;text-align:left;color:#64748b;font-size:11px;text-transform:uppercase;">Symbol</th>
+            <th style="padding:8px 10px;text-align:center;color:#64748b;font-size:11px;text-transform:uppercase;">Fills</th>
+            <th style="padding:8px 10px;text-align:right;color:#64748b;font-size:11px;text-transform:uppercase;">Realized</th>
+            <th style="padding:8px 10px;text-align:right;color:#64748b;font-size:11px;text-transform:uppercase;">Fee</th>
+          </tr>
+        </thead>
+        <tbody>${symbolRows}${extraRow}</tbody>
+      </table>
+    </div>
+
+    <div style="padding:16px 24px 4px;">
+      <div style="font-size:13px;font-weight:700;color:#334155;margin-bottom:6px;">Open Positions</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:#f8fafc;">
+            <th style="padding:8px 10px;text-align:left;color:#64748b;font-size:11px;text-transform:uppercase;">Symbol</th>
+            <th style="padding:8px 10px;text-align:center;color:#64748b;font-size:11px;text-transform:uppercase;">Side</th>
+            <th style="padding:8px 10px;text-align:right;color:#64748b;font-size:11px;text-transform:uppercase;">Qty</th>
+            <th style="padding:8px 10px;text-align:right;color:#64748b;font-size:11px;text-transform:uppercase;">Entry</th>
+            <th style="padding:8px 10px;text-align:right;color:#64748b;font-size:11px;text-transform:uppercase;">Mark</th>
+            <th style="padding:8px 10px;text-align:right;color:#64748b;font-size:11px;text-transform:uppercase;">uPnL</th>
+          </tr>
+        </thead>
+        <tbody>${posRows}</tbody>
+      </table>
+      ${p.posOpen.length ? `<div style="text-align:right;margin-top:6px;font-size:12px;color:#64748b;">Total unrealized: <span style="font-weight:700;color:${pnlColor(p.totalUnreal)};">${sgn2(p.totalUnreal)} USDT</span></div>` : ""}
+    </div>
+
+    <div style="padding:18px 24px 22px;">
+      <div style="border-top:1px solid #e2e8f0;padding-top:14px;font-size:13px;color:#475569;font-style:italic;">💬 ${escHtml(motivationForDay(p.day))}</div>
+    </div>
+
+  </div>
+</body></html>`;
+}
+
 const hhmmIst = (ms: number): string => {
   const i = istDayInfo(ms);
   return `${String(Math.floor(i.minuteOfDay / 60)).padStart(2, "0")}:${String(i.minuteOfDay % 60).padStart(2, "0")}`;
@@ -1540,12 +1687,17 @@ async function sendDailySummary(day: string, startMs: number, endMs: number): Pr
   // Open positions (fail ho to summary phir bhi jaati hai, bas ye hissa chhoot jaata hai)
   let posText = "  (positions fetch nahi ho paye)";
   let totalUnreal = 0;
+  let openPositionsForHtml: { symbol: string; side: string; qty: number; entry: number; mark: number; uPnl: number }[] = [];
   try {
     const ps = await signedCall("GET", "/eapi/v1/position", {});
     if (ps.status >= 200 && ps.status < 300) {
       const arr = JSON.parse(ps.body);
       const open = (Array.isArray(arr) ? arr : []).filter((x: Record<string, unknown>) => num(x.quantity) !== 0);
       totalUnreal = open.reduce((a: number, x: Record<string, unknown>) => a + num(x.unrealizedPNL), 0);
+      openPositionsForHtml = open.map((x: Record<string, unknown>) => ({
+        symbol: String(x.symbol ?? "?"), side: String(x.side ?? ""), qty: num(x.quantity),
+        entry: num(x.entryPrice), mark: num(x.markPrice), uPnl: num(x.unrealizedPNL),
+      }));
       posText = open.length
         ? open.map((x: Record<string, unknown>) =>
             `  ${x.symbol} ${x.side ?? ""} qty ${num(x.quantity)} entry ${num(x.entryPrice)} mark ${num(x.markPrice)} uPnL ${sgn2(num(x.unrealizedPNL))}`
@@ -1556,13 +1708,14 @@ async function sendDailySummary(day: string, startMs: number, endMs: number): Pr
 
   // Current balance (best effort — na mile to ye line chhoot jaati hai)
   let balLine = "";
+  let currentBalance: number | null = null;
   try {
     const ac = await signedCall("GET", "/eapi/v1/marginAccount", {});
     if (ac.status >= 200 && ac.status < 300) {
       const j = JSON.parse(ac.body) as { asset?: Record<string, unknown>[] };
       const a = (Array.isArray(j?.asset) ? j.asset : []).find((x) => String(x.asset) === "USDT");
       const eq = a ? (a.equity ?? a.marginBalance) : undefined;
-      if (eq !== undefined) balLine = `Current balance: ${num(eq).toFixed(2)} USDT\n`;
+      if (eq !== undefined) { currentBalance = num(eq); balLine = `Current balance: ${currentBalance.toFixed(2)} USDT\n`; }
     }
   } catch { /* balLine khaali rahegi */ }
 
@@ -1592,12 +1745,20 @@ async function sendDailySummary(day: string, startMs: number, endMs: number): Pr
     `\nOpen positions:\n${posText}\n` +
     `\n💬 Aaj ki line: ${motivationForDay(day)}\n`;
 
+  const html = buildSummaryHtml({
+    day, endMs, noTrade, realized, fees, net, balChange,
+    fillsCount: trades.length, wins, losses, capped: trades.length >= 1000,
+    shownRows: rows.slice(0, 15), extraSymbolCount: Math.max(0, rows.length - 15),
+    posOpen: openPositionsForHtml, totalUnreal, currentBalance,
+  });
+
   return await sendEmailAlert(
     `summary:${day}`,
     `[Trade] Daily P&L ${day}: ${sgn2(net)} USDT (${trades.length} fills${noTrade ? " — aaj trade nahi" : ""})`,
     body,
     0,
     true,   // critical: fail-alert daily cap se nahi rukegi
+    html,
   );
 }
 
