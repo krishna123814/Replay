@@ -16,12 +16,17 @@
 //      (rollback ke liye) — par ye poora data forward karte hain, bandwidth zyada.
 //
 // NEW: /trade/... endpoints (Binance Options, token-protected) — neeche "TRADE MODULE" dekho.
+// STEP 1 (safety): (a) public REST forward ab ALLOWLIST + GET-only hai, signed/private calls block,
+//   (b) POST /trade/panic (sab orders cancel + sab positions reduceOnly close),
+//   (c) Binance tick/qty-step exchangeInfo se (GET /trade/ticksize), order rejects se pehle check,
+//   (d) 429/418 backoff, GET retry, -1021 time-sync auto-fix.
 //
 // Env vars (sab optional):
 //   PORT             (Render khud deta hai)
 //   IDLE_STOP_SEC    default 60   — itni der /snapshot na aaye to Binance WS band
 //   TICKER_TTL_SEC   default 5    — 24h ticker (OI/volume/chg%) refresh gap
 //   FILTER_REST      default true — "false" karne par REST ka filtering band
+//   EXTRA_PUBLIC_PATHS  comma-separated extra public REST paths (allowlist mein jodne ke liye)
 
 // ── Config ────────────────────────────────────────────────────────────────
 const PORT = Number(Deno.env.get("PORT") ?? 8000);
@@ -454,6 +459,33 @@ const REST_TTL_MS: Record<string, number> = {
 };
 const restCache = new Map<string, { ts: number; status: number; text: string; ct: string }>();
 
+// ── Public REST forward LOCK (Step 1) ──────────────────────────────────────
+// Pehle /api/ aur /eapi/ ke SAARE paths (signed bhi) bina auth forward hote the. Ab sirf
+// neeche ke public market-data GET paths jaate hain. Signed/private calls (account, order,
+// position...) sirf token-protected /trade/... se hoti hain. Naya public path chahiye to
+// Render env EXTRA_PUBLIC_PATHS mein comma-separated daalo (e.g. /eapi/v1/openInterest).
+const PUBLIC_REST_PATHS = new Set<string>([
+  "/api/v3/ping", "/api/v3/time", "/api/v3/exchangeInfo", "/api/v3/klines",
+  "/api/v3/ticker/price", "/api/v3/ticker/24hr", "/api/v3/ticker/bookTicker",
+  "/api/v3/depth", "/api/v3/trades", "/api/v3/avgPrice",
+  "/eapi/v1/ping", "/eapi/v1/time", "/eapi/v1/exchangeInfo", "/eapi/v1/ticker",
+  "/eapi/v1/mark", "/eapi/v1/depth", "/eapi/v1/klines", "/eapi/v1/trades", "/eapi/v1/index",
+]);
+for (const p of (Deno.env.get("EXTRA_PUBLIC_PATHS") ?? "").split(",")) {
+  const t = p.trim();
+  if (t.startsWith("/api/") || t.startsWith("/eapi/")) PUBLIC_REST_PATHS.add(t);
+}
+
+function forwardBlockReason(req: Request, url: URL): string | null {
+  if (req.method !== "GET" && req.method !== "HEAD") return "Public forward par sirf GET allowed hai";
+  for (const k of url.searchParams.keys()) {
+    const kl = k.toLowerCase();
+    if (kl === "signature" || kl === "timestamp" || kl === "recvwindow") return "Signed requests yahan block hain (use /trade/...)";
+  }
+  if (!PUBLIC_REST_PATHS.has(url.pathname)) return `Path public allowlist mein nahi hai: ${url.pathname}`;
+  return null;
+}
+
 // deno-lint-ignore no-explicit-any
 function filterRest(pathname: string, data: any): any {
   if (pathname === "/eapi/v1/exchangeInfo" && data && Array.isArray(data.optionSymbols)) {
@@ -511,6 +543,14 @@ function envNum(name: string, def: number): number {
   const v = parseFloat(Deno.env.get(name) ?? "");
   return Number.isFinite(v) && v > 0 ? v : def;
 }
+
+// ── Rules engine (SL / Target / Trailing) — Supabase-backed ────────────────
+// Secrets naam jaanbujh kar app.py ke REPLAY/TEST Supabase project jaise hi
+// rakhe hain (TEST_SUPABASE_URL / TEST_SUPABASE_ANON_KEY) — user ke ask par.
+// Ye anon-key hai isliye Supabase mein "trade_rules" table par RLS OFF honi
+// chahiye (ya anon ko explicit grants), warna reads/writes 401/403 denge.
+const SUPABASE_URL = (Deno.env.get("TEST_SUPABASE_URL") ?? "").trim().replace(/\/+$/, "");
+const SUPABASE_ANON_KEY = (Deno.env.get("TEST_SUPABASE_ANON_KEY") ?? "").trim();
 
 const OPTION_SYMBOL_RE = /^BTC-\d{6}-\d{3,7}-[CP]$/;
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,36}$/;
@@ -595,21 +635,62 @@ function buildQuery(p: Params): string {
     .join("&");
 }
 
-async function signedCall(method: "GET" | "POST" | "DELETE", path: string, params: Params) {
-  await syncTime();
-  const qs = buildQuery({ ...params, recvWindow: 5000, timestamp: nowMs() + timeOffsetMs });
-  const sig = await hmacHex(OPT_SECRET_KEY, qs);
-  const r = await fetch(`${EAPI}${path}?${qs}&signature=${sig}`, {
-    method,
-    headers: { "X-MBX-APIKEY": OPT_API_KEY },
-    signal: AbortSignal.timeout(15000),
-  });
-  const text = await r.text();
-  // Binance ka jawab bina parse/stringify kiye seedha aage jaata hai — 19-digit
-  // orderId jaise bade numbers JS mein precision kho dete hain.
-  let body: string;
-  try { JSON.parse(text); body = text; } catch { body = JSON.stringify({ raw: text.slice(0, 500) }); }
-  return { status: r.status, body };
+// Binance rate-limit (429) / IP-ban (418) ke baad hum khud bhi kuch der ruk jaate hain
+let bnBackoffUntil = 0;
+
+interface CallOpts { bypassBackoff?: boolean }
+
+async function signedCall(
+  method: "GET" | "POST" | "DELETE", path: string, params: Params, opts: CallOpts = {},
+): Promise<{ status: number; body: string }> {
+  if (!opts.bypassBackoff && nowMs() < bnBackoffUntil) {
+    const s = Math.ceil((bnBackoffUntil - nowMs()) / 1000);
+    return { status: 429, body: JSON.stringify({ error: `Binance rate-limit backoff chal raha hai — ${s}s baad try karo` }) };
+  }
+  const maxAttempts = method === "GET" ? 3 : 1;   // sirf GET (idempotent) network error par retry hota hai
+  let resynced = false;
+  for (let attempt = 1; ; attempt++) {
+    await syncTime();
+    const qs = buildQuery({ ...params, recvWindow: 5000, timestamp: nowMs() + timeOffsetMs });
+    const sig = await hmacHex(OPT_SECRET_KEY, qs);
+    let r: Response;
+    try {
+      r = await fetch(`${EAPI}${path}?${qs}&signature=${sig}`, {
+        method,
+        headers: { "X-MBX-APIKEY": OPT_API_KEY },
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (e) {
+      if (attempt < maxAttempts) { await sleep(400 * attempt); continue; }
+      throw e;   // POST/DELETE: outcome unknown — caller ko batana hai, blind retry nahi
+    }
+    const text = await r.text();
+    // Binance ka jawab bina parse/stringify kiye seedha aage jaata hai — 19-digit
+    // orderId jaise bade numbers JS mein precision kho dete hain.
+    let body: string;
+    let code: number | null = null;
+    try {
+      const j = JSON.parse(text);
+      body = text;
+      if (j && typeof j === "object" && !Array.isArray(j) && Number.isFinite(Number(j.code))) code = Number(j.code);
+    } catch { body = JSON.stringify({ raw: text.slice(0, 500) }); }
+
+    if (r.status === 429 || r.status === 418) {
+      const ra = parseInt(r.headers.get("retry-after") ?? "", 10);
+      const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 1800) : (r.status === 418 ? 120 : 10);
+      bnBackoffUntil = Math.max(bnBackoffUntil, nowMs() + wait * 1000);
+      console.log(`[trade] Binance HTTP ${r.status} — backoff ${wait}s`);
+      return { status: r.status, body };
+    }
+    // -1021: timestamp recvWindow ke bahar — request process hi nahi hui, isliye retry safe hai (sab methods)
+    if (code === -1021 && !resynced) {
+      resynced = true;
+      timeSyncedAt = 0;
+      await syncTime();
+      continue;
+    }
+    return { status: r.status, body };
+  }
 }
 
 // URL se sirf allowed query params uthao
@@ -631,6 +712,59 @@ async function readBody(req: Request): Promise<Record<string, unknown> | null> {
   } catch {
     return null;
   }
+}
+
+// ── Tick size / qty step (exchangeInfo filters) ────────────────────────────
+// Public REST forward exchangeInfo se filters hata deta hai, isliye yahan Render seedha
+// Binance se leta hai (10 min cache). Agar filters na milein to check skip hota hai
+// (source: "unknown") — order tab bhi Binance khud reject/accept karega.
+interface SymRules { tick: number | null; step: number | null; minQty: number | null; source: "exchangeInfo" | "unknown" }
+let symRulesCache: { ts: number; map: Map<string, SymRules> } = { ts: 0, map: new Map() };
+
+function posNum(x: unknown): number | null {
+  const n = parseFloat(String(x ?? ""));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+async function loadSymRules(): Promise<void> {
+  if (symRulesCache.map.size && nowMs() - symRulesCache.ts < 10 * 60_000) return;
+  try {
+    const r = await fetch(`${EAPI}/eapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return;
+    const j = await r.json();
+    const m = new Map<string, SymRules>();
+    // deno-lint-ignore no-explicit-any
+    for (const s of ((j?.optionSymbols ?? []) as any[])) {
+      const sym = String(s?.symbol ?? "");
+      if (!sym.startsWith(SYMBOL_PREFIX)) continue;
+      let tick: number | null = null;
+      let step: number | null = null;
+      let minQty: number | null = posNum(s?.minQty);
+      // deno-lint-ignore no-explicit-any
+      for (const f of ((s?.filters ?? []) as any[])) {
+        if (f?.filterType === "PRICE_FILTER") tick = posNum(f.tickSize);
+        if (f?.filterType === "LOT_SIZE") { step = posNum(f.stepSize); minQty = posNum(f.minQty) ?? minQty; }
+      }
+      m.set(sym, { tick, step, minQty, source: "exchangeInfo" });
+    }
+    if (m.size) symRulesCache = { ts: nowMs(), map: m };
+  } catch { /* purana cache chalega */ }
+}
+
+async function getSymRules(symbol: string): Promise<SymRules> {
+  await loadSymRules();
+  return symRulesCache.map.get(symbol) ?? { tick: null, step: null, minQty: null, source: "unknown" };
+}
+
+function isMultipleOf(x: number, unit: number): boolean {
+  const q = x / unit;
+  return Math.abs(q - Math.round(q)) < 1e-6;
+}
+
+function roundToTick(x: number, tick: number, mode: "down" | "up"): number {
+  const q = x / tick;
+  const r = mode === "down" ? Math.floor(q + 1e-9) : Math.ceil(q - 1e-9);
+  return Number((r * tick).toFixed(8));
 }
 
 // Order safety state
@@ -704,6 +838,21 @@ async function handlePlaceOrder(req: Request): Promise<Response> {
     return tradeJson(403, { error: `price mark (${mark}) se ${MAX_PRICE_DEV_PCT}% se zyada door hai` });
   }
 
+  // Tick size / qty step check (Binance ke asli filters se) — reject hone se pehle saaf error
+  const rules = await getSymRules(symbol);
+  if (rules.tick !== null && !isMultipleOf(price, rules.tick)) {
+    recentClientIds.delete(clientOrderId);
+    return tradeJson(400, { error: `price tick size (${rules.tick}) ke multiple mein hona chahiye`, tick: rules.tick });
+  }
+  if (rules.step !== null && !isMultipleOf(qty, rules.step)) {
+    recentClientIds.delete(clientOrderId);
+    return tradeJson(400, { error: `quantity step (${rules.step}) ke multiple mein hona chahiye`, step: rules.step });
+  }
+  if (rules.minQty !== null && qty < rules.minQty - 1e-12) {
+    recentClientIds.delete(clientOrderId);
+    return tradeJson(400, { error: `quantity min (${rules.minQty}) se kam hai`, minQty: rules.minQty });
+  }
+
   const res = await signedCall("POST", "/eapi/v1/order", {
     symbol, side, type: "LIMIT", quantity: qty, price, timeInForce: tif,
     reduceOnly: reduceOnly ? "true" : undefined,
@@ -724,9 +873,393 @@ async function handleCancel(req: Request): Promise<Response> {
     symbol,
     orderId: b.orderId ? String(b.orderId) : undefined,
     clientOrderId: b.clientOrderId ? String(b.clientOrderId) : undefined,
-  });
+  }, { bypassBackoff: true });
   console.log(`[trade] cancel ${symbol} -> HTTP ${res.status}`);
   return tradeRaw(res.status, res.body);
+}
+
+// ── PANIC: saare open orders cancel + saari open positions reduceOnly close ──
+// Ye risk GHATAATA hai (naya risk nahi banata), isliye TRADING_ENABLED=false hone par bhi chalta hai
+// aur MAX_ORDER_* limits / rate-limit / backoff bypass karta hai. Ek waqt mein ek hi panic chalta hai.
+let panicRunning = false;
+
+function pickOrderId(body: string): string | null {
+  const m = body.match(/"orderId"\s*:\s*"?(\d+)"?/);   // regex — 19-digit id string mein
+  return m ? m[1] : null;
+}
+
+async function publicRow(path: string, symbol: string): Promise<Record<string, unknown> | null> {
+  try {
+    const r = await fetch(`${EAPI}${path}?symbol=${encodeURIComponent(symbol)}`, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const row = Array.isArray(j) ? j[0] : j;
+    return row && typeof row === "object" ? row as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
+async function handlePanic(): Promise<Response> {
+  if (panicRunning) return tradeJson(429, { error: "Panic pehle se chal raha hai — result ka wait karo" });
+  panicRunning = true;
+  try {
+    const notes: string[] = [];
+    // 1) Sab open orders cancel (pehle — taaki reduceOnly close orders ke saath conflict na ho)
+    const c = await signedCall("DELETE", "/eapi/v1/allOpenOrdersByUnderlying", { underlying: "BTCUSDT" }, { bypassBackoff: true });
+    console.log(`[trade] PANIC cancel-all -> HTTP ${c.status}`);
+    const cancelOk = c.status >= 200 && c.status < 300;
+    if (!cancelOk) notes.push(`cancel-all fail (HTTP ${c.status}): ${c.body.slice(0, 200)}`);
+
+    // 2) Positions
+    const p = await signedCall("GET", "/eapi/v1/position", {}, { bypassBackoff: true });
+    let positions: unknown = null;
+    try { positions = JSON.parse(p.body); } catch { /* neeche handle */ }
+    if (p.status < 200 || p.status >= 300 || !Array.isArray(positions)) {
+      notes.push(`positions nahi mile (HTTP ${p.status}) — positions MANUALLY check/close karo`);
+      return tradeJson(200, { ok: false, cancel_ok: cancelOk, closes: [], notes });
+    }
+
+    // 3) Har open position ke liye reduceOnly aggressive LIMIT close
+    const closes: Array<Record<string, unknown>> = [];
+    let i = 0;
+    // deno-lint-ignore no-explicit-any
+    for (const pos of (positions as any[])) {
+      const symbol = String(pos?.symbol ?? "");
+      const q = parseFloat(String(pos?.quantity ?? pos?.qty ?? "0"));
+      if (!OPTION_SYMBOL_RE.test(symbol) || !Number.isFinite(q) || q === 0) continue;
+      const isShort = String(pos?.side ?? "").toUpperCase() === "SHORT" || q < 0;
+      const qty = Math.abs(q);
+      const entry: Record<string, unknown> = { symbol, side: isShort ? "BUY" : "SELL", quantity: qty };
+      try {
+        const [tk, mk, rules] = await Promise.all([
+          publicRow("/eapi/v1/ticker", symbol), publicRow("/eapi/v1/mark", symbol), getSymRules(symbol),
+        ]);
+        const bid = parseFloat(String(tk?.bidPrice ?? "0"));
+        const ask = parseFloat(String(tk?.askPrice ?? "0"));
+        const mark = parseFloat(String(mk?.markPrice ?? "0"));
+        const low = parseFloat(String(mk?.lowPriceLimit ?? "0"));
+        const high = parseFloat(String(mk?.highPriceLimit ?? "0"));
+        const tick = rules.tick ?? 5;   // filters na mile to purana 5 USDT andaza
+        // SELL (long close): price bid se NEECHE (neeche round) — taaki bids se turant match ho.
+        // BUY (short close): price ask se UPAR (upar round). Binance price-limit band ke andar clamp.
+        let price: number;
+        if (!isShort) {
+          const base = bid > 0 ? bid * 0.97 : (mark > 0 ? mark * 0.7 : 0);
+          if (base <= 0) throw new Error("bid/mark price nahi mila");
+          price = roundToTick(base, tick, "down");
+          if (low > 0 && price < low) price = roundToTick(low, tick, "up");
+          if (price < tick) price = tick;
+        } else {
+          const base = ask > 0 ? ask * 1.03 : (mark > 0 ? mark * 1.3 : 0);
+          if (base <= 0) throw new Error("ask/mark price nahi mila");
+          price = roundToTick(base, tick, "up");
+          if (high > 0 && price > high) price = roundToTick(high, tick, "down");
+          if (price < tick) price = tick;
+        }
+        entry.price = price;
+        const cid = `pn${Date.now().toString(36)}${i++}${Math.random().toString(36).slice(2, 5)}`;
+        const res = await signedCall("POST", "/eapi/v1/order", {
+          symbol, side: isShort ? "BUY" : "SELL", type: "LIMIT", quantity: qty, price,
+          timeInForce: "GTC", reduceOnly: "true", clientOrderId: cid, newOrderRespType: "RESULT",
+        }, { bypassBackoff: true });
+        entry.http = res.status;
+        entry.ok = res.status >= 200 && res.status < 300;
+        entry.orderId = pickOrderId(res.body);
+        if (!entry.ok) entry.error = res.body.slice(0, 200);
+        console.log(`[trade] PANIC close ${symbol} ${entry.side} q=${qty} p=${price} -> HTTP ${res.status}`);
+      } catch (e) {
+        entry.ok = false;
+        entry.error = String(e).slice(0, 200);
+      }
+      closes.push(entry);
+    }
+    if (!closes.length) notes.push("Koi open position nahi mili");
+    const allOk = cancelOk && closes.every((x) => x.ok === true);
+    notes.push("Close orders GTC limit hain — fill hue ya nahi, Positions/Orders tab mein dekho");
+    return tradeJson(200, { ok: allOk, cancel_ok: cancelOk, closes, notes });
+  } finally {
+    panicRunning = false;
+  }
+}
+
+// ── RULES ENGINE (SL / Target / Trailing) ───────────────────────────────────
+// Rules Supabase table "trade_rules" mein store hote hain (HF POST /rules/create
+// karta hai jab entry fill ho). Render yahan background loop mein khud har
+// active rule ko monitor karta hai — HF session so jaaye/crash ho to bhi ye
+// chalta rehta hai (jab tak Render instance khud zinda hai — dekho neeche
+// "keep-alive" note).
+//
+// Rules: LONG (BUY se entry) → exit hamesha reduceOnly SELL, trigger BID par.
+//        SHORT (SELL se entry) → exit hamesha reduceOnly BUY, trigger ASK par.
+// sl_price / target_price / trailing_pct teeno optional, kam se kam ek zaroori.
+
+interface TradeRule {
+  id: number;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  entry_qty: number;
+  entry_price: number;
+  sl_price: number | null;
+  target_price: number | null;
+  trailing_points: number | null;   // absolute USDT offset (chart.html "trail" field), % nahi
+  trail_high_water: number | null;
+  status: "active" | "triggered" | "closed" | "cancelled";
+  close_order_id: string | null;
+}
+
+function supaHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    "Content-Type": "application/json",
+    ...extra,
+  };
+}
+
+function supaReady(): boolean {
+  return !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+}
+
+async function supaSelectActiveRules(): Promise<TradeRule[]> {
+  if (!supaReady()) return [];
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/trade_rules?status=eq.active&select=*`, {
+      headers: supaHeaders(), signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return [];
+    const j = await r.json();
+    return Array.isArray(j) ? (j as TradeRule[]) : [];
+  } catch { return []; }
+}
+
+async function supaInsertRule(row: Record<string, unknown>): Promise<TradeRule | null> {
+  if (!supaReady()) return null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/trade_rules`, {
+      method: "POST",
+      headers: supaHeaders({ Prefer: "return=representation" }),
+      body: JSON.stringify(row),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return Array.isArray(j) && j[0] ? (j[0] as TradeRule) : null;
+  } catch { return null; }
+}
+
+async function supaUpdateRule(id: number, patch: Record<string, unknown>): Promise<boolean> {
+  if (!supaReady()) return false;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/trade_rules?id=eq.${id}`, {
+      method: "PATCH",
+      headers: supaHeaders({ Prefer: "return=minimal" }),
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(10000),
+    });
+    return r.ok;
+  } catch { return false; }
+}
+
+const rulesCache = new Map<number, TradeRule>();
+let rulesLoadedAt = 0;
+const RULES_REFRESH_MS = 4000;
+
+async function refreshRulesCache(): Promise<void> {
+  const rows = await supaSelectActiveRules();
+  const ids = new Set(rows.map((r) => r.id));
+  for (const id of rulesCache.keys()) if (!ids.has(id)) rulesCache.delete(id);
+  for (const row of rows) rulesCache.set(row.id, row);
+  rulesLoadedAt = nowMs();
+}
+
+// Panic-close jaisa hi per-symbol lock — taaki SL/target/trailing aur manual
+// panic ek hi symbol par ek saath do reduceOnly close orders na bhej dein.
+const closingSymbols = new Set<string>();
+
+async function closeRuleReduceOnly(rule: TradeRule, reason: string): Promise<void> {
+  const symbol = rule.symbol;
+  if (closingSymbols.has(symbol) || panicRunning) return;
+  closingSymbols.add(symbol);
+  try {
+    const [tk, mk, rules] = await Promise.all([
+      publicRow("/eapi/v1/ticker", symbol), publicRow("/eapi/v1/mark", symbol), getSymRules(symbol),
+    ]);
+    const bid = parseFloat(String(tk?.bidPrice ?? "0"));
+    const ask = parseFloat(String(tk?.askPrice ?? "0"));
+    const mark = parseFloat(String(mk?.markPrice ?? "0"));
+    const low = parseFloat(String(mk?.lowPriceLimit ?? "0"));
+    const high = parseFloat(String(mk?.highPriceLimit ?? "0"));
+    const tick = rules.tick ?? 5;
+    const isShort = rule.side === "SHORT";
+    let price: number;
+    if (!isShort) {
+      // LONG close = SELL, bid se neeche (turant match ho)
+      const base = bid > 0 ? bid * 0.97 : (mark > 0 ? mark * 0.7 : 0);
+      if (base <= 0) throw new Error("bid/mark price nahi mila");
+      price = roundToTick(base, tick, "down");
+      if (low > 0 && price < low) price = roundToTick(low, tick, "up");
+      if (price < tick) price = tick;
+    } else {
+      // SHORT close = BUY, ask se upar
+      const base = ask > 0 ? ask * 1.03 : (mark > 0 ? mark * 1.3 : 0);
+      if (base <= 0) throw new Error("ask/mark price nahi mila");
+      price = roundToTick(base, tick, "up");
+      if (high > 0 && price > high) price = roundToTick(high, tick, "down");
+      if (price < tick) price = tick;
+    }
+    const cid = `rl${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const res = await signedCall("POST", "/eapi/v1/order", {
+      symbol, side: isShort ? "BUY" : "SELL", type: "LIMIT", quantity: rule.entry_qty, price,
+      timeInForce: "GTC", reduceOnly: "true", clientOrderId: cid, newOrderRespType: "RESULT",
+    }, { bypassBackoff: true });
+    const ok = res.status >= 200 && res.status < 300;
+    console.log(`[rules] ${reason} close ${symbol} ${isShort ? "BUY" : "SELL"} q=${rule.entry_qty} p=${price} -> HTTP ${res.status}`);
+    if (ok) {
+      const orderId = pickOrderId(res.body);
+      await supaUpdateRule(rule.id, { status: "triggered", close_order_id: orderId });
+      rulesCache.delete(rule.id);
+    }
+    // fail ho to rule "active" hi rehta hai — agla loop-pass phir try karega
+  } catch (e) {
+    console.log(`[rules] close FAILED ${symbol}: ${String(e).slice(0, 200)}`);
+  } finally {
+    closingSymbols.delete(symbol);
+  }
+}
+
+async function checkRule(rule: TradeRule): Promise<void> {
+  if (closingSymbols.has(rule.symbol)) return;
+  const tk = await publicRow("/eapi/v1/ticker", rule.symbol);
+  if (!tk) return;
+  const bid = parseFloat(String(tk.bidPrice ?? "0"));
+  const ask = parseFloat(String(tk.askPrice ?? "0"));
+  const isLong = rule.side === "LONG";
+  const exitRef = isLong ? bid : ask;   // jis price par exit hoga, usi par check karo
+  if (!(exitRef > 0)) return;
+
+  // Trailing high-water-mark update (favorable direction mein hi)
+  if (rule.trailing_points && rule.trailing_points > 0) {
+    const prevHwm = rule.trail_high_water ?? rule.entry_price;
+    const improved = isLong ? exitRef > prevHwm : exitRef < prevHwm;
+    if (improved) {
+      rule.trail_high_water = exitRef;
+      await supaUpdateRule(rule.id, { trail_high_water: exitRef });
+    }
+  }
+
+  let trigger: string | null = null;
+  if (trigger === null && rule.sl_price !== null && rule.sl_price !== undefined) {
+    if ((isLong && exitRef <= rule.sl_price) || (!isLong && exitRef >= rule.sl_price)) trigger = "SL";
+  }
+  if (trigger === null && rule.target_price !== null && rule.target_price !== undefined) {
+    if ((isLong && exitRef >= rule.target_price) || (!isLong && exitRef <= rule.target_price)) trigger = "TARGET";
+  }
+  if (trigger === null && rule.trailing_points && rule.trail_high_water) {
+    // Points-offset (jaisa purana HF-side engine karta tha): highest_bid - trail
+    const trailStop = isLong
+      ? rule.trail_high_water - rule.trailing_points
+      : rule.trail_high_water + rule.trailing_points;
+    if ((isLong && exitRef <= trailStop) || (!isLong && exitRef >= trailStop)) trigger = "TRAILING";
+  }
+
+  if (trigger) await closeRuleReduceOnly(rule, trigger);
+}
+
+// Idle hone par bhi ye loop hamesha chalta rehta hai (WS Feeds ki tarah
+// IDLE_STOP se gated nahi) — jab tak koi active rule nahi, Binance ko
+// har-cycle hit nahi karta (sirf Supabase check karta hai, halka).
+// LIMITATION: agar Render (free tier) khud hi HTTP-inactivity se so jaaye,
+// to ye loop bhi ruk jaayega — active rule hote waqt instance ko jagaye
+// rakhne ke liye external keep-alive ping (UptimeRobot/cron-job.org, har
+// ~4-5 min GET /status) lagana zaroori hai, ya paid always-on plan.
+let rulesLoopRunning = false;
+async function rulesMonitorLoop(): Promise<void> {
+  if (rulesLoopRunning) return;
+  rulesLoopRunning = true;
+  while (true) {
+    try {
+      if (nowMs() - rulesLoadedAt > RULES_REFRESH_MS) await refreshRulesCache();
+      for (const rule of [...rulesCache.values()]) await checkRule(rule);
+    } catch (e) {
+      console.log(`[rules] loop error: ${String(e).slice(0, 200)}`);
+    }
+    await sleep(rulesCache.size ? 2000 : 5000);
+  }
+}
+
+async function handleRules(req: Request, url: URL): Promise<Response> {
+  const ip = clientIp(req);
+  if (isLocked(ip)) return tradeJson(429, { error: "Bahut galat attempts — thodi der baad try karo" });
+  if (!TRADE_TOKEN) return tradeJson(503, { error: "TRADE_TOKEN set nahi hai" });
+  if (!(await tokenOk(req.headers.get("x-trade-token") ?? ""))) {
+    noteAuthFail(ip);
+    return tradeJson(401, { error: "Unauthorized" });
+  }
+  if (!supaReady()) return tradeJson(503, { error: "TEST_SUPABASE_URL / TEST_SUPABASE_ANON_KEY set nahi hain" });
+
+  const path = url.pathname;
+  const m = req.method;
+
+  if (path === "/rules/list" && m === "GET") {
+    await refreshRulesCache();
+    return tradeJson(200, { rules: [...rulesCache.values()] });
+  }
+
+  if (path === "/rules/create" && m === "POST") {
+    const b = await readBody(req);
+    if (!b) return tradeJson(400, { error: "Bad JSON body" });
+    const symbol = String(b.symbol ?? "");
+    const side = String(b.side ?? "").toUpperCase();
+    const entry_qty = Number(b.entry_qty);
+    const entry_price = Number(b.entry_price);
+    const sl_price = b.sl_price !== undefined && b.sl_price !== null ? Number(b.sl_price) : null;
+    const target_price = b.target_price !== undefined && b.target_price !== null ? Number(b.target_price) : null;
+    const trailing_points = b.trailing_points !== undefined && b.trailing_points !== null ? Number(b.trailing_points) : null;
+
+    if (!OPTION_SYMBOL_RE.test(symbol)) return tradeJson(400, { error: "Symbol invalid" });
+    if (side !== "LONG" && side !== "SHORT") return tradeJson(400, { error: "side LONG ya SHORT" });
+    if (!Number.isFinite(entry_qty) || entry_qty <= 0) return tradeJson(400, { error: "entry_qty invalid" });
+    if (!Number.isFinite(entry_price) || entry_price <= 0) return tradeJson(400, { error: "entry_price invalid" });
+    if (sl_price === null && target_price === null && !trailing_points) {
+      return tradeJson(400, { error: "kam se kam SL, target ya trailing_points mein se ek do" });
+    }
+
+    const row = await supaInsertRule({
+      symbol, side, entry_qty, entry_price,
+      sl_price, target_price, trailing_points,
+      trail_high_water: entry_price, status: "active",
+    });
+    if (!row) return tradeJson(502, { error: "Supabase insert fail — table/permissions check karo" });
+    rulesCache.set(row.id, row);
+    return tradeJson(200, { ok: true, rule: row });
+  }
+
+  if (path === "/rules/update" && m === "POST") {
+    const b = await readBody(req);
+    const id = b ? Number(b.id) : NaN;
+    if (!b || !Number.isFinite(id)) return tradeJson(400, { error: "id chahiye" });
+    const patch: Record<string, unknown> = {};
+    if (b.sl_price !== undefined) patch.sl_price = b.sl_price === null ? null : Number(b.sl_price);
+    if (b.target_price !== undefined) patch.target_price = b.target_price === null ? null : Number(b.target_price);
+    if (b.trailing_points !== undefined) patch.trailing_points = b.trailing_points === null ? null : Number(b.trailing_points);
+    if (!Object.keys(patch).length) return tradeJson(400, { error: "kuch update karne ko nahi bheja" });
+    const ok = await supaUpdateRule(id, patch);
+    if (!ok) return tradeJson(502, { error: "Supabase update fail" });
+    const cur = rulesCache.get(id);
+    if (cur) rulesCache.set(id, { ...cur, ...patch } as TradeRule);
+    return tradeJson(200, { ok: true });
+  }
+
+  if (path === "/rules/cancel" && m === "POST") {
+    const b = await readBody(req);
+    const id = b ? Number(b.id) : NaN;
+    if (!b || !Number.isFinite(id)) return tradeJson(400, { error: "id chahiye" });
+    const ok = await supaUpdateRule(id, { status: "cancelled" });
+    if (!ok) return tradeJson(502, { error: "Supabase update fail" });
+    rulesCache.delete(id);
+    return tradeJson(200, { ok: true });
+  }
+
+  return tradeJson(404, { error: "Unknown /rules path or method" });
 }
 
 async function handleTrade(req: Request, url: URL): Promise<Response> {
@@ -753,8 +1286,17 @@ async function handleTrade(req: Request, url: URL): Promise<Response> {
           max_orders_per_min: MAX_ORDERS_PER_MIN,
         },
         rules: "BUY + reduceOnly SELL only, LIMIT only",
+        tick_rules_loaded: symRulesCache.map.size,
+        backoff_sec: Math.max(0, Math.ceil((bnBackoffUntil - nowMs()) / 1000)),
+        panic: "POST /trade/panic (TRADING_ENABLED se independent, sirf risk kam karta hai)",
       });
     }
+    if (path === "/trade/ticksize" && m === "GET") {
+      const sym = url.searchParams.get("symbol") ?? "";
+      if (!OPTION_SYMBOL_RE.test(sym)) return tradeJson(400, { error: "Symbol invalid" });
+      return tradeJson(200, { symbol: sym, ...(await getSymRules(sym)) });
+    }
+    if (path === "/trade/panic" && m === "POST") return await handlePanic();
     if (path === "/trade/account" && m === "GET") {
       const r = await signedCall("GET", "/eapi/v1/marginAccount", {});
       return tradeRaw(r.status, r.body);
@@ -778,17 +1320,22 @@ async function handleTrade(req: Request, url: URL): Promise<Response> {
     if (path === "/trade/order" && m === "POST") return await handlePlaceOrder(req);
     if (path === "/trade/cancel" && m === "POST") return await handleCancel(req);
     if (path === "/trade/cancel-all" && m === "POST") {
-      const r = await signedCall("DELETE", "/eapi/v1/allOpenOrdersByUnderlying", { underlying: "BTCUSDT" });
+      const r = await signedCall("DELETE", "/eapi/v1/allOpenOrdersByUnderlying", { underlying: "BTCUSDT" }, { bypassBackoff: true });
       console.log(`[trade] cancel-all -> HTTP ${r.status}`);
       return tradeRaw(r.status, r.body);
     }
     return tradeJson(404, { error: "Unknown /trade path or method" });
   } catch (e) {
     // Error message mein secret nahi hota (key sirf header mein jaati hai)
-    return tradeJson(502, { error: `Trade call failed: ${String(e).slice(0, 200)}` });
+    const unknown = m === "POST" && (path === "/trade/order" || path === "/trade/panic")
+      ? " — RESULT UNKNOWN: order gaya ho sakta hai, Orders/Positions tab check karo, blind retry mat karo" : "";
+    return tradeJson(502, { error: `Trade call failed: ${String(e).slice(0, 200)}${unknown}` });
   }
 }
 
+
+// ── Rules engine startup — background, IDLE_STOP se independent ────────────
+rulesMonitorLoop();
 
 // ── Server ────────────────────────────────────────────────────────────────
 Deno.serve({ port: PORT }, async (req: Request) => {
@@ -851,10 +1398,23 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       return await handleTrade(req, url);
     }
 
+    // ── SL / Target / Trailing rules — token-protected ──
+    if (url.pathname.startsWith("/rules/")) {
+      return await handleRules(req, url);
+    }
+
     // ── REST forward ──
     const prefix = Object.keys(UPSTREAM_MAP).find((p) => url.pathname.startsWith(p));
     if (!prefix) {
       return new Response("Not found — /snapshot, /api/... ya /eapi/... use karo", { status: 404 });
+    }
+
+    const blocked = forwardBlockReason(req, url);
+    if (blocked) {
+      return new Response(JSON.stringify({ error: blocked }), {
+        status: 403,
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+      });
     }
 
     const upstreamUrl = UPSTREAM_MAP[prefix] + url.pathname.slice(prefix.length) + url.search;
@@ -869,7 +1429,6 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     const upstreamResp = await fetch(upstreamUrl, {
       method: req.method,
       headers: {
-        "X-MBX-APIKEY": req.headers.get("X-MBX-APIKEY") ?? "",
         "Content-Type": req.headers.get("Content-Type") ?? "application/json",
       },
       body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
