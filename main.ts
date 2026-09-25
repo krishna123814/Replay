@@ -450,6 +450,7 @@ function ensureFeeds(): boolean {
   if (feedsStopped) {
     feedsStopped = false;
     for (const f of Object.values(feeds)) f.start();
+    startSession();   // naya "app session" shuru — HF app ne pehli baar (ya idle-stop ke baad phir se) maanga
   }
   return wasCold;
 }
@@ -462,6 +463,7 @@ function stopFeedsAndClear() {
   spot.price = null;
   spot.ts = 0;
   tickerTs = 0;
+  endSession();   // session khatam — IDLE_STOP_SEC se zyada der koi demand nahi aayi
 }
 
 setInterval(() => {
@@ -893,11 +895,65 @@ function pushLog(name: string, ok: boolean, detail: string): void {
   if (reqLog.length > LOG_MAX) reqLog.shift();
 }
 
+// ── App-session tracker ─────────────────────────────────────────────────
+// "Session" = jab se HF app ne pehli baar /snapshot maanga (feeds cold se
+// start hue) jab tak IDLE_STOP_SEC (default 60s) se zyada der koi demand
+// nahi aayi aur feeds band ho gaye. Isi window ke andar restOk/restFail se
+// aane wala HAR call yahan cumulative record hota hai (consecutive-fail
+// counter jaisa reset nahi hota — poore session ka total rehta hai).
+// Session khatam hone par bhi ye data yahin frozen rehta hai (agla cold
+// start hi clear karega) — taaki "session abhi-abhi khatam hui, uska poora
+// record dikhao" bhi possible ho.
+let sessionStartedAt: number | null = null;
+let sessionEndedAt: number | null = null;
+interface SessionEndpointStat { sent: number; fails: number; lastAt: number; lastError: string }
+const sessionStats = new Map<string, SessionEndpointStat>();
+
+function startSession(): void {
+  sessionStartedAt = nowMs();
+  sessionEndedAt = null;
+  sessionStats.clear();
+}
+function endSession(): void {
+  sessionEndedAt = nowMs();
+}
+function sessionNote(name: string, ok: boolean, err: string): void {
+  if (sessionStartedAt == null) return;   // koi session active nahi (feeds cold) — is call ka session se lena-dena nahi
+  const s = sessionStats.get(name) ?? { sent: 0, fails: 0, lastAt: 0, lastError: "" };
+  s.sent++;
+  s.lastAt = nowMs();
+  if (!ok) { s.fails++; s.lastError = err.slice(0, 200); }
+  sessionStats.set(name, s);
+}
+
+function sessionReport() {
+  const t = nowMs();
+  const endpoints = [...sessionStats.entries()]
+    .map(([name, s]) => ({
+      name, sent: s.sent, fails: s.fails,
+      last_ago_ms: t - s.lastAt,
+      last_error: s.lastError || null,
+    }))
+    .sort((a, b) => b.fails - a.fails || b.sent - a.sent);
+  const totalSent = endpoints.reduce((n, e) => n + e.sent, 0);
+  const totalFails = endpoints.reduce((n, e) => n + e.fails, 0);
+  return {
+    active: sessionStartedAt != null && sessionEndedAt == null,
+    started_at_ms: sessionStartedAt,
+    ended_at_ms: sessionEndedAt,
+    duration_ms: sessionStartedAt != null ? (sessionEndedAt ?? t) - sessionStartedAt : null,
+    total_requests: totalSent,
+    total_fails: totalFails,
+    endpoints,
+  };
+}
+
 function restOk(name: string): void {
   const h = restHealth.get(name);
   const wasAlerting = h?.alerting === true;
   restHealth.set(name, { fails: 0, lastError: "", lastOkAt: nowMs(), alerting: false });
   pushLog(name, true, "ok");
+  sessionNote(name, true, "");
   if (wasAlerting) void sendRestRecoveryAlert(name);
 }
 
@@ -907,6 +963,7 @@ function restFail(name: string, err: string): void {
   h.lastError = err.slice(0, 200);
   restHealth.set(name, h);
   pushLog(name, false, err);
+  sessionNote(name, false, err);
   if (h.fails >= REST_FAIL_THRESHOLD) {
     h.alerting = true;
     void sendRestFailAlert();
@@ -948,8 +1005,18 @@ function alertDiagnosticSnapshot(): string {
     .map((e) => `   [${Math.round((t - e.ts) / 1000)}s pehle] ${e.ok ? "OK " : "FAIL"} ${e.name}${e.ok ? "" : ` — ${e.detail}`}`)
     .join("\n");
 
+  const sess = sessionReport();
+  const sessLines = sess.endpoints.length
+    ? sess.endpoints.map((e) => `   ${e.name} — sent:${e.sent} fails:${e.fails}${e.last_error ? ` | last error: ${e.last_error}` : ""}`).join("\n")
+    : "   (session mein abhi koi request nahi)";
+  const sessDurationStr = sess.duration_ms != null ? `${Math.round(sess.duration_ms / 1000)}s` : "n/a";
+
   return (
-    `\n📊 Us waqt ka snapshot (last 60s):\n` +
+    `\n🗂️ App session (jab se HF app ne demand shuru ki):\n` +
+    `   status: ${sess.active ? "ACTIVE" : "ended"} | duration: ${sessDurationStr}\n` +
+    `   total requests: ${sess.total_requests} | total fails: ${sess.total_fails}\n` +
+    `   Per-endpoint (poore session ka total):\n${sessLines}\n\n` +
+    `📊 Us waqt ka snapshot (last 60s):\n` +
     `   requests seen (proxy ko mili): ${stats.requests_seen_last_60s}\n` +
     `   requests sent (Binance tak gayi): ${stats.requests_last_60s}\n` +
     `   cache hits: ${stats.cache_hits_last_60s}\n` +
@@ -2526,6 +2593,10 @@ Deno.serve({ port: PORT }, async (req: Request) => {
           age_ms: t - e.ts, name: e.name, ok: e.ok, detail: e.detail,
         })),
         log_capacity: LOG_MAX,
+        // App-session (HF app ki pehli demand se leke IDLE_STOP_SEC idle hone tak) —
+        // isme pura session ka cumulative total hota hai, consecutive-fail counter
+        // ki tarah reset nahi hota beech mein.
+        session: sessionReport(),
       });
     }
 
