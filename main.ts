@@ -863,14 +863,14 @@ async function sendEmailAlert(
 }
 
 // ── REST health tracker (email alert jab REST calls baar-baar fail hon) ────
-// Rule: kisi bhi tracked REST call mein 3 CONSECUTIVE fails → email alert.
+// Rule: kisi bhi tracked REST call mein REST_FAIL_THRESHOLD CONSECUTIVE fails → email alert.
 // Cap: alert mail max 1 baar/ghanta (ALERT_FAIL_COOLDOWN_MS, jo upar sendEmailAlert
 // ke liye already default 3600s hai — isi ko yahan reuse karte hain).
 // Mail mein saare tracked endpoints ka combined health report jaata hai:
 // FAILING wale top par (critical), OK wale niche (taaki "baaki sab theek chal
 // raha hai" bhi pata chale). Jab koi failing endpoint wapas OK ho jaye, ek
 // chhoti "recovered" mail alag se jaati hai (cap ke bina, kyunki good-news hai).
-const REST_FAIL_THRESHOLD = envNum("REST_FAIL_THRESHOLD", 3);
+const REST_FAIL_THRESHOLD = envNum("REST_FAIL_THRESHOLD", 2);
 
 interface RestHealth {
   fails: number;
@@ -928,13 +928,46 @@ function restHealthReport(): { failing: string[]; ok: string[] } {
   return { failing, ok };
 }
 
+// Alert ke waqt "kyun fail hua" diagnose karne ke liye ek chhota snapshot
+// bnRateStats() se + reqLog se recent entries — taaki mail dekhte hi pata
+// chale us waqt total kitni requests aa rahi thin, kaunse endpoint sabse
+// zyada poll ho rahe the (poll-storm), aur exact us waqt kya OK/FAIL ho raha tha.
+function alertDiagnosticSnapshot(): string {
+  const stats = bnRateStats();
+  const epLines = stats.endpoints.length
+    ? stats.endpoints
+        .slice(0, 10)
+        .map((e) => `   ${e.endpoint} — seen:${e.seen} sent:${e.sent} cacheHits:${e.cacheHits} weight:${e.weight}`)
+        .join("\n")
+    : "   (koi request nahi last 60s mein)";
+
+  const t = nowMs();
+  const recentLines = reqLog
+    .slice(-15)
+    .reverse()
+    .map((e) => `   [${Math.round((t - e.ts) / 1000)}s pehle] ${e.ok ? "OK " : "FAIL"} ${e.name}${e.ok ? "" : ` — ${e.detail}`}`)
+    .join("\n");
+
+  return (
+    `\n📊 Us waqt ka snapshot (last 60s):\n` +
+    `   requests seen (proxy ko mili): ${stats.requests_seen_last_60s}\n` +
+    `   requests sent (Binance tak gayi): ${stats.requests_last_60s}\n` +
+    `   cache hits: ${stats.cache_hits_last_60s}\n` +
+    `   burst last 10s / 5s: ${stats.burst_last_10s} / ${stats.burst_last_5s}\n` +
+    `   estimated weight (60s): ${stats.estimated_weight_last_60s} | binance used_weight_1m: ${stats.binance_used_weight_1m ?? "n/a"}\n\n` +
+    `   Per-endpoint (last 60s):\n${epLines}\n\n` +
+    `📜 Recent request-log (last 15):\n${recentLines || "   (khaali)"}\n`
+  );
+}
+
 async function sendRestFailAlert(): Promise<void> {
   const { failing, ok } = restHealthReport();
   if (!failing.length) return;
   const body =
-    `🚨 REST calls fail ho rahi hain (3+ consecutive fails)\n\n` +
+    `🚨 REST calls fail ho rahi hain (${REST_FAIL_THRESHOLD}+ consecutive fails)\n\n` +
     `❌ FAILING:\n${failing.join("\n\n")}\n\n` +
-    `✅ OK:\n${ok.length ? ok.join("\n") : "  (koi doosra tracked endpoint nahi)"}\n`;
+    `✅ OK:\n${ok.length ? ok.join("\n") : "  (koi doosra tracked endpoint nahi)"}\n` +
+    alertDiagnosticSnapshot();
   await sendEmailAlert("rest-health-fail", "[Alert] REST call(s) failing — Binance proxy", body, ALERT_FAIL_COOLDOWN_MS, false);
 }
 
