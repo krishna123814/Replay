@@ -130,7 +130,11 @@ function trackBn(endpoint: string, opts: { resp?: Response; symbol?: string | nu
       if (Number.isFinite(n)) { bnLastUsedWeight = n; bnLastUsedWeightAt = t; }
     }
     if (opts.resp.status === 418) {
-      if (!bnIpBanned) { bnIpBanned = true; bnIpBanSince = t; }
+      if (!bnIpBanned) {
+        bnIpBanned = true;
+        bnIpBanSince = t;
+        captureFailSnapshot(`IP ban (418) shuru hua — endpoint: ${endpoint}`);
+      }
     } else if (opts.resp.ok) {
       // Koi bhi successful Binance call ban flag clear kar sakti hai — probe-loop
       // bhi isi rasta se apna khud ka check confirm karta hai (neeche dekho).
@@ -207,6 +211,55 @@ function bnRateStats() {
     endpoints,
     depth_top_symbols_5m,
   };
+}
+
+// ── Frozen fail/ban snapshot — "kahan fail ho raha tha" freeze-frame ───────
+// Live /ratelimit wala data har 4s refresh mein latest 60s window dikhata hai
+// — matlab agar ban lagne ke turant baad traffic khud hi kam ho jaaye (jaisa
+// hota hai, kyunki fail hone par retries kam hoti hain), to dashboard pe wo
+// "culprit" moment 4s ke andar hi wipe ho jaata hai. Isko fix karne ke liye
+// jis pal 418-ban shuru hota hai YA koi REST endpoint "failing" state mein
+// (pehli baar) enter karta hai, usi pal ka bnRateStats() snapshot yahan
+// FREEZE kar dete hain. Ye snapshot tab tak screen (aur agli fail-email) par
+// wahi ka wahi dikhta rehta hai jab tak agla naya fail/ban episode na aaye —
+// beech mein normal 4s live-refresh isko overwrite nahi karta.
+let lastFailSnapshot: { capturedAt: number; reason: string; stats: ReturnType<typeof bnRateStats> } | null = null;
+
+function captureFailSnapshot(reason: string): void {
+  lastFailSnapshot = { capturedAt: nowMs(), reason, stats: bnRateStats() };
+  console.log(`[fail-snapshot] frozen — reason: ${reason}`);
+}
+
+function lastFailSnapshotReport(): null | {
+  captured_at_ms: number; age_ms: number; reason: string; stats: ReturnType<typeof bnRateStats>;
+} {
+  if (!lastFailSnapshot) return null;
+  return {
+    captured_at_ms: lastFailSnapshot.capturedAt,
+    age_ms: nowMs() - lastFailSnapshot.capturedAt,
+    reason: lastFailSnapshot.reason,
+    stats: lastFailSnapshot.stats,
+  };
+}
+
+// Plain-text form — dashboard aur email dono isi ek function se banate hain,
+// taaki dono jagah EXACT same breakdown dikhe (do alag formatting maintain
+// nahi karni padti).
+function fmtFailSnapshotText(snap: ReturnType<typeof lastFailSnapshotReport>): string {
+  if (!snap) return "   (abhi tak koi fail/ban episode nahi hua — snapshot khaali hai)";
+  const s = snap.stats;
+  const epLines = s.endpoints.length
+    ? s.endpoints.slice(0, 10)
+        .map((e) => `   ${e.endpoint} — seen:${e.seen} sent:${e.sent} cacheHits:${e.cacheHits} weight:${e.weight}`)
+        .join("\n")
+    : "   (us waqt koi request nahi thi)";
+  return (
+    `   Reason: ${snap.reason}\n` +
+    `   Frozen ${Math.round(snap.age_ms / 1000)}s pehle (us waqt ka 60s window hai, live nahi):\n` +
+    `   requests seen: ${s.requests_seen_last_60s} | sent: ${s.requests_last_60s} | cacheHits: ${s.cache_hits_last_60s}\n` +
+    `   burst 10s/5s: ${s.burst_last_10s}/${s.burst_last_5s} | est weight: ${s.estimated_weight_last_60s} | binance used_weight_1m: ${s.binance_used_weight_1m ?? "n/a"}\n` +
+    `   Per-endpoint us waqt (last 60s):\n${epLines}`
+  );
 }
 
 // ── IP-ban recovery probe — app se poori tarah INDEPENDENT ─────────────────
@@ -961,9 +1014,14 @@ function restFail(name: string, err: string): void {
   const h = restHealth.get(name) ?? { fails: 0, lastError: "", lastOkAt: 0, alerting: false };
   h.fails++;
   h.lastError = err.slice(0, 200);
+  // "naya" fail-episode sirf tab, jab pehle se alerting nahi thi — isse
+  // snapshot sirf har NAYE episode ki shuruaat par freeze hota hai, har
+  // consecutive fail par baar-baar overwrite nahi hota.
+  const enteringNewFailEpisode = h.fails >= REST_FAIL_THRESHOLD && !h.alerting;
   restHealth.set(name, h);
   pushLog(name, false, err);
   sessionNote(name, false, err);
+  if (enteringNewFailEpisode) captureFailSnapshot(`${name} failing — ${err}`);
   if (h.fails >= REST_FAIL_THRESHOLD) {
     h.alerting = true;
     void sendRestFailAlert();
@@ -1033,7 +1091,9 @@ async function sendRestFailAlert(): Promise<void> {
   const body =
     `🚨 REST calls fail ho rahi hain (${REST_FAIL_THRESHOLD}+ consecutive fails)\n\n` +
     `❌ FAILING:\n${failing.join("\n\n")}\n\n` +
-    `✅ OK:\n${ok.length ? ok.join("\n") : "  (koi doosra tracked endpoint nahi)"}\n` +
+    `✅ OK:\n${ok.length ? ok.join("\n") : "  (koi doosra tracked endpoint nahi)"}\n\n` +
+    `🔒 Fail/ban shuru hone ke waqt ka FROZEN 60s snapshot (isi episode ka, live nahi):\n` +
+    fmtFailSnapshotText(lastFailSnapshotReport()) + `\n` +
     alertDiagnosticSnapshot();
   await sendEmailAlert("rest-health-fail", "[Alert] REST call(s) failing — Binance proxy", body, ALERT_FAIL_COOLDOWN_MS, false);
 }
@@ -2303,6 +2363,15 @@ const DASHBOARD_HTML = `<!doctype html>
 
   <div class="toprow" id="topStats"></div>
 
+  <h2>🔒 Binance Request Load — Last Fail/Ban Snapshot (frozen, wipe nahi hota)</h2>
+  <div class="sub" id="freezeMeta">Abhi tak koi fail/ban episode nahi hua.</div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Endpoint</th><th>Seen (proxy)</th><th>Sent (Binance)</th><th>Cache hits</th><th>Est. weight</th></tr></thead>
+      <tbody id="freezeRows"><tr><td colspan="5" class="empty">—</td></tr></tbody>
+    </table>
+  </div>
+
   <h2>Binance Request Breakdown (last 60s) — kaunsi request se load h</h2>
   <div class="tablewrap">
     <table>
@@ -2341,6 +2410,8 @@ const cardsEl = document.getElementById("cards");
 const rowsEl = document.getElementById("rows");
 const epBreakdownRows = document.getElementById("epBreakdownRows");
 const depthSymRows = document.getElementById("depthSymRows");
+const freezeMeta = document.getElementById("freezeMeta");
+const freezeRows = document.getElementById("freezeRows");
 const urlbarEl = document.querySelector(".urlbar");
 const originNote = document.getElementById("originNote");
 
@@ -2408,6 +2479,24 @@ async function pollOnce() {
     topStats.innerHTML = stats.map(([label, value]) =>
       '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>'
     ).join("");
+
+    // ── Frozen fail/ban snapshot — sirf tab update hota hai jab backend mein
+    // NAYA episode capture ho (capturedAt badal jaata hai); beech mein 4s
+    // live-refresh isko chhedta nahi, isliye "wipe" nahi hota. ──
+    const snap = ratelimit.last_fail_snapshot;
+    if (freezeMeta) {
+      freezeMeta.textContent = snap
+        ? "Reason: " + snap.reason + " — frozen " + fmtAgo(snap.age_ms) + " pehle (us waqt ka 60s window hai, live nahi)"
+        : "Abhi tak koi fail/ban episode nahi hua.";
+    }
+    if (freezeRows) {
+      freezeRows.innerHTML = snap && snap.stats.endpoints.length
+        ? snap.stats.endpoints.map((e) =>
+            '<tr><td>' + e.endpoint + '</td><td>' + e.seen + '</td><td>' + e.sent +
+            '</td><td>' + e.cacheHits + '</td><td>' + e.weight + '</td></tr>'
+          ).join("")
+        : '<tr><td colspan="5" class="empty">' + (snap ? "us waqt koi Binance call nahi thi" : "—") + '</td></tr>';
+    }
 
     // ── Per-endpoint breakdown table ──
     if (epBreakdownRows) {
@@ -2570,7 +2659,7 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     // Rate-limit stats — koi secret nahi, browser seedha yahan se poll kar sakta hai
     // (jaise /status hai). Header icon (baad mein banega) isko use karega.
     if (url.pathname === "/ratelimit") {
-      return respondJson(req, bnRateStats());
+      return respondJson(req, { ...bnRateStats(), last_fail_snapshot: lastFailSnapshotReport() });
     }
 
     // REST call health — snapshot (per-endpoint status) + rolling recent-log.
