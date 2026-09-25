@@ -61,6 +61,42 @@ const WS_MAP: Record<string, string> = {
 const nowMs = () => Date.now();
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+// ── Binance request-rate tracker (sirf counting, koi limit enforce nahi karta) ──
+// Har outbound Binance REST call (signed + public/forwarded) yahan log hoti hai.
+// Sliding 60s window rakhte hain taaki "abhi last 1 min mein kitni requests gayi" pata chale.
+// Saath mein Binance ke asli response header (X-MBX-USED-WEIGHT-1M) ka latest value bhi
+// rakhte hain — yeh Binance ka apna official number hai, hamara count sirf request-ginti hai.
+const bnReqLog: number[] = [];
+let bnLastUsedWeight: number | null = null;
+let bnLastUsedWeightAt = 0;
+
+function trackBnRequest(resp?: Response): void {
+  const t = nowMs();
+  bnReqLog.push(t);
+  // purani (60s se zyada) entries hata do — array zyada bada na ho
+  const cutoff = t - 60_000;
+  while (bnReqLog.length && bnReqLog[0] < cutoff) bnReqLog.shift();
+  if (resp) {
+    const w = resp.headers.get("x-mbx-used-weight-1m");
+    if (w != null) {
+      const n = parseInt(w, 10);
+      if (Number.isFinite(n)) { bnLastUsedWeight = n; bnLastUsedWeightAt = t; }
+    }
+  }
+}
+
+function bnRateStats() {
+  const t = nowMs();
+  const cutoff = t - 60_000;
+  while (bnReqLog.length && bnReqLog[0] < cutoff) bnReqLog.shift();
+  return {
+    requests_last_60s: bnReqLog.length,
+    binance_used_weight_1m: bnLastUsedWeight,
+    binance_used_weight_age_ms: bnLastUsedWeight != null ? (t - bnLastUsedWeightAt) : null,
+    weight_limit_1m: 6000,
+  };
+}
+
 function num(x: unknown): number {
   const n = typeof x === "number" ? x : parseFloat(String(x ?? ""));
   return Number.isFinite(n) ? n : 0;
@@ -308,6 +344,7 @@ function refreshTicker(force = false): Promise<void> {
   tickerInflight = (async () => {
     try {
       const r = await fetch("https://eapi.binance.com/eapi/v1/ticker");
+      trackBnRequest(r);
       if (!r.ok) {
         tickerErr = `ticker HTTP ${r.status}`;
         return;
@@ -346,6 +383,7 @@ function refreshTicker(force = false): Promise<void> {
 async function fetchSpotRest() {
   try {
     const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
+    trackBnRequest(r);
     if (!r.ok) return;
     const j = await r.json();
     const p = parseFloat(j?.price);
@@ -712,6 +750,7 @@ async function syncTime() {
   if (nowMs() - timeSyncedAt < 10 * 60_000) return;
   try {
     const r = await fetch(`${EAPI}/eapi/v1/time`, { signal: AbortSignal.timeout(5000) });
+    trackBnRequest(r);
     if (r.ok) {
       const j = await r.json();
       if (Number.isFinite(Number(j?.serverTime))) {
@@ -760,6 +799,7 @@ async function signedCall(
       if (attempt < maxAttempts) { await sleep(400 * attempt); continue; }
       throw e;   // POST/DELETE: outcome unknown — caller ko batana hai, blind retry nahi
     }
+    trackBnRequest(r);
     const text = await r.text();
     // Binance ka jawab bina parse/stringify kiye seedha aage jaata hai — 19-digit
     // orderId jaise bade numbers JS mein precision kho dete hain.
@@ -826,6 +866,7 @@ async function loadSymRules(): Promise<void> {
   if (symRulesCache.map.size && nowMs() - symRulesCache.ts < 10 * 60_000) return;
   try {
     const r = await fetch(`${EAPI}/eapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(12000) });
+    trackBnRequest(r);
     if (!r.ok) return;
     const j = await r.json();
     const m = new Map<string, SymRules>();
@@ -876,6 +917,7 @@ async function getMarkPrice(symbol: string): Promise<number | null> {
     const r = await fetch(`${EAPI}/eapi/v1/mark?symbol=${encodeURIComponent(symbol)}`, {
       signal: AbortSignal.timeout(8000),
     });
+    trackBnRequest(r);
     if (!r.ok) return null;
     const j = await r.json();
     const row = Array.isArray(j) ? j[0] : j;
@@ -987,6 +1029,7 @@ function pickOrderId(body: string): string | null {
 async function publicRow(path: string, symbol: string): Promise<Record<string, unknown> | null> {
   try {
     const r = await fetch(`${EAPI}${path}?symbol=${encodeURIComponent(symbol)}`, { signal: AbortSignal.timeout(8000) });
+    trackBnRequest(r);
     if (!r.ok) return null;
     const j = await r.json();
     const row = Array.isArray(j) ? j[0] : j;
@@ -1851,6 +1894,12 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       });
     }
 
+    // Rate-limit stats — koi secret nahi, browser seedha yahan se poll kar sakta hai
+    // (jaise /status hai). Header icon (baad mein banega) isko use karega.
+    if (url.pathname === "/ratelimit") {
+      return respondJson(req, bnRateStats());
+    }
+
     // ── On-demand snapshot ──
     if (url.pathname === "/snapshot") {
       return await handleSnapshot(req, url);
@@ -1902,6 +1951,7 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       },
       body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
     });
+    trackBnRequest(upstreamResp);
 
     let respBody = await upstreamResp.text();
     const ct = upstreamResp.headers.get("Content-Type") ?? "application/json";
