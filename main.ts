@@ -86,6 +86,14 @@ const bnLog: BnCall[] = [];
 let bnLastUsedWeight: number | null = null;
 let bnLastUsedWeightAt = 0;
 
+// ── IP-ban state (418) — probe-loop (neeche) isi flag ko dekhta hai ────────
+// 429 (rate-limit warning) alag hai — wo खुद हल्का हो jaata hai jab hum kam
+// requests bhejein, retry-loop nahi chahiye. 418 (hard IP ban) hi wo state
+// hai jiske liye "kab khatam hui" check karna zaroori hai — isliye sirf 418
+// par ye flag set hota hai.
+let bnIpBanned = false;
+let bnIpBanSince = 0;
+
 // Estimated weight table — Binance EAPI (options) public GET routes zyaadatar
 // weight 1 hain; depth limit ke hisaab se badhta hai (Binance ke aam pattern
 // jaisa — 50 tak halka, jitna bada limit utna weight). Calibrate karne ke
@@ -120,6 +128,13 @@ function trackBn(endpoint: string, opts: { resp?: Response; symbol?: string | nu
     if (w != null) {
       const n = parseInt(w, 10);
       if (Number.isFinite(n)) { bnLastUsedWeight = n; bnLastUsedWeightAt = t; }
+    }
+    if (opts.resp.status === 418) {
+      if (!bnIpBanned) { bnIpBanned = true; bnIpBanSince = t; }
+    } else if (opts.resp.ok) {
+      // Koi bhi successful Binance call ban flag clear kar sakti hai — probe-loop
+      // bhi isi rasta se apna khud ka check confirm karta hai (neeche dekho).
+      bnIpBanned = false;
     }
   }
 }
@@ -186,9 +201,48 @@ function bnRateStats() {
     binance_used_weight_1m: bnLastUsedWeight,
     binance_used_weight_age_ms: bnLastUsedWeight != null ? (t - bnLastUsedWeightAt) : null,
     weight_limit_1m: 6000,
+    ip_banned: bnIpBanned,
+    ip_ban_age_ms: bnIpBanned ? (t - bnIpBanSince) : null,
+    ip_ban_next_probe_in_ms: bnIpBanned ? Math.max(0, bnNextProbeAt - t) : null,
     endpoints,
     depth_top_symbols_5m,
   };
+}
+
+// ── IP-ban recovery probe — app se poori tarah INDEPENDENT ─────────────────
+// Jaise hi koi bhi Binance call 418 dekhti hai (trackBn() ke andar), ye loop
+// har BN_BAN_PROBE_INTERVAL_MS (default 5 min) par SIRF EK chhoti REST call
+// (/eapi/v1/time — sabse halka public endpoint, weight ~1) bhejta hai taaki
+// pata chale ban khatam hui ya nahi. Jab tak bnIpBanned false hai, ye loop
+// koi Binance call nahi karta — bilkul idle (sirf har 5 min ek baar jaagta
+// hai, flag check karta hai, phir so jaata hai). App khuli ho ya band, iska
+// koi farak nahi padta — ye rulesMonitorLoop jaisa hi standalone hai.
+const BN_BAN_PROBE_INTERVAL_MS = 5 * 60_000;
+let bnNextProbeAt = 0;
+let bnBanProbeRunning = false;
+
+async function bnBanProbeLoop(): Promise<void> {
+  if (bnBanProbeRunning) return;
+  bnBanProbeRunning = true;
+  while (true) {
+    bnNextProbeAt = nowMs() + BN_BAN_PROBE_INTERVAL_MS;
+    await sleep(BN_BAN_PROBE_INTERVAL_MS);
+    if (!bnIpBanned) continue;   // ban nahi hai → is cycle mein Binance ko bilkul mat chhedo
+    try {
+      const r = await fetch(`${EAPI}/eapi/v1/time`, { signal: AbortSignal.timeout(8000) });
+      trackBn("/eapi/v1/time (ban-probe)", { resp: r });   // ye hi bnIpBanned ko clear karega agar 200 aaya
+      if (r.ok) {
+        console.log("[ban-probe] Binance ban khatam ho gayi — proxy normal");
+        restOk("ip-ban-probe");
+      } else {
+        restFail("ip-ban-probe", `HTTP ${r.status} — ban abhi bhi active`);
+        console.log(`[ban-probe] abhi bhi ${r.status} — agla check ${BN_BAN_PROBE_INTERVAL_MS / 60000}min baad`);
+      }
+    } catch (e) {
+      // Network-level fail (timeout/DNS) — ban-state nahi badalte, agli cycle phir try karega
+      console.log(`[ban-probe] fetch fail: ${String(e).slice(0, 150)}`);
+    }
+  }
 }
 
 function num(x: unknown): number {
@@ -2060,6 +2114,7 @@ async function dailySummaryLoop(): Promise<void> {
 // ── Rules engine startup — background, IDLE_STOP se independent ────────────
 rulesMonitorLoop();
 dailySummaryLoop();
+bnBanProbeLoop();
 
 
 // ── Live status dashboard (same-origin auto-connect) ───────────────────────
@@ -2247,6 +2302,8 @@ async function pollOnce() {
       ["Burst (last 5s / 10s)", ratelimit.burst_last_5s + " / " + ratelimit.burst_last_10s],
       ["Est. weight / 60s", ratelimit.estimated_weight_last_60s],
       ["Binance used weight", ratelimit.binance_used_weight_1m != null ? ratelimit.binance_used_weight_1m + " / " + ratelimit.weight_limit_1m : "—"],
+      ["IP ban (418)", ratelimit.ip_banned ? ("🔴 Active — " + fmtAgo(ratelimit.ip_ban_age_ms) + " se") : "🟢 Nahi"],
+      ["Agla auto-check", ratelimit.ip_banned ? ("~" + Math.ceil(ratelimit.ip_ban_next_probe_in_ms / 1000) + "s baad") : "—"],
     ];
     topStats.innerHTML = stats.map(([label, value]) =>
       '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>'
