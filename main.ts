@@ -337,10 +337,17 @@ setInterval(() => {
 let tickerTs = 0;
 let tickerErr: string | null = null;
 let tickerInflight: Promise<void> | null = null;
+// FIX (2026-09-25): pehle tickerTs sirf SUCCESS par update hota tha, isliye
+// fail hone par agli hi /snapshot request turant retry kar deti thi (TTL
+// gate fail ke baad bhi "expired" dikhta tha) — 429 ke waqt ye retry-loop
+// Binance ko aur zyada hammer karta tha. Ab har attempt (pass ya fail) ke
+// baad ek chhota backoff set hota hai; 429/418 par zyada lamba backoff.
+let tickerNextTryMs = 0;
 
 function refreshTicker(force = false): Promise<void> {
   if (tickerInflight) return tickerInflight;
-  if (!force && nowMs() - tickerTs < TICKER_TTL_MS) return Promise.resolve();
+  const t0 = nowMs();
+  if (!force && (t0 - tickerTs < TICKER_TTL_MS || t0 < tickerNextTryMs)) return Promise.resolve();
   tickerInflight = (async () => {
     try {
       const r = await fetch("https://eapi.binance.com/eapi/v1/ticker");
@@ -348,12 +355,23 @@ function refreshTicker(force = false): Promise<void> {
       if (!r.ok) {
         tickerErr = `ticker HTTP ${r.status}`;
         restFail("24h-ticker (refreshTicker)", tickerErr);
+        // 429 (rate-limit) / 418 (ban) → lamba backoff; Retry-After header ho to usi ko maano
+        if (r.status === 429 || r.status === 418) {
+          const retryAfterSec = parseInt(r.headers.get("retry-after") ?? "", 10);
+          const backoffMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? retryAfterSec * 1000
+            : Math.max(TICKER_TTL_MS * 4, 20_000);
+          tickerNextTryMs = nowMs() + backoffMs;
+        } else {
+          tickerNextTryMs = nowMs() + TICKER_TTL_MS;   // normal fail → sirf ek TTL cycle skip
+        }
         return;
       }
       const arr = await r.json();
       if (!Array.isArray(arr)) {
         tickerErr = "ticker: unexpected response";
         restFail("24h-ticker (refreshTicker)", tickerErr);
+        tickerNextTryMs = nowMs() + TICKER_TTL_MS;
         return;
       }
       const t = nowMs();
@@ -373,10 +391,12 @@ function refreshTicker(force = false): Promise<void> {
       }
       tickerTs = t;
       tickerErr = null;
+      tickerNextTryMs = 0;
       restOk("24h-ticker (refreshTicker)");
     } catch (e) {
       tickerErr = `ticker fetch failed: ${e}`;
       restFail("24h-ticker (refreshTicker)", tickerErr);
+      tickerNextTryMs = nowMs() + TICKER_TTL_MS;
     } finally {
       tickerInflight = null;
     }
