@@ -347,11 +347,13 @@ function refreshTicker(force = false): Promise<void> {
       trackBnRequest(r);
       if (!r.ok) {
         tickerErr = `ticker HTTP ${r.status}`;
+        restFail("24h-ticker (refreshTicker)", tickerErr);
         return;
       }
       const arr = await r.json();
       if (!Array.isArray(arr)) {
         tickerErr = "ticker: unexpected response";
+        restFail("24h-ticker (refreshTicker)", tickerErr);
         return;
       }
       const t = nowMs();
@@ -371,8 +373,10 @@ function refreshTicker(force = false): Promise<void> {
       }
       tickerTs = t;
       tickerErr = null;
+      restOk("24h-ticker (refreshTicker)");
     } catch (e) {
       tickerErr = `ticker fetch failed: ${e}`;
+      restFail("24h-ticker (refreshTicker)", tickerErr);
     } finally {
       tickerInflight = null;
     }
@@ -384,14 +388,19 @@ async function fetchSpotRest() {
   try {
     const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
     trackBnRequest(r);
-    if (!r.ok) return;
+    if (!r.ok) { restFail("spot-price (fetchSpotRest)", `HTTP ${r.status}`); return; }
     const j = await r.json();
     const p = parseFloat(j?.price);
     if (Number.isFinite(p)) {
       spot.price = p;
       spot.ts = nowMs();
+      restOk("spot-price (fetchSpotRest)");
+    } else {
+      restFail("spot-price (fetchSpotRest)", "invalid price in response");
     }
-  } catch { /* ignore */ }
+  } catch (e) {
+    restFail("spot-price (fetchSpotRest)", String(e));
+  }
 }
 
 // Cold start: pehla mark tick + spot + ticker aane tak (max maxMs) ruko
@@ -678,6 +687,87 @@ async function sendEmailAlert(
   }
 }
 
+// ── REST health tracker (email alert jab REST calls baar-baar fail hon) ────
+// Rule: kisi bhi tracked REST call mein 3 CONSECUTIVE fails → email alert.
+// Cap: alert mail max 1 baar/ghanta (ALERT_FAIL_COOLDOWN_MS, jo upar sendEmailAlert
+// ke liye already default 3600s hai — isi ko yahan reuse karte hain).
+// Mail mein saare tracked endpoints ka combined health report jaata hai:
+// FAILING wale top par (critical), OK wale niche (taaki "baaki sab theek chal
+// raha hai" bhi pata chale). Jab koi failing endpoint wapas OK ho jaye, ek
+// chhoti "recovered" mail alag se jaati hai (cap ke bina, kyunki good-news hai).
+const REST_FAIL_THRESHOLD = envNum("REST_FAIL_THRESHOLD", 3);
+
+interface RestHealth {
+  fails: number;
+  lastError: string;
+  lastOkAt: number;
+  alerting: boolean;   // true = abhi is endpoint ke liye "failing" state alert ja chuki hai
+}
+const restHealth = new Map<string, RestHealth>();
+
+// ── Rolling request log (in-memory, fixed-size ring buffer) ────────────────
+// Render ka 512MB RAM — LOG_MAX entries chhote objects hi hain (~200 bytes
+// har entry), isliye chahe LOG_MAX 300 ho ya 1000, memory par asar negligible
+// hai. Fixed-size rakhne se buffer kabhi grow nahi hota — process restart
+// (redeploy / idle sleep) par ye log khaali ho jaata hai, persistent nahi hai.
+const LOG_MAX = envNum("HEALTH_LOG_MAX", 300);
+interface ReqLogEntry { ts: number; name: string; ok: boolean; detail: string }
+const reqLog: ReqLogEntry[] = [];
+function pushLog(name: string, ok: boolean, detail: string): void {
+  reqLog.push({ ts: nowMs(), name, ok, detail: detail.slice(0, 200) });
+  if (reqLog.length > LOG_MAX) reqLog.shift();
+}
+
+function restOk(name: string): void {
+  const h = restHealth.get(name);
+  const wasAlerting = h?.alerting === true;
+  restHealth.set(name, { fails: 0, lastError: "", lastOkAt: nowMs(), alerting: false });
+  pushLog(name, true, "ok");
+  if (wasAlerting) void sendRestRecoveryAlert(name);
+}
+
+function restFail(name: string, err: string): void {
+  const h = restHealth.get(name) ?? { fails: 0, lastError: "", lastOkAt: 0, alerting: false };
+  h.fails++;
+  h.lastError = err.slice(0, 200);
+  restHealth.set(name, h);
+  pushLog(name, false, err);
+  if (h.fails >= REST_FAIL_THRESHOLD) {
+    h.alerting = true;
+    void sendRestFailAlert();
+  }
+}
+
+function restHealthReport(): { failing: string[]; ok: string[] } {
+  const t = nowMs();
+  const ago = (ts: number) => ts ? `${Math.round((t - ts) / 1000)}s pehle` : "abhi tak nahi mila";
+  const failing: string[] = [];
+  const ok: string[] = [];
+  for (const [name, h] of restHealth) {
+    if (h.fails >= REST_FAIL_THRESHOLD) {
+      failing.push(`❌ ${name} — ${h.fails} consecutive fails | last success: ${ago(h.lastOkAt)}\n   Error: ${h.lastError}`);
+    } else {
+      ok.push(`✅ ${name} — last success: ${ago(h.lastOkAt)}`);
+    }
+  }
+  return { failing, ok };
+}
+
+async function sendRestFailAlert(): Promise<void> {
+  const { failing, ok } = restHealthReport();
+  if (!failing.length) return;
+  const body =
+    `🚨 REST calls fail ho rahi hain (3+ consecutive fails)\n\n` +
+    `❌ FAILING:\n${failing.join("\n\n")}\n\n` +
+    `✅ OK:\n${ok.length ? ok.join("\n") : "  (koi doosra tracked endpoint nahi)"}\n`;
+  await sendEmailAlert("rest-health-fail", "[Alert] REST call(s) failing — Binance proxy", body, ALERT_FAIL_COOLDOWN_MS, false);
+}
+
+async function sendRestRecoveryAlert(name: string): Promise<void> {
+  const body = `✅ ${name} wapas normal chal raha hai (fails ruk gaye).`;
+  await sendEmailAlert(`rest-health-recover:${name}`, `[Recovered] ${name} theek ho gaya`, body, 0, false);
+}
+
 // ── Rules engine (SL / Target / Trailing) — Supabase-backed ────────────────
 // Secrets naam jaanbujh kar app.py ke REPLAY/TEST Supabase project jaise hi
 // rakhe hain (TEST_SUPABASE_URL / TEST_SUPABASE_ANON_KEY) — user ke ask par.
@@ -756,9 +846,16 @@ async function syncTime() {
       if (Number.isFinite(Number(j?.serverTime))) {
         timeOffsetMs = Number(j.serverTime) - nowMs();
         timeSyncedAt = nowMs();
+        restOk("time-sync (syncTime)");
+      } else {
+        restFail("time-sync (syncTime)", "invalid serverTime in response");
       }
+    } else {
+      restFail("time-sync (syncTime)", `HTTP ${r.status}`);
     }
-  } catch { /* ignore, purana offset chalega */ }
+  } catch (e) {
+    restFail("time-sync (syncTime)", String(e));   // purana offset chalega
+  }
 }
 
 type Params = Record<string, string | number | boolean | undefined>;
@@ -1843,6 +1940,263 @@ async function dailySummaryLoop(): Promise<void> {
 rulesMonitorLoop();
 dailySummaryLoop();
 
+
+// ── Live status dashboard (same-origin auto-connect) ───────────────────────
+// Ye render.html file ka hi content hai, seedha yahan se serve hota hai taaki
+// /status.html khulte hi khud apne origin se /health, /status, /ratelimit fetch
+// kar le — koi manual URL nahi daalna padta. Same file kahin aur bhi (local
+// disk, doosra host) khol sakte ho — tab manual URL input dikh jaata hai.
+const DASHBOARD_HTML = `<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Binance Proxy — Live Status</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: #0f172a; color: #e2e8f0;
+    font-family: Segoe UI, Roboto, Arial, sans-serif;
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #94a3b8; font-size: 12px; margin-bottom: 16px; }
+  .urlbar {
+    display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; align-items: center;
+  }
+  .urlbar input {
+    flex: 1; min-width: 220px; background: #111827; border: 1px solid #1e293b; color: #e2e8f0;
+    padding: 8px 10px; border-radius: 8px; font-size: 13px;
+  }
+  .urlbar button {
+    background: #1d4ed8; color: #fff; border: none; padding: 8px 14px; border-radius: 8px;
+    font-size: 13px; cursor: pointer;
+  }
+  .urlbar button:hover { background: #1e40af; }
+  .pill { font-size: 11px; padding: 3px 8px; border-radius: 999px; }
+  .pill.live { background: #14532d; color: #86efac; }
+  .pill.down { background: #7f1d1d; color: #fca5a5; }
+  .toprow { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .stat {
+    background: #111827; border: 1px solid #1e293b; border-radius: 10px;
+    padding: 10px 14px; min-width: 130px;
+  }
+  .stat .label { font-size: 11px; color: #94a3b8; }
+  .stat .value { font-size: 15px; font-weight: 600; margin-top: 2px; }
+  h2 { font-size: 14px; color: #cbd5e1; margin: 22px 0 10px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px,1fr)); gap: 10px; margin-bottom: 22px; }
+  .card { border-radius: 10px; padding: 12px 14px; border: 1px solid #1e293b; background: #111827; }
+  .card.ok { border-color: #14532d; }
+  .card.warning { border-color: #78350f; }
+  .card.failing { border-color: #7f1d1d; background: #1f1315; }
+  .name { font-size: 13px; font-weight: 600; margin-bottom: 6px; word-break: break-word; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .ok .dot { background: #22c55e; } .warning .dot { background: #f59e0b; } .failing .dot { background: #ef4444; }
+  .meta { font-size: 11px; color: #94a3b8; line-height: 1.6; }
+  .err { color: #fca5a5; font-size: 11px; margin-top: 4px; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #1e293b; }
+  th { color: #94a3b8; font-weight: 500; position: sticky; top: 0; background: #0f172a; }
+  .row-ok { color: #86efac; } .row-fail { color: #fca5a5; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; }
+  .badge.ok { background: #14532d; color: #86efac; } .badge.fail { background: #7f1d1d; color: #fca5a5; }
+  .tablewrap { max-height: 50vh; overflow: auto; border: 1px solid #1e293b; border-radius: 10px; }
+  .empty { color: #64748b; padding: 16px; text-align: center; }
+  .errbox {
+    background: #1f1315; border: 1px solid #7f1d1d; color: #fca5a5; padding: 10px 14px;
+    border-radius: 8px; font-size: 12px; margin-bottom: 16px; display: none;
+  }
+</style>
+</head>
+<body>
+
+  <h1>Binance Proxy — Live Status</h1>
+  <div class="sub">
+    Render service ka URL neeche daalo (ek baar save hoga, phir har baar yaad rahega).
+    Ye page kisi bhi jagah se khol sakte ho — sirf browser file hai, kahin deploy karne ki zaroorat nahi.
+  </div>
+
+  <div class="urlbar" id="urlbar">
+    <input id="baseUrl" type="text" placeholder="https://your-service.onrender.com" />
+    <button id="saveBtn">Save &amp; Connect</button>
+    <span id="livePill" class="pill down">disconnected</span>
+  </div>
+  <div class="sub" id="originNote" style="display:none;"></div>
+
+  <div class="errbox" id="errBox"></div>
+
+  <div class="toprow" id="topStats"></div>
+
+  <h2>Endpoint Health (3+ consecutive fails → failing)</h2>
+  <div class="cards" id="cards"></div>
+
+  <h2>Recent Calls (live log)</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Ago</th><th>Endpoint</th><th>Status</th><th>Detail</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+<script>
+const LS_KEY = "binance_proxy_base_url";
+const urlInput = document.getElementById("baseUrl");
+const saveBtn = document.getElementById("saveBtn");
+const livePill = document.getElementById("livePill");
+const errBox = document.getElementById("errBox");
+const topStats = document.getElementById("topStats");
+const cardsEl = document.getElementById("cards");
+const rowsEl = document.getElementById("rows");
+const urlbarEl = document.querySelector(".urlbar");
+const originNote = document.getElementById("originNote");
+
+let pollTimer = null;
+
+function loadSavedUrl() {
+  try { return localStorage.getItem(LS_KEY) || ""; } catch { return ""; }
+}
+function saveUrl(u) {
+  try { localStorage.setItem(LS_KEY, u); } catch { /* ignore */ }
+}
+
+function normalizeBase(u) {
+  u = (u || "").trim();
+  if (!u) return "";
+  if (!/^https?:\\/\\//i.test(u)) u = "https://" + u;
+  return u.replace(/\\/+$/, "");
+}
+
+function fmtAgo(ms) {
+  if (ms == null) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
+
+async function fetchJson(base, path) {
+  const r = await fetch(base + path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + " → HTTP " + r.status);
+  return await r.json();
+}
+
+async function pollOnce() {
+  const base = normalizeBase(urlInput.value);
+  if (!base) return;
+  try {
+    const [health, status, ratelimit] = await Promise.all([
+      fetchJson(base, "/health"),
+      fetchJson(base, "/status"),
+      fetchJson(base, "/ratelimit"),
+    ]);
+
+    livePill.textContent = "live";
+    livePill.className = "pill live";
+    errBox.style.display = "none";
+
+    // ── Top stats row (from /status + /ratelimit) ──
+    const stats = [
+      ["Feeds running", status.feeds_running ? "✅ Yes" : "❌ No"],
+      ["Symbols tracked", status.symbols],
+      ["Spot price", status.spot != null ? status.spot : "—"],
+      ["Ticker age", fmtAgo(status.ticker_age_ms)],
+      ["REST reqs / 60s", ratelimit.requests_last_60s],
+      ["Binance used weight", ratelimit.binance_used_weight_1m != null ? ratelimit.binance_used_weight_1m + " / " + ratelimit.weight_limit_1m : "—"],
+    ];
+    topStats.innerHTML = stats.map(([label, value]) =>
+      '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>'
+    ).join("");
+
+    // ── Endpoint health cards ──
+    cardsEl.innerHTML = health.endpoints.length ? "" :
+      '<div class="empty">Abhi koi endpoint track nahi hua (pehli REST call ka wait)</div>';
+    for (const ep of health.endpoints) {
+      const div = document.createElement("div");
+      div.className = "card " + ep.status;
+      div.innerHTML =
+        '<div class="name"><span class="dot"></span>' + ep.name + '</div>' +
+        '<div class="meta">Status: ' + ep.status.toUpperCase() +
+        ' &middot; Consecutive fails: ' + ep.consecutive_fails +
+        '<br>Last success: ' + fmtAgo(ep.last_ok_age_ms) + ' pehle</div>' +
+        (ep.last_error ? '<div class="err">' + ep.last_error + '</div>' : '');
+      cardsEl.appendChild(div);
+    }
+
+    // ── Recent calls table ──
+    rowsEl.innerHTML = "";
+    if (!health.recent.length) {
+      rowsEl.innerHTML = '<tr><td colspan="4" class="empty">Koi recent call log nahi hai</td></tr>';
+    }
+    for (const e of health.recent) {
+      const tr = document.createElement("tr");
+      tr.className = e.ok ? "row-ok" : "row-fail";
+      tr.innerHTML =
+        '<td>' + fmtAgo(e.age_ms) + '</td>' +
+        '<td>' + e.name + '</td>' +
+        '<td><span class="badge ' + (e.ok ? "ok" : "fail") + '">' + (e.ok ? "PASS" : "FAIL") + '</span></td>' +
+        '<td>' + (e.detail || "") + '</td>';
+      rowsEl.appendChild(tr);
+    }
+  } catch (e) {
+    livePill.textContent = "disconnected";
+    livePill.className = "pill down";
+    errBox.style.display = "block";
+    errBox.textContent = "Connect nahi ho paya: " + e.message + " — URL check karo (CORS/typo/service down).";
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollOnce();
+  pollTimer = setInterval(pollOnce, 4000);
+}
+
+// ── Auto-detect: agar ye page khud Render service se serve ho rahi hai
+// (jaise https://your-service.onrender.com/status.html), to /health usi
+// origin se turant try karo — sahi hua to URL-box hide karke seedha connect
+// ho jao. File://  ya kisi aur jagah se khola ho to manual input dikhao.
+async function tryAutoDetect() {
+  if (location.protocol === "file:") return false;
+  try {
+    const r = await fetch(location.origin + "/health", { cache: "no-store" });
+    if (!r.ok) return false;
+    await r.json();  // confirm ye wahi API hai (JSON parse ho raha hai)
+    urlInput.value = location.origin;
+    urlbarEl.style.display = "none";
+    originNote.style.display = "block";
+    originNote.textContent = "🔗 Auto-connected: " + location.origin + " (isi service se ye page serve ho rahi hai)";
+    startPolling();
+    return true;
+  } catch { return false; }
+}
+
+saveBtn.addEventListener("click", () => {
+  const base = normalizeBase(urlInput.value);
+  if (!base) return;
+  urlInput.value = base;
+  saveUrl(base);
+  startPolling();
+});
+urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.click(); });
+
+(async () => {
+  const auto = await tryAutoDetect();
+  if (auto) return;
+  // Auto-detect fail hua (local file ya doosri jagah se khula) → saved URL try karo
+  const saved = loadSavedUrl();
+  if (saved) {
+    urlInput.value = saved;
+    startPolling();
+  }
+})();
+
+</script>
+</body>
+</html>
+`;
+
 // ── Server ────────────────────────────────────────────────────────────────
 Deno.serve({ port: PORT }, async (req: Request) => {
   const url = new URL(req.url);
@@ -1900,6 +2254,34 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       return respondJson(req, bnRateStats());
     }
 
+    // REST call health — snapshot (per-endpoint status) + rolling recent-log.
+    // /status.html (neeche) isi data ko poll karke dashboard dikhata hai
+    // (CORS already open hai — respondJson "Access-Control-Allow-Origin: *" bhejta hai).
+    if (url.pathname === "/health") {
+      const t = nowMs();
+      const endpoints = [...restHealth.entries()].map(([name, h]) => ({
+        name,
+        status: h.fails >= REST_FAIL_THRESHOLD ? "failing" : (h.fails > 0 ? "warning" : "ok"),
+        consecutive_fails: h.fails,
+        last_error: h.lastError || null,
+        last_ok_age_ms: h.lastOkAt ? t - h.lastOkAt : null,
+      }));
+      return respondJson(req, {
+        threshold: REST_FAIL_THRESHOLD,
+        endpoints,
+        // naya sabse upar (log already chronological — bas reverse kar do)
+        recent: reqLog.slice().reverse().map((e) => ({
+          age_ms: t - e.ts, name: e.name, ok: e.ok, detail: e.detail,
+        })),
+        log_capacity: LOG_MAX,
+      });
+    }
+
+    // Live status dashboard — Render URL khud kholte hi (same-origin) auto-connect ho jaata hai.
+    if (url.pathname === "/status.html") {
+      return respondText(req, DASHBOARD_HTML, 200, "text/html");
+    }
+
     // ── On-demand snapshot ──
     if (url.pathname === "/snapshot") {
       return await handleSnapshot(req, url);
@@ -1944,14 +2326,33 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       if (hit && nowMs() - hit.ts < ttl) return respondText(req, hit.text, hit.status, hit.ct);
     }
 
-    const upstreamResp = await fetch(upstreamUrl, {
-      method: req.method,
-      headers: {
-        "Content-Type": req.headers.get("Content-Type") ?? "application/json",
-      },
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
-    });
+    // Health-tracker key: prefix ke hisaab se ("/api/" → spot forward, "/eapi/" → options forward)
+    const healthKey = `rest-forward ${prefix}`;
+
+    let upstreamResp: Response;
+    try {
+      upstreamResp = await fetch(upstreamUrl, {
+        method: req.method,
+        headers: {
+          "Content-Type": req.headers.get("Content-Type") ?? "application/json",
+        },
+        body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.text(),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (e) {
+      restFail(healthKey, String(e));
+      throw e;   // bahar wala catch abhi bhi 502 wapas karega, behavior same
+    }
     trackBnRequest(upstreamResp);
+
+    // Network-level fetch to gaya, par Binance-side issue ho sakta hai:
+    // 429 (rate-limit), 418 (IP ban), 5xx (Binance down) → in sabko "fail" maano.
+    // 4xx (400/404 etc — jaisa galat symbol client ne bheja) fail nahi, wo normal hai.
+    if (upstreamResp.status === 429 || upstreamResp.status === 418 || upstreamResp.status >= 500) {
+      restFail(healthKey, `HTTP ${upstreamResp.status}`);
+    } else {
+      restOk(healthKey);
+    }
 
     let respBody = await upstreamResp.text();
     const ct = upstreamResp.headers.get("Content-Type") ?? "application/json";
