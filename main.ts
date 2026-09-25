@@ -61,23 +61,62 @@ const WS_MAP: Record<string, string> = {
 const nowMs = () => Date.now();
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-// ── Binance request-rate tracker (sirf counting, koi limit enforce nahi karta) ──
-// Har outbound Binance REST call (signed + public/forwarded) yahan log hoti hai.
-// Sliding 60s window rakhte hain taaki "abhi last 1 min mein kitni requests gayi" pata chale.
-// Saath mein Binance ke asli response header (X-MBX-USED-WEIGHT-1M) ka latest value bhi
-// rakhte hain — yeh Binance ka apna official number hai, hamara count sirf request-ginti hai.
-const bnReqLog: number[] = [];
+// ── Binance request-rate tracker (ADVANCED — 2026-09-25) ──────────────────
+// Pehle sirf ek total counter tha (bnReqLog) — "60s mein kitni requests gayi"
+// bata deta tha, par "kaunsi request se problem hai" ka jawab nahi deta tha.
+// Ab har outbound Binance call ek endpoint-tag + (optional) symbol + cache-hit
+// flag + estimated weight ke saath log hoti hai. Isse ye sab nikal sakte hain:
+//   - endpoint ke hisaab se breakdown (depth vs mark vs ticker vs exchangeInfo...)
+//   - depth ke liye per-symbol breakdown (kaunsa strike sabse zyada poll ho raha)
+//   - cache HIT vs MISS split (sirf MISS = asli Binance call; poll-frequency ka
+//     doosra number hai, isse "browser bahut fast poll kar raha" vs "cache leak"
+//     alag pehchaan sakte hain)
+//   - short burst windows (5s/10s) — Binance ka 418 IP-ban weight-limit se ALAG
+//     ek burst/order-rate limit bhi hai (dekho _ocPollDepth comment), 60s window
+//     itna chhota burst nahi pakadta
+//   - estimated weight (Binance ka official per-route weight-table public nahi
+//     mila reliably, isliye ye APPROX hai — relative comparison ke liye kaafi
+//     hai; asli calibration ke liye Binance ke response header
+//     x-mbx-used-weight-1m ka delta bhi saath mein track karte hain)
+
+interface BnCall { ts: number; endpoint: string; symbol: string | null; cacheHit: boolean; weight: number }
+const BN_LOG_MAX = 4000;              // ~ka andar rakhte hain, purane trim ho jaate hain
+const bnLog: BnCall[] = [];
+
 let bnLastUsedWeight: number | null = null;
 let bnLastUsedWeightAt = 0;
 
-function trackBnRequest(resp?: Response): void {
+// Estimated weight table — Binance EAPI (options) public GET routes zyaadatar
+// weight 1 hain; depth limit ke hisaab se badhta hai (Binance ke aam pattern
+// jaisa — 50 tak halka, jitna bada limit utna weight). Calibrate karne ke
+// liye bnLastUsedWeight ke actual delta ko is estimate se compare karo.
+function estimateWeight(endpoint: string, params?: URLSearchParams): number {
+  if (endpoint === "/eapi/v1/depth") {
+    const limit = params ? (parseInt(params.get("limit") ?? "", 10) || 100) : 100;
+    if (limit <= 50) return 1;
+    if (limit <= 100) return 5;
+    if (limit <= 500) return 10;
+    return 20;
+  }
+  return 1; // exchangeInfo, ticker, mark, time, klines, trades, index, signed order calls — sab default 1
+}
+
+// endpoint: jaisa "/eapi/v1/depth", "ticker-refresh", "time-sync" (readable tag)
+// cacheHit=true wale calls Binance tak nahi jaati (sirf proxy-cache serve hui) —
+// inpar weight estimate nahi lagate, kyunki ye asli Binance load nahi hai.
+function trackBn(endpoint: string, opts: { resp?: Response; symbol?: string | null; cacheHit?: boolean; params?: URLSearchParams } = {}): void {
   const t = nowMs();
-  bnReqLog.push(t);
-  // purani (60s se zyada) entries hata do — array zyada bada na ho
-  const cutoff = t - 60_000;
-  while (bnReqLog.length && bnReqLog[0] < cutoff) bnReqLog.shift();
-  if (resp) {
-    const w = resp.headers.get("x-mbx-used-weight-1m");
+  const cacheHit = opts.cacheHit ?? false;
+  bnLog.push({
+    ts: t,
+    endpoint,
+    symbol: opts.symbol ?? null,
+    cacheHit,
+    weight: cacheHit ? 0 : estimateWeight(endpoint, opts.params),
+  });
+  if (bnLog.length > BN_LOG_MAX) bnLog.splice(0, bnLog.length - BN_LOG_MAX);
+  if (opts.resp) {
+    const w = opts.resp.headers.get("x-mbx-used-weight-1m");
     if (w != null) {
       const n = parseInt(w, 10);
       if (Number.isFinite(n)) { bnLastUsedWeight = n; bnLastUsedWeightAt = t; }
@@ -85,15 +124,70 @@ function trackBnRequest(resp?: Response): void {
   }
 }
 
+// Legacy shim — purane call-sites jo sirf resp pass karte the, wo ab bhi
+// chalte hain (endpoint tag ke bina), naye call-sites trackBn() seedha use karein.
+function trackBnRequest(resp?: Response): void {
+  trackBn("untagged", { resp });
+}
+
+function pruneBnLog(sinceMs: number): void {
+  const cutoff = nowMs() - sinceMs;
+  while (bnLog.length && bnLog[0].ts < cutoff) bnLog.shift();
+}
+
 function bnRateStats() {
   const t = nowMs();
-  const cutoff = t - 60_000;
-  while (bnReqLog.length && bnReqLog[0] < cutoff) bnReqLog.shift();
+  pruneBnLog(10 * 60_000); // 10 min se purana kabhi kaam ka nahi, permanently trim
+
+  function windowCalls(ms: number) {
+    const cutoff = t - ms;
+    return bnLog.filter((c) => c.ts >= cutoff);
+  }
+
+  const last60s = windowCalls(60_000);
+  const last10s = windowCalls(10_000);
+  const last5s = windowCalls(5_000);
+
+  const misses60s = last60s.filter((c) => !c.cacheHit);
+  const hits60s = last60s.length - misses60s.length;
+
+  // ── per-endpoint breakdown (last 60s) — seen (proxy ko mili) vs sent (Binance tak gayi) ──
+  const byEndpoint = new Map<string, { seen: number; sent: number; cacheHits: number; weight: number }>();
+  for (const c of last60s) {
+    const e = byEndpoint.get(c.endpoint) ?? { seen: 0, sent: 0, cacheHits: 0, weight: 0 };
+    e.seen++;
+    if (c.cacheHit) e.cacheHits++;
+    else { e.sent++; e.weight += c.weight; }
+    byEndpoint.set(c.endpoint, e);
+  }
+  const endpoints = [...byEndpoint.entries()]
+    .map(([endpoint, v]) => ({ endpoint, ...v }))
+    .sort((a, b) => b.sent - a.sent || b.seen - a.seen);
+
+  // ── depth: per-symbol breakdown (last 5 min), sirf actual Binance-bound calls ──
+  const depthWindow = windowCalls(5 * 60_000).filter((c) => c.endpoint === "/eapi/v1/depth" && !c.cacheHit);
+  const bySymbol = new Map<string, number>();
+  for (const c of depthWindow) {
+    const s = c.symbol ?? "(unknown)";
+    bySymbol.set(s, (bySymbol.get(s) ?? 0) + 1);
+  }
+  const depth_top_symbols_5m = [...bySymbol.entries()]
+    .map(([symbol, sent]) => ({ symbol, sent }))
+    .sort((a, b) => b.sent - a.sent)
+    .slice(0, 8);
+
   return {
-    requests_last_60s: bnReqLog.length,
+    requests_last_60s: misses60s.length,          // backward-compatible field — sirf asli Binance-bound calls
+    requests_seen_last_60s: last60s.length,        // proxy ko total kitni requests mili (cache hit + miss)
+    cache_hits_last_60s: hits60s,
+    burst_last_10s: last10s.filter((c) => !c.cacheHit).length,
+    burst_last_5s: last5s.filter((c) => !c.cacheHit).length,
+    estimated_weight_last_60s: misses60s.reduce((s, c) => s + c.weight, 0),
     binance_used_weight_1m: bnLastUsedWeight,
     binance_used_weight_age_ms: bnLastUsedWeight != null ? (t - bnLastUsedWeightAt) : null,
     weight_limit_1m: 6000,
+    endpoints,
+    depth_top_symbols_5m,
   };
 }
 
@@ -351,7 +445,7 @@ function refreshTicker(force = false): Promise<void> {
   tickerInflight = (async () => {
     try {
       const r = await fetch("https://eapi.binance.com/eapi/v1/ticker");
-      trackBnRequest(r);
+      trackBn("/eapi/v1/ticker", { resp: r });
       if (!r.ok) {
         tickerErr = `ticker HTTP ${r.status}`;
         restFail("24h-ticker (refreshTicker)", tickerErr);
@@ -407,7 +501,7 @@ function refreshTicker(force = false): Promise<void> {
 async function fetchSpotRest() {
   try {
     const r = await fetch("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT");
-    trackBnRequest(r);
+    trackBn("/api/v3/ticker/price", { resp: r, symbol: "BTCUSDT" });
     if (!r.ok) { restFail("spot-price (fetchSpotRest)", `HTTP ${r.status}`); return; }
     const j = await r.json();
     const p = parseFloat(j?.price);
@@ -517,6 +611,13 @@ async function handleSnapshot(req: Request, url: URL): Promise<Response> {
 
   return respondJson(req, buildSnapshot(strikeWindow, maxExpiries));
 }
+
+// (2026-09-25) /orderbook route HATA DIYA — dead code tha, koi caller nahi
+// tha (chart-1.html aur app.py dono depth ke liye generic /eapi/v1/depth
+// REST-forward use karte hain, is dedicated route ko kabhi hit hi nahi
+// karte the). Depth-specific tracking (per-symbol breakdown) ab generic
+// REST-forward path mein hi hoti hai — dekho bnRateStats() ka
+// depth_top_symbols_5m aur REST forward handler mein trackBn() call.
 
 // ── Filtered + cached REST (sirf bina-symbol wale bade calls) ──────────────
 const REST_TTL_MS: Record<string, number> = {
@@ -860,7 +961,7 @@ async function syncTime() {
   if (nowMs() - timeSyncedAt < 10 * 60_000) return;
   try {
     const r = await fetch(`${EAPI}/eapi/v1/time`, { signal: AbortSignal.timeout(5000) });
-    trackBnRequest(r);
+    trackBn("/eapi/v1/time", { resp: r });
     if (r.ok) {
       const j = await r.json();
       if (Number.isFinite(Number(j?.serverTime))) {
@@ -916,7 +1017,7 @@ async function signedCall(
       if (attempt < maxAttempts) { await sleep(400 * attempt); continue; }
       throw e;   // POST/DELETE: outcome unknown — caller ko batana hai, blind retry nahi
     }
-    trackBnRequest(r);
+    trackBn(path, { resp: r, symbol: params.symbol != null ? String(params.symbol) : null });
     const text = await r.text();
     // Binance ka jawab bina parse/stringify kiye seedha aage jaata hai — 19-digit
     // orderId jaise bade numbers JS mein precision kho dete hain.
@@ -983,7 +1084,7 @@ async function loadSymRules(): Promise<void> {
   if (symRulesCache.map.size && nowMs() - symRulesCache.ts < 10 * 60_000) return;
   try {
     const r = await fetch(`${EAPI}/eapi/v1/exchangeInfo`, { signal: AbortSignal.timeout(12000) });
-    trackBnRequest(r);
+    trackBn("/eapi/v1/exchangeInfo", { resp: r });
     if (!r.ok) return;
     const j = await r.json();
     const m = new Map<string, SymRules>();
@@ -1034,7 +1135,7 @@ async function getMarkPrice(symbol: string): Promise<number | null> {
     const r = await fetch(`${EAPI}/eapi/v1/mark?symbol=${encodeURIComponent(symbol)}`, {
       signal: AbortSignal.timeout(8000),
     });
-    trackBnRequest(r);
+    trackBn("/eapi/v1/mark", { resp: r, symbol });
     if (!r.ok) return null;
     const j = await r.json();
     const row = Array.isArray(j) ? j[0] : j;
@@ -1146,7 +1247,7 @@ function pickOrderId(body: string): string | null {
 async function publicRow(path: string, symbol: string): Promise<Record<string, unknown> | null> {
   try {
     const r = await fetch(`${EAPI}${path}?symbol=${encodeURIComponent(symbol)}`, { signal: AbortSignal.timeout(8000) });
-    trackBnRequest(r);
+    trackBn(path, { resp: r, symbol });
     if (!r.ok) return null;
     const j = await r.json();
     const row = Array.isArray(j) ? j[0] : j;
@@ -2047,6 +2148,22 @@ const DASHBOARD_HTML = `<!doctype html>
 
   <div class="toprow" id="topStats"></div>
 
+  <h2>Binance Request Breakdown (last 60s) — kaunsi request se load h</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Endpoint</th><th>Seen (proxy)</th><th>Sent (Binance)</th><th>Cache hits</th><th>Est. weight</th></tr></thead>
+      <tbody id="epBreakdownRows"></tbody>
+    </table>
+  </div>
+
+  <h2>Depth — Top Symbols (last 5 min, Binance-bound only)</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Symbol</th><th>Requests sent</th></tr></thead>
+      <tbody id="depthSymRows"></tbody>
+    </table>
+  </div>
+
   <h2>Endpoint Health (3+ consecutive fails → failing)</h2>
   <div class="cards" id="cards"></div>
 
@@ -2067,6 +2184,8 @@ const errBox = document.getElementById("errBox");
 const topStats = document.getElementById("topStats");
 const cardsEl = document.getElementById("cards");
 const rowsEl = document.getElementById("rows");
+const epBreakdownRows = document.getElementById("epBreakdownRows");
+const depthSymRows = document.getElementById("depthSymRows");
 const urlbarEl = document.querySelector(".urlbar");
 const originNote = document.getElementById("originNote");
 
@@ -2122,12 +2241,35 @@ async function pollOnce() {
       ["Symbols tracked", status.symbols],
       ["Spot price", status.spot != null ? status.spot : "—"],
       ["Ticker age", fmtAgo(status.ticker_age_ms)],
-      ["REST reqs / 60s", ratelimit.requests_last_60s],
+      ["Sent to Binance / 60s", ratelimit.requests_last_60s],
+      ["Seen by proxy / 60s", ratelimit.requests_seen_last_60s],
+      ["Cache hits / 60s", ratelimit.cache_hits_last_60s],
+      ["Burst (last 5s / 10s)", ratelimit.burst_last_5s + " / " + ratelimit.burst_last_10s],
+      ["Est. weight / 60s", ratelimit.estimated_weight_last_60s],
       ["Binance used weight", ratelimit.binance_used_weight_1m != null ? ratelimit.binance_used_weight_1m + " / " + ratelimit.weight_limit_1m : "—"],
     ];
     topStats.innerHTML = stats.map(([label, value]) =>
       '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>'
     ).join("");
+
+    // ── Per-endpoint breakdown table ──
+    if (epBreakdownRows) {
+      epBreakdownRows.innerHTML = ratelimit.endpoints && ratelimit.endpoints.length
+        ? ratelimit.endpoints.map((e) =>
+            '<tr><td>' + e.endpoint + '</td><td>' + e.seen + '</td><td>' + e.sent +
+            '</td><td>' + e.cacheHits + '</td><td>' + e.weight + '</td></tr>'
+          ).join("")
+        : '<tr><td colspan="5" class="empty">Abhi koi Binance call nahi hui (60s window)</td></tr>';
+    }
+
+    // ── Depth per-symbol breakdown table ──
+    if (depthSymRows) {
+      depthSymRows.innerHTML = ratelimit.depth_top_symbols_5m && ratelimit.depth_top_symbols_5m.length
+        ? ratelimit.depth_top_symbols_5m.map((s) =>
+            '<tr><td>' + s.symbol + '</td><td>' + s.sent + '</td></tr>'
+          ).join("")
+        : '<tr><td colspan="2" class="empty">Last 5 min mein koi depth call Binance tak nahi gayi</td></tr>';
+    }
 
     // ── Endpoint health cards ──
     cardsEl.innerHTML = health.endpoints.length ? "" :
@@ -2341,9 +2483,21 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     // hi call hote hain, isliye unke liye behavior same rehta hai).
     const cacheKey = url.pathname + url.search;
     const filterable = FILTER_REST && req.method === "GET" && ttl !== undefined;
+    // Is REST-forward path se hi depth (aur mark/ticker/exchangeInfo) jaate hain —
+    // isliye symbol yahin se nikal lete hain (agar query mein ho), taaki depth ka
+    // per-symbol breakdown ban sake ("kaunsa strike zyada poll ho raha").
+    const reqSymbol = url.searchParams.get("symbol");
     if (filterable) {
       const hit = restCache.get(cacheKey);
-      if (hit && nowMs() - hit.ts < ttl) return respondText(req, hit.text, hit.status, hit.ct);
+      if (hit && nowMs() - hit.ts < ttl) {
+        // Cache-HIT — Binance ko is call ki wajah se koi request nahi gayi, par
+        // "proxy ko kitni baar maanga gaya" gin-na zaroori hai (poll-frequency
+        // diagnose karne ke liye — jaise browser 2s poll kar raha ho par cache
+        // 1.2s TTL ho to zyadatar MISS honi chahiye; agar HIT-ratio ekdum kam
+        // dikhe to iska matlab cache TTL ya poll-interval mismatch hai).
+        trackBn(url.pathname, { symbol: reqSymbol, cacheHit: true, params: url.searchParams });
+        return respondText(req, hit.text, hit.status, hit.ct);
+      }
     }
 
     // Health-tracker key: prefix ke hisaab se ("/api/" → spot forward, "/eapi/" → options forward)
@@ -2361,9 +2515,11 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       });
     } catch (e) {
       restFail(healthKey, String(e));
+      trackBn(url.pathname, { symbol: reqSymbol, cacheHit: false, params: url.searchParams });
       throw e;   // bahar wala catch abhi bhi 502 wapas karega, behavior same
     }
-    trackBnRequest(upstreamResp);
+    // ASLI Binance-bound call — endpoint + symbol tagged, weight estimate lagta hai.
+    trackBn(url.pathname, { resp: upstreamResp, symbol: reqSymbol, params: url.searchParams });
 
     // Network-level fetch to gaya, par Binance-side issue ho sakta hai:
     // 429 (rate-limit), 418 (IP ban), 5xx (Binance down) → in sabko "fail" maano.
