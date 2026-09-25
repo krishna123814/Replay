@@ -456,6 +456,14 @@ const REST_TTL_MS: Record<string, number> = {
   "/eapi/v1/exchangeInfo": 300_000, // strikes/expiries rarely badalte hain
   "/eapi/v1/ticker": 3_000,
   "/eapi/v1/mark": 2_000,
+  // (2026-09-25) FIX: /eapi/v1/depth pehle yahan nahi tha, isliye har order-book
+  // poll (browser se 1.5s interval par, chart.html _ocPollInlineBookViaProxy)
+  // seedha Binance tak uncached jaata tha — is chhoti si file mein jitne bhi
+  // clients/strikes ek saath khule hon, sab Binance ko alag-alag hit karte the.
+  // Isi se ek din Binance ne "Way too many requests" bolkar IP 418-ban kar diya.
+  // 1.2s TTL browser ke 1.5s poll se chhota hai (fresh-enough), lekin ek hi
+  // symbol ke overlapping/parallel requests ko dedupe kar deta hai.
+  "/eapi/v1/depth": 1_200,
 };
 const restCache = new Map<string, { ts: number; status: number; text: string; ct: string }>();
 
@@ -1875,9 +1883,15 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     const upstreamUrl = UPSTREAM_MAP[prefix] + url.pathname.slice(prefix.length) + url.search;
 
     const ttl = REST_TTL_MS[url.pathname];
-    const filterable = FILTER_REST && req.method === "GET" && ttl !== undefined && !url.searchParams.has("symbol");
+    // (2026-09-25) FIX: cache key ab pathname+search hai (pehle sirf pathname
+    // tha, isliye alag symbol/limit wali depth requests ek hi cache-slot
+    // clobber kar detin). "symbol" param hone par bhi ab cache chalta hai —
+    // depth ko isi ki zaroorat thi (exchangeInfo/ticker/mark bina symbol ke
+    // hi call hote hain, isliye unke liye behavior same rehta hai).
+    const cacheKey = url.pathname + url.search;
+    const filterable = FILTER_REST && req.method === "GET" && ttl !== undefined;
     if (filterable) {
-      const hit = restCache.get(url.pathname);
+      const hit = restCache.get(cacheKey);
       if (hit && nowMs() - hit.ts < ttl) return respondText(req, hit.text, hit.status, hit.ct);
     }
 
@@ -1895,7 +1909,7 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     if (filterable && upstreamResp.status === 200) {
       try {
         respBody = JSON.stringify(filterRest(url.pathname, JSON.parse(respBody)));
-        restCache.set(url.pathname, { ts: nowMs(), status: 200, text: respBody, ct });
+        restCache.set(cacheKey, { ts: nowMs(), status: 200, text: respBody, ct });
       } catch { /* parse fail → original body as-is */ }
     }
 
