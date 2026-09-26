@@ -50,13 +50,6 @@ const BN_WS = {
   spot: "wss://stream.binance.com:9443/ws/btcusdt@aggTrade",
 };
 
-// Legacy raw relay map (rollback ke liye) — naya app.py inhe use nahi karta.
-const WS_MAP: Record<string, string> = {
-  "/ws/mark": BN_WS.mark,
-  "/ws/trade": BN_WS.trade,
-  "/ws/spot": BN_WS.spot,
-};
-
 // ── Helpers ───────────────────────────────────────────────────────────────
 const nowMs = () => Date.now();
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -260,6 +253,33 @@ function fmtFailSnapshotText(snap: ReturnType<typeof lastFailSnapshotReport>): s
     `   burst 10s/5s: ${s.burst_last_10s}/${s.burst_last_5s} | est weight: ${s.estimated_weight_last_60s} | binance used_weight_1m: ${s.binance_used_weight_1m ?? "n/a"}\n` +
     `   Per-endpoint us waqt (last 60s):\n${epLines}`
   );
+}
+
+// fmtFailSnapshotText() jaisa hi, par HTML mein: ek chhota "summary" table (reason,
+// frozen-age, seen/sent/cacheHits, burst, weight) + ek per-endpoint table.
+function fmtFailSnapshotHtml(snap: ReturnType<typeof lastFailSnapshotReport>): string {
+  if (!snap) {
+    return `<p style="margin:4px 0 16px;color:#64748b;font-size:13px;">(abhi tak koi fail/ban episode nahi hua)</p>`;
+  }
+  const s = snap.stats;
+  const summaryRows = [[
+    escHtml(snap.reason),
+    `${Math.round(snap.age_ms / 1000)}s pehle`,
+    `${s.requests_seen_last_60s} / ${s.requests_last_60s} / ${s.cache_hits_last_60s}`,
+    `${s.burst_last_10s} / ${s.burst_last_5s}`,
+    String(s.estimated_weight_last_60s),
+    String(s.binance_used_weight_1m ?? "n/a"),
+  ]];
+  const summary = tableHtml(
+    ["Reason", "Frozen", "Seen/Sent/CacheHits", "Burst 10s/5s", "Est. Weight", "BN used_weight_1m"],
+    summaryRows,
+    "#dc2626",
+  );
+  const epRows = s.endpoints.slice(0, 10).map((e) => [
+    escHtml(e.endpoint), String(e.seen), String(e.sent), String(e.cacheHits), String(e.weight),
+  ]);
+  const epTable = tableHtml(["Endpoint", "Seen", "Sent", "CacheHits", "Weight"], epRows, "#64748b");
+  return summary + epTable;
 }
 
 // ── IP-ban recovery probe — app se poori tarah INDEPENDENT ─────────────────
@@ -852,12 +872,40 @@ const alertLastSent = new Map<string, number>();   // {key: last_success_ts}
 let alertDay = "";        // UTC date (YYYY-MM-DD) jiska count neeche chal raha hai
 let alertDayCount = 0;    // us din ab tak ki successful mails
 
+// NOTE: escHtml() pehle se file mein neeche (daily-summary email section) defined
+// hai — usi ko reuse karte hain (function declarations hoist hoti hain, isliye
+// yahan upar bhi available hai). Dobara define nahi kiya, taaki duplicate na ho.
+
+// Generic styled HTML table builder — email tables (health, snapshot, session, log)
+// sab isi ek function se banti hain taaki look consistent rahe. `accent` header row
+// ka background color hai; rows ke andar har cell already-safe HTML ho sakta hai
+// (escaping caller ki zimmedaari hai, taaki ❌/✅ jaisे icons ya <b> allowed rahein).
+function tableHtml(headers: string[], rows: string[][], accent = "#334155"): string {
+  if (!rows.length) {
+    return `<p style="margin:4px 0 16px;color:#64748b;font-size:13px;">(koi data nahi)</p>`;
+  }
+  const thStyle = `padding:8px 10px;text-align:left;font-size:12px;font-weight:600;color:#ffffff;background:${accent};border:1px solid #e2e8f0;`;
+  const tdStyle = `padding:7px 10px;font-size:12.5px;color:#1e293b;border:1px solid #e2e8f0;`;
+  const head = headers.map((h) => `<th style="${thStyle}">${escHtml(h)}</th>`).join("");
+  const body = rows
+    .map((r, i) => {
+      const bg = i % 2 === 0 ? "#ffffff" : "#f8fafc";
+      const cells = r.map((c) => `<td style="${tdStyle}background:${bg};">${c}</td>`).join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+  return `<table style="width:100%;border-collapse:collapse;margin:6px 0 18px;font-family:Segoe UI,Roboto,Arial,sans-serif;">
+    <thead><tr>${head}</tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
 // critical=true → daily cap ignore (sirf trade-HIT jaisi compulsory mails ke liye)
 // Plain text alert message ko ek basic par saaf-suthri HTML card mein wrap karta hai
 // (jab kisi call-site ne apna khud ka HTML nahi diya). Monospace block + subject-jaisi
 // heading, taaki har mail (trigger/fail alerts) bhi Gmail mein professional dikhe.
 function autoHtmlFromText(subject: string, message: string): string {
-  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const esc = escHtml;
   const accent = /FAIL|⚠️/.test(subject) ? "#dc2626" : /HIT/.test(subject) ? "#16a34a" : "#334155";
   return `<!doctype html><html><body style="margin:0;padding:24px;background:#f1f5f9;font-family:Segoe UI,Roboto,Arial,sans-serif;">
   <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
@@ -1043,6 +1091,23 @@ function restHealthReport(): { failing: string[]; ok: string[] } {
   return { failing, ok };
 }
 
+// Same data as restHealthReport() par table-row (HTML <td>) form mein — email ke
+// "FAILING endpoints" aur "OK endpoints" table ke liye.
+function restHealthReportHtmlRows(): { failingRows: string[][]; okRows: string[][] } {
+  const t = nowMs();
+  const ago = (ts: number) => (ts ? `${Math.round((t - ts) / 1000)}s pehle` : "abhi tak nahi mila");
+  const failingRows: string[][] = [];
+  const okRows: string[][] = [];
+  for (const [name, h] of restHealth) {
+    if (h.fails >= REST_FAIL_THRESHOLD) {
+      failingRows.push([escHtml(name), String(h.fails), ago(h.lastOkAt), escHtml(h.lastError)]);
+    } else {
+      okRows.push([escHtml(name), ago(h.lastOkAt)]);
+    }
+  }
+  return { failingRows, okRows };
+}
+
 // Alert ke waqt "kyun fail hua" diagnose karne ke liye ek chhota snapshot
 // bnRateStats() se + reqLog se recent entries — taaki mail dekhte hi pata
 // chale us waqt total kitni requests aa rahi thin, kaunse endpoint sabse
@@ -1085,9 +1150,60 @@ function alertDiagnosticSnapshot(): string {
   );
 }
 
+// alertDiagnosticSnapshot() jaisa hi data, par HTML mein 4 separate tables:
+// (1) session summary, (2) session per-endpoint, (3) live 60s per-endpoint,
+// (4) recent request-log.
+function alertDiagnosticSnapshotHtml(): string {
+  const stats = bnRateStats();
+  const t = nowMs();
+  const sess = sessionReport();
+  const sessDurationStr = sess.duration_ms != null ? `${Math.round(sess.duration_ms / 1000)}s` : "n/a";
+
+  let html = `<h3 style="margin:18px 0 4px;font-size:14px;color:#334155;">🗂️ App session</h3>`;
+  html += tableHtml(
+    ["Status", "Duration", "Total requests", "Total fails"],
+    [[sess.active ? "ACTIVE" : "ended", sessDurationStr, String(sess.total_requests), String(sess.total_fails)]],
+    "#334155",
+  );
+  const sessRows = sess.endpoints.map((e) => [
+    escHtml(e.name), String(e.sent), String(e.fails), e.last_error ? escHtml(e.last_error) : "—",
+  ]);
+  html += tableHtml(["Endpoint", "Sent", "Fails", "Last error"], sessRows, "#64748b");
+
+  html += `<h3 style="margin:18px 0 4px;font-size:14px;color:#334155;">📊 Live snapshot (last 60s)</h3>`;
+  html += tableHtml(
+    ["Seen", "Sent", "CacheHits", "Burst 10s/5s", "Est. Weight", "BN used_weight_1m"],
+    [[
+      String(stats.requests_seen_last_60s), String(stats.requests_last_60s), String(stats.cache_hits_last_60s),
+      `${stats.burst_last_10s} / ${stats.burst_last_5s}`, String(stats.estimated_weight_last_60s),
+      String(stats.binance_used_weight_1m ?? "n/a"),
+    ]],
+    "#334155",
+  );
+  const liveEpRows = stats.endpoints.slice(0, 10).map((e) => [
+    escHtml(e.endpoint), String(e.seen), String(e.sent), String(e.cacheHits), String(e.weight),
+  ]);
+  html += tableHtml(["Endpoint", "Seen", "Sent", "CacheHits", "Weight"], liveEpRows, "#64748b");
+
+  html += `<h3 style="margin:18px 0 4px;font-size:14px;color:#334155;">📜 Recent request-log (last 15)</h3>`;
+  const logRows = reqLog.slice(-15).reverse().map((e) => [
+    `${Math.round((t - e.ts) / 1000)}s pehle`,
+    e.ok ? `<span style="color:#16a34a;font-weight:600;">OK</span>` : `<span style="color:#dc2626;font-weight:600;">FAIL</span>`,
+    escHtml(e.name),
+    e.ok ? "—" : escHtml(e.detail),
+  ]);
+  html += tableHtml(["Age", "Result", "Name", "Detail"], logRows, "#64748b");
+
+  return html;
+}
+
 async function sendRestFailAlert(): Promise<void> {
   const { failing, ok } = restHealthReport();
   if (!failing.length) return;
+  const subject = "[Alert] REST call(s) failing — Binance proxy";
+
+  // Plain-text version — textContent fallback ke liye (kuch mail clients HTML
+  // nahi dikhate), format bilkul pehle jaisa hi rehta hai.
   const body =
     `🚨 REST calls fail ho rahi hain (${REST_FAIL_THRESHOLD}+ consecutive fails)\n\n` +
     `❌ FAILING:\n${failing.join("\n\n")}\n\n` +
@@ -1095,7 +1211,30 @@ async function sendRestFailAlert(): Promise<void> {
     `🔒 Fail/ban shuru hone ke waqt ka FROZEN 60s snapshot (isi episode ka, live nahi):\n` +
     fmtFailSnapshotText(lastFailSnapshotReport()) + `\n` +
     alertDiagnosticSnapshot();
-  await sendEmailAlert("rest-health-fail", "[Alert] REST call(s) failing — Binance proxy", body, ALERT_FAIL_COOLDOWN_MS, false);
+
+  // HTML version — sab kuch column-wise tables mein (Gmail/Outlook mein khulega).
+  const { failingRows, okRows } = restHealthReportHtmlRows();
+  let html = `<!doctype html><html><body style="margin:0;padding:24px;background:#f1f5f9;font-family:Segoe UI,Roboto,Arial,sans-serif;">
+  <div style="max-width:680px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+    <div style="background:#dc2626;padding:16px 20px;">
+      <span style="color:#ffffff;font-size:15px;font-weight:600;">🚨 REST calls fail ho rahi hain (${REST_FAIL_THRESHOLD}+ consecutive fails)</span>
+    </div>
+    <div style="padding:20px;">`;
+
+  html += `<h3 style="margin:0 0 4px;font-size:14px;color:#dc2626;">❌ FAILING</h3>`;
+  html += tableHtml(["Endpoint", "Consecutive fails", "Last success", "Last error"], failingRows, "#dc2626");
+
+  html += `<h3 style="margin:0 0 4px;font-size:14px;color:#16a34a;">✅ OK</h3>`;
+  html += tableHtml(["Endpoint", "Last success"], okRows, "#16a34a");
+
+  html += `<h3 style="margin:0 0 4px;font-size:14px;color:#334155;">🔒 Frozen 60s snapshot (episode ki shuruaat, live nahi)</h3>`;
+  html += fmtFailSnapshotHtml(lastFailSnapshotReport());
+
+  html += alertDiagnosticSnapshotHtml();
+
+  html += `</div></div></body></html>`;
+
+  await sendEmailAlert("rest-health-fail", subject, body, ALERT_FAIL_COOLDOWN_MS, false, html);
 }
 
 async function sendRestRecoveryAlert(name: string): Promise<void> {
@@ -2608,32 +2747,6 @@ urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.cli
 // ── Server ────────────────────────────────────────────────────────────────
 Deno.serve({ port: PORT }, async (req: Request) => {
   const url = new URL(req.url);
-
-  // ── Legacy WebSocket relay (rollback ke liye; poora data forward karta hai) ──
-  if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-    const targetWsUrl = WS_MAP[url.pathname];
-    if (!targetWsUrl) {
-      return new Response("Unknown WS path — /ws/mark, /ws/trade, /ws/spot use karo", { status: 404 });
-    }
-    const { socket: clientSocket, response } = Deno.upgradeWebSocket(req);
-    const upstreamSocket = new WebSocket(targetWsUrl);
-    upstreamSocket.onmessage = (e) => {
-      if (clientSocket.readyState === WebSocket.OPEN) clientSocket.send(e.data);
-    };
-    upstreamSocket.onclose = () => {
-      if (clientSocket.readyState === WebSocket.OPEN) clientSocket.close();
-    };
-    upstreamSocket.onerror = () => {
-      if (clientSocket.readyState === WebSocket.OPEN) clientSocket.close();
-    };
-    clientSocket.onmessage = (e) => {
-      if (upstreamSocket.readyState === WebSocket.OPEN) upstreamSocket.send(e.data);
-    };
-    clientSocket.onclose = () => {
-      if (upstreamSocket.readyState === WebSocket.OPEN) upstreamSocket.close();
-    };
-    return response;
-  }
 
   try {
     // Health-check
