@@ -468,6 +468,7 @@ class Feed {
       this.scheduleRetry();
       return;
     }
+    noteBinanceActivity(); callTable.toBinance.ws++;   // NAYA: Binance WS connect attempt
     this.ws = ws;
     ws.onopen = () => {
       if (this.ws !== ws) return;
@@ -479,6 +480,7 @@ class Feed {
       if (this.ws !== ws) return;
       this.lastMsg = nowMs();
       this.msgCount++;
+      noteBinanceActivity(); callTable.fromBinance.ws++;   // NAYA: Binance se ek WS message-frame mila
       try {
         this.onData(JSON.parse(typeof e.data === "string" ? e.data : ""));
       } catch { /* bad frame ignore */ }
@@ -554,6 +556,14 @@ setInterval(() => {
       }
     }
   }
+  // NAYA: ab do INDEPENDENT call-sessions hain (Binance side, App side) —
+  // dono apne-apne idle-timeout se alag-alag "ended" mark hote hain.
+  if (binanceSessionStartedAt != null && binanceSessionEndedAt == null && t - binanceLastActivity > IDLE_STOP_MS) {
+    binanceSessionEndedAt = t;
+  }
+  if (appCallSessionStartedAt != null && appCallSessionEndedAt == null && t - appCallLastActivity > IDLE_STOP_MS) {
+    appCallSessionEndedAt = t;
+  }
 }, 5000);
 
 // ── 24h ticker (OI / volume / change%) — WS par nahi aata, isliye REST ─────
@@ -618,7 +628,7 @@ function refreshTicker(force = false): Promise<void> {
       restOk("24h-ticker (refreshTicker)");
     } catch (e) {
       tickerErr = `ticker fetch failed: ${e}`;
-      restFail("24h-ticker (refreshTicker)", tickerErr);
+      restFail("24h-ticker (refreshTicker)", tickerErr, false);
       tickerNextTryMs = nowMs() + TICKER_TTL_MS;
     } finally {
       tickerInflight = null;
@@ -642,7 +652,7 @@ async function fetchSpotRest() {
       restFail("spot-price (fetchSpotRest)", "invalid price in response");
     }
   } catch (e) {
-    restFail("spot-price (fetchSpotRest)", String(e));
+    restFail("spot-price (fetchSpotRest)", String(e), false);
   }
 }
 
@@ -1018,7 +1028,13 @@ function startSession(): void {
 function endSession(): void {
   sessionEndedAt = nowMs();
 }
-function sessionNote(name: string, ok: boolean, err: string): void {
+function sessionNote(name: string, ok: boolean, err: string, gotResponse = true): void {
+  // NAYA (2026-09-26): unified call-table — purani session-gate se independent,
+  // hamesha chalta hai (chahe purana "app-session" active ho ya na ho).
+  noteBinanceActivity();
+  callTable.toBinance.rest++;
+  if (gotResponse) callTable.fromBinance.rest++;   // network-level no-response fail count nahi hoti
+
   if (sessionStartedAt == null) return;   // koi session active nahi (feeds cold) — is call ka session se lena-dena nahi
   const s = sessionStats.get(name) ?? { sent: 0, fails: 0, lastAt: 0, lastError: "" };
   s.sent++;
@@ -1049,6 +1065,89 @@ function sessionReport() {
   };
 }
 
+// ── Unified call table, INDEPENDENT sessions (2026-09-26, v2) ──────────────
+// User ka ask: "current session" = jab se koi bhi data aana/jaana shuru hua,
+// jab tak IDLE_STOP_SEC tak activity na ho — tab tak counts isi ek table mein
+// PERMANENT (frozen) rehte hain. Naya activity par purana clear hoke naya
+// session shuru hota hai. Table ek hi hai (4 direction rows), PAR "Render↔
+// Binance" aur "Render↔App" ab do POORI TARAH INDEPENDENT session-clocks hain
+// (pehle version mein ek hi shared clock tha — user ne bola independent karo):
+//   - binance clock  → sirf toBinance/fromBinance counters + apna start/end
+//   - app clock      → sirf fromApp/toApp counters + apna alag start/end
+// Matlab: Binance side chalta reh sakta hai (WS live) jabki app side idle ho
+// chuka ho (koi request nahi aa rahi) — dono ka status/duration ab alag-alag
+// sach dikhayenge.
+interface CallCounters { rest: number; ws: number; }
+function zeroCC(): CallCounters { return { rest: 0, ws: 0 }; }
+const callTable = {
+  toBinance: zeroCC(),    // Render → Binance: REST call bheji gayi / WS connect attempt hua
+  fromBinance: zeroCC(),  // Binance → Render: REST response mila / WS message-frame mila
+  fromApp: zeroCC(),      // App → Render: REST request mili / WS client connect hua
+  toApp: zeroCC(),        // Render → App: REST response bheja / WS message push hua
+};
+
+let binanceSessionStartedAt: number | null = null;
+let binanceSessionEndedAt: number | null = null;
+let binanceLastActivity = 0;
+
+let appCallSessionStartedAt: number | null = null;
+let appCallSessionEndedAt: number | null = null;
+let appCallLastActivity = 0;
+
+// Binance-taraf ki koi bhi activity (REST sent/received ya WS connect/message)
+// yahan se guzarti hai. IDLE_STOP_MS se zyada gap ho to naya session — sirf
+// Binance wale 2 counters (toBinance/fromBinance) clear hote hain, app wale
+// counters ko haath nahi lagta.
+function noteBinanceActivity(): void {
+  const t = nowMs();
+  if (binanceSessionStartedAt == null || t - binanceLastActivity > IDLE_STOP_MS) {
+    binanceSessionStartedAt = t;
+    binanceSessionEndedAt = null;
+    callTable.toBinance = zeroCC();
+    callTable.fromBinance = zeroCC();
+  }
+  binanceLastActivity = t;
+}
+
+// App-taraf ki koi bhi activity (REST request/response ya WS connect/push)
+// yahan se guzarti hai — apna alag session-clock, apne 2 counters (fromApp/toApp).
+function noteAppActivity(): void {
+  const t = nowMs();
+  if (appCallSessionStartedAt == null || t - appCallLastActivity > IDLE_STOP_MS) {
+    appCallSessionStartedAt = t;
+    appCallSessionEndedAt = null;
+    callTable.fromApp = zeroCC();
+    callTable.toApp = zeroCC();
+  }
+  appCallLastActivity = t;
+}
+
+function callTableReport() {
+  const t = nowMs();
+  const binance = {
+    active: binanceSessionStartedAt != null && binanceSessionEndedAt == null,
+    started_at_ms: binanceSessionStartedAt,
+    ended_at_ms: binanceSessionEndedAt,
+    duration_ms: binanceSessionStartedAt != null ? (binanceSessionEndedAt ?? t) - binanceSessionStartedAt : null,
+  };
+  const app = {
+    active: appCallSessionStartedAt != null && appCallSessionEndedAt == null,
+    started_at_ms: appCallSessionStartedAt,
+    ended_at_ms: appCallSessionEndedAt,
+    duration_ms: appCallSessionStartedAt != null ? (appCallSessionEndedAt ?? t) - appCallSessionStartedAt : null,
+  };
+  return {
+    render_binance_session: binance,   // Render ↔ Binance ka apna independent session
+    render_app_session: app,           // Render ↔ App ka apna independent session
+    table: [
+      { direction: "Render \u2192 Binance (sent)", rest: callTable.toBinance.rest, ws: callTable.toBinance.ws },
+      { direction: "Binance \u2192 Render (received)", rest: callTable.fromBinance.rest, ws: callTable.fromBinance.ws },
+      { direction: "App \u2192 Render (received)", rest: callTable.fromApp.rest, ws: callTable.fromApp.ws },
+      { direction: "Render \u2192 App (sent)", rest: callTable.toApp.rest, ws: callTable.toApp.ws },
+    ],
+  };
+}
+
 function restOk(name: string): void {
   const h = restHealth.get(name);
   const wasAlerting = h?.alerting === true;
@@ -1058,7 +1157,7 @@ function restOk(name: string): void {
   if (wasAlerting) void sendRestRecoveryAlert(name);
 }
 
-function restFail(name: string, err: string): void {
+function restFail(name: string, err: string, gotResponse = true): void {
   const h = restHealth.get(name) ?? { fails: 0, lastError: "", lastOkAt: 0, alerting: false };
   h.fails++;
   h.lastError = err.slice(0, 200);
@@ -1068,7 +1167,9 @@ function restFail(name: string, err: string): void {
   const enteringNewFailEpisode = h.fails >= REST_FAIL_THRESHOLD && !h.alerting;
   restHealth.set(name, h);
   pushLog(name, false, err);
-  sessionNote(name, false, err);
+  // gotResponse=false sirf network-level fail (fetch khud throw hua, Binance
+  // se koi response mila hi nahi) — call-sites mein explicitly pass hota hai.
+  sessionNote(name, false, err, gotResponse);
   if (enteringNewFailEpisode) captureFailSnapshot(`${name} failing — ${err}`);
   if (h.fails >= REST_FAIL_THRESHOLD) {
     h.alerting = true;
@@ -1134,7 +1235,16 @@ function alertDiagnosticSnapshot(): string {
     : "   (session mein abhi koi request nahi)";
   const sessDurationStr = sess.duration_ms != null ? `${Math.round(sess.duration_ms / 1000)}s` : "n/a";
 
+  const ct = callTableReport();
+  const bnDurStr = ct.render_binance_session.duration_ms != null ? `${Math.round(ct.render_binance_session.duration_ms / 1000)}s` : "n/a";
+  const appDurStr = ct.render_app_session.duration_ms != null ? `${Math.round(ct.render_app_session.duration_ms / 1000)}s` : "n/a";
+  const ctLines = ct.table.map((r) => `   ${r.direction} — REST:${r.rest} | WS:${r.ws}`).join("\n");
+
   return (
+    `\n🔁 Current call-table (Binance ↔ Render ↔ App, REST/WS alag-alag):\n` +
+    `   Render↔Binance: ${ct.render_binance_session.active ? "ACTIVE" : "ended"} | duration: ${bnDurStr}\n` +
+    `   Render↔App:     ${ct.render_app_session.active ? "ACTIVE" : "ended"} | duration: ${appDurStr}\n` +
+    `${ctLines}\n\n` +
     `\n🗂️ App session (jab se HF app ne demand shuru ki):\n` +
     `   status: ${sess.active ? "ACTIVE" : "ended"} | duration: ${sessDurationStr}\n` +
     `   total requests: ${sess.total_requests} | total fails: ${sess.total_fails}\n` +
@@ -1159,7 +1269,23 @@ function alertDiagnosticSnapshotHtml(): string {
   const sess = sessionReport();
   const sessDurationStr = sess.duration_ms != null ? `${Math.round(sess.duration_ms / 1000)}s` : "n/a";
 
-  let html = `<h3 style="margin:18px 0 4px;font-size:14px;color:#334155;">🗂️ App session</h3>`;
+  const ct = callTableReport();
+  const bnDurStr = ct.render_binance_session.duration_ms != null ? `${Math.round(ct.render_binance_session.duration_ms / 1000)}s` : "n/a";
+  const appDurStr = ct.render_app_session.duration_ms != null ? `${Math.round(ct.render_app_session.duration_ms / 1000)}s` : "n/a";
+
+  let html = `<h3 style="margin:18px 0 4px;font-size:14px;color:#334155;">🔁 Current call-table (Binance ↔ Render ↔ App)</h3>`;
+  html += tableHtml(
+    ["Session", "Status", "Duration"],
+    [
+      ["Render ↔ Binance", ct.render_binance_session.active ? "ACTIVE" : "ended", bnDurStr],
+      ["Render ↔ App", ct.render_app_session.active ? "ACTIVE" : "ended", appDurStr],
+    ],
+    "#334155",
+  );
+  const ctRows = ct.table.map((r) => [escHtml(r.direction), String(r.rest), String(r.ws)]);
+  html += tableHtml(["Direction", "REST", "WS"], ctRows, "#64748b");
+
+  html += `<h3 style="margin:18px 0 4px;font-size:14px;color:#334155;">🗂️ App session</h3>`;
   html += tableHtml(
     ["Status", "Duration", "Total requests", "Total fails"],
     [[sess.active ? "ACTIVE" : "ended", sessDurationStr, String(sess.total_requests), String(sess.total_fails)]],
@@ -1328,7 +1454,7 @@ async function syncTime() {
       restFail("time-sync (syncTime)", `HTTP ${r.status}`);
     }
   } catch (e) {
-    restFail("time-sync (syncTime)", String(e));   // purana offset chalega
+    restFail("time-sync (syncTime)", String(e), false);   // purana offset chalega
   }
 }
 
@@ -2794,6 +2920,7 @@ class DepthBook {
 
   addClient(ws: WebSocket) {
     this.clients.add(ws);
+    noteAppActivity(); callTable.fromApp.ws++;   // NAYA: app se ek WS client connect hua
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     if (!this.ws && !this.connecting) this.start();
     if (!this.pushTimer) this.pushTimer = setInterval(() => this.pushToClients(), DEPTH_PUSH_MS);
@@ -2861,6 +2988,7 @@ class DepthBook {
       this.scheduleRetry();
       return;
     }
+    noteBinanceActivity(); callTable.toBinance.ws++;   // NAYA: Binance depth-WS connect attempt
     this.ws = ws;
     ws.onopen = () => {
       if (this.ws !== ws) return;
@@ -2869,6 +2997,7 @@ class DepthBook {
     };
     ws.onmessage = (e: MessageEvent) => {
       if (this.ws !== ws) return;
+      noteBinanceActivity(); callTable.fromBinance.ws++;   // NAYA: Binance se ek depth WS-frame mila
       // deno-lint-ignore no-explicit-any
       let ev: any;
       try { ev = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
@@ -2929,7 +3058,10 @@ class DepthBook {
       ts: nowMs(),
     });
     for (const c of this.clients) {
-      try { c.send(payload); } catch { /* client gone — onclose cleans up */ }
+      try {
+        c.send(payload);
+        noteAppActivity(); callTable.toApp.ws++;   // NAYA: app ko ek WS message gaya
+      } catch { /* client gone — onclose cleans up */ }
     }
   }
 }
@@ -2942,7 +3074,7 @@ function getOrCreateDepthBook(symbol: string): DepthBook {
 }
 
 // ── Server ────────────────────────────────────────────────────────────────
-Deno.serve({ port: PORT }, async (req: Request) => {
+async function handleHttp(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
   try {
@@ -3003,6 +3135,9 @@ Deno.serve({ port: PORT }, async (req: Request) => {
         // isme pura session ka cumulative total hota hai, consecutive-fail counter
         // ki tarah reset nahi hota beech mein.
         session: sessionReport(),
+        // NAYA: unified 4-direction call table (Render↔Binance, Render↔App —
+        // REST/WS alag-alag), current session ke liye — dekho callTableReport() comment.
+        call_session: callTableReport(),
       });
     }
 
@@ -3097,7 +3232,7 @@ Deno.serve({ port: PORT }, async (req: Request) => {
         signal: AbortSignal.timeout(10000),
       });
     } catch (e) {
-      restFail(healthKey, String(e));
+      restFail(healthKey, String(e), false);
       trackBn(url.pathname, { symbol: reqSymbol, cacheHit: false, params: url.searchParams });
       throw e;   // bahar wala catch abhi bhi 502 wapas karega, behavior same
     }
@@ -3130,4 +3265,19 @@ Deno.serve({ port: PORT }, async (req: Request) => {
       headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
+}
+
+// ── App-facing REST call counting (2026-09-26) ─────────────────────────────
+// handleHttp() ke saare REST paths (/, /status, /health, /ratelimit,
+// /snapshot, /trade/..., /rules/..., /api/..., /eapi/...) yahin se guzarte
+// hain — isliye "App → Render" aur "Render → App" ka REST count yahin ek
+// hi jagah se lag jaata hai. /ws/depth ISME NAHI aata (wo WebSocket hai,
+// uska count DepthBook.addClient()/pushToClients() mein alag se hota hai) —
+// warna WS connection ka REST-jaisa double-count ho jaata.
+Deno.serve({ port: PORT }, async (req: Request) => {
+  const isWsDepth = new URL(req.url).pathname === "/ws/depth";
+  if (!isWsDepth) { noteAppActivity(); callTable.fromApp.rest++; }
+  const resp = await handleHttp(req);
+  if (!isWsDepth) callTable.toApp.rest++;
+  return resp;
 });
