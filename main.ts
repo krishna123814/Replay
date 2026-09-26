@@ -2744,6 +2744,203 @@ urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.cli
 </html>
 `;
 
+// ── Depth order-book relay (per-symbol, Render-side diff-depth, 3s throttle push) ──
+// (2026-09-26) BTC option order book (bottom trade-bar inline book + full
+// Market Depth sheet) — pehle browser seedha ek Cloudflare Worker relay se
+// jaata tha. Ab yehi Render engine karta hai: upstream Binance eoptions
+// diff-depth stream (nbstream.binance.com) is khud sunta hai aur snapshot+
+// diff algorithm se accurate book memory mein maintain karta hai (real-time,
+// koi throttle upstream side nahi) — lekin connected browsers ko sirf har
+// DEPTH_PUSH_MS mein ek baar top-N rows push karta hai, taaki client
+// bandwidth kam lage. Symbol on-demand start hota hai (jab pehla client
+// subscribe kare) aur last client hatne ke DEPTH_IDLE_STOP_MS baad khud
+// upstream connection band karke memory free kar deta hai.
+interface DepthRow { price: number; volume: number; ord: number }
+const DEPTH_PUSH_MS = 3000;          // browser ko push karne ka interval (bandwidth-saver)
+const DEPTH_IDLE_STOP_MS = 15_000;   // itni der koi client na ho to upstream feed band
+const DEPTH_LEVELS = 10;             // top-N levels har side (bids/asks)
+
+function depthApplySide(map: Map<string, number>, rows: [string, string][] | undefined) {
+  for (const row of rows || []) {
+    const price = String(parseFloat(row[0]));
+    const qty = parseFloat(row[1]);
+    if (!qty) map.delete(price); else map.set(price, qty);
+  }
+}
+
+class DepthBook {
+  clients = new Set<WebSocket>();
+  ws: WebSocket | null = null;
+  bidsMap = new Map<string, number>();
+  asksMap = new Map<string, number>();
+  lastU: number | null = null;
+  snapshotId = 0;
+  // deno-lint-ignore no-explicit-any
+  buffer: any[] = [];
+  snapshotReady = false;
+  connecting = false;
+  // deno-lint-ignore no-explicit-any
+  pushTimer: any = null;
+  // deno-lint-ignore no-explicit-any
+  idleTimer: any = null;
+  // deno-lint-ignore no-explicit-any
+  retryTimer: any = null;
+  failCount = 0;
+  lastUpdateTs = 0;
+  status: "idle" | "connecting" | "live" | "error" = "idle";
+  lastError: string | null = null;
+
+  constructor(public symbol: string) {}
+
+  addClient(ws: WebSocket) {
+    this.clients.add(ws);
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    if (!this.ws && !this.connecting) this.start();
+    if (!this.pushTimer) this.pushTimer = setInterval(() => this.pushToClients(), DEPTH_PUSH_MS);
+  }
+  removeClient(ws: WebSocket) {
+    this.clients.delete(ws);
+    if (this.clients.size === 0 && !this.idleTimer) {
+      this.idleTimer = setTimeout(() => this.stop(), DEPTH_IDLE_STOP_MS);
+    }
+  }
+  start() {
+    this.connecting = true;
+    this.status = "connecting";
+    this.loadSnapshot().then(() => this.connectUpstream());
+  }
+  stop() {
+    if (this.pushTimer) { clearInterval(this.pushTimer); this.pushTimer = null; }
+    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    try { this.ws?.close(); } catch { /* ignore */ }
+    this.ws = null;
+    this.connecting = false;
+    this.status = "idle";
+    this.snapshotReady = false;
+    this.bidsMap.clear(); this.asksMap.clear();
+    this.lastU = null; this.buffer = [];
+    depthBooks.delete(this.symbol);
+  }
+  async loadSnapshot() {
+    try {
+      const r = await fetch(
+        `${EAPI}/eapi/v1/depth?symbol=${encodeURIComponent(this.symbol)}&limit=20`,
+        { signal: AbortSignal.timeout(8000) },
+      );
+      // deno-lint-ignore no-explicit-any
+      let d: any = null;
+      try { d = await r.json(); } catch { /* ignore parse fail below */ }
+      if (!r.ok || !d || (!d.bids && !d.asks)) {
+        this.lastError = `Snapshot fail — HTTP ${r.status}`;
+        this.status = "error";
+        this.retryTimer = setTimeout(() => this.loadSnapshot().then(() => this.connectUpstream()), 3000);
+        return;
+      }
+      this.bidsMap = new Map(); this.asksMap = new Map();
+      depthApplySide(this.bidsMap, d.bids);
+      depthApplySide(this.asksMap, d.asks);
+      this.snapshotId = d.lastUpdateId || 0;
+      this.lastU = null;
+      const buffered = this.buffer; this.buffer = [];
+      this.snapshotReady = true;
+      this.lastUpdateTs = nowMs();
+      for (const ev of buffered) this.applyEvent(ev);
+    } catch (e) {
+      this.lastError = `Snapshot error: ${e}`;
+      this.status = "error";
+      this.retryTimer = setTimeout(() => this.loadSnapshot().then(() => this.connectUpstream()), 3000);
+    }
+  }
+  connectUpstream() {
+    this.connecting = false;
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`wss://nbstream.binance.com/eoptions/ws/${this.symbol}@depth@100ms`);
+    } catch {
+      this.scheduleRetry();
+      return;
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      if (this.ws !== ws) return;
+      this.status = "live";
+      this.failCount = 0;
+    };
+    ws.onmessage = (e: MessageEvent) => {
+      if (this.ws !== ws) return;
+      // deno-lint-ignore no-explicit-any
+      let ev: any;
+      try { ev = JSON.parse(typeof e.data === "string" ? e.data : ""); } catch { return; }
+      const d = ev && ev.data ? ev.data : ev;
+      if (!d || d.u == null) return;
+      if (!this.snapshotReady) { this.buffer.push(d); return; }
+      this.applyEvent(d);
+    };
+    ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
+    ws.onclose = () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      this.status = "error";
+      this.scheduleRetry();
+    };
+  }
+  // deno-lint-ignore no-explicit-any
+  applyEvent(ev: any) {
+    if (this.lastU == null) {
+      if (ev.u < this.snapshotId + 1) return;                 // purana, ignore
+      if (ev.U > this.snapshotId + 1) {
+        // Gap — Render khud REST se resync kar leta hai (client ke ulat;
+        // yahan REST cost chhota concern hai, browser-bandwidth ka nahi).
+        this.snapshotReady = false;
+        this.loadSnapshot();
+        return;
+      }
+    } else if (ev.u <= this.lastU) {
+      return;                                                  // purana/duplicate
+    } else if (ev.U > this.lastU + 1) {
+      this.snapshotReady = false;
+      this.loadSnapshot();
+      return;
+    }
+    depthApplySide(this.bidsMap, ev.b);
+    depthApplySide(this.asksMap, ev.a);
+    this.lastU = ev.u;
+    this.lastUpdateTs = nowMs();
+  }
+  scheduleRetry() {
+    this.failCount++;
+    const delay = Math.min(1000 * 2 ** (this.failCount - 1), 15000);
+    this.retryTimer = setTimeout(() => this.connectUpstream(), delay);
+  }
+  topRows(map: Map<string, number>, desc: boolean): DepthRow[] {
+    const arr: DepthRow[] = [];
+    map.forEach((qty, price) => arr.push({ price: parseFloat(price), volume: qty, ord: 0 }));
+    arr.sort((a, b) => (desc ? b.price - a.price : a.price - b.price));
+    return arr.slice(0, DEPTH_LEVELS);
+  }
+  pushToClients() {
+    if (this.clients.size === 0) return;
+    const payload = JSON.stringify({
+      symbol: this.symbol,
+      bids: this.topRows(this.bidsMap, true),
+      asks: this.topRows(this.asksMap, false),
+      status: this.status,
+      ts: nowMs(),
+    });
+    for (const c of this.clients) {
+      try { c.send(payload); } catch { /* client gone — onclose cleans up */ }
+    }
+  }
+}
+
+const depthBooks = new Map<string, DepthBook>();
+function getOrCreateDepthBook(symbol: string): DepthBook {
+  let b = depthBooks.get(symbol);
+  if (!b) { b = new DepthBook(symbol); depthBooks.set(symbol, b); }
+  return b;
+}
+
 // ── Server ────────────────────────────────────────────────────────────────
 Deno.serve({ port: PORT }, async (req: Request) => {
   const url = new URL(req.url);
@@ -2766,6 +2963,13 @@ Deno.serve({ port: PORT }, async (req: Request) => {
         ticker_error: tickerErr,
         feeds: { mark: feeds.mark.status(t), trade: feeds.trade.status(t), spot: feeds.spot.status(t) },
         rest_filter: FILTER_REST,
+        depth_books: [...depthBooks.entries()].map(([sym, b]) => ({
+          symbol: sym,
+          status: b.status,
+          clients: b.clients.size,
+          age_ms: b.lastUpdateTs ? t - b.lastUpdateTs : null,
+          last_error: b.lastError,
+        })),
       });
     }
 
@@ -2805,6 +3009,22 @@ Deno.serve({ port: PORT }, async (req: Request) => {
     // Live status dashboard — Render URL khud kholte hi (same-origin) auto-connect ho jaata hai.
     if (url.pathname === "/status.html") {
       return respondText(req, DASHBOARD_HTML, 200, "text/html");
+    }
+
+    // ── Live order-book WS (BTC options, diff-depth, 3s throttle push) ──
+    // Browser: wss://<engine>/ws/depth?symbol=BTC-260926-84000-C
+    if (url.pathname === "/ws/depth") {
+      const symbol = url.searchParams.get("symbol");
+      if (!symbol) return new Response("symbol query param required", { status: 400 });
+      if ((req.headers.get("upgrade") ?? "").toLowerCase() !== "websocket") {
+        return new Response("Expected websocket upgrade", { status: 400 });
+      }
+      const { socket, response } = Deno.upgradeWebSocket(req);
+      const book = getOrCreateDepthBook(symbol);
+      socket.onopen = () => book.addClient(socket);
+      socket.onclose = () => book.removeClient(socket);
+      socket.onerror = () => book.removeClient(socket);
+      return response;
     }
 
     // ── On-demand snapshot ──
