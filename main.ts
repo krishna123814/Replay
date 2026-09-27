@@ -33,6 +33,18 @@ const PORT = Number(Deno.env.get("PORT") ?? 8000);
 const IDLE_STOP_MS = Number(Deno.env.get("IDLE_STOP_SEC") ?? 60) * 1000;
 const TICKER_TTL_MS = Number(Deno.env.get("TICKER_TTL_SEC") ?? 5) * 1000;
 const FILTER_REST = (Deno.env.get("FILTER_REST") ?? "true").toLowerCase() !== "false";
+// (2026-09-27) ALWAYS_ON_FEEDS — Render outbound (Render→HF app) hi billed hai,
+// Binance→Render (WS inbound) free hai. HF app har ~3s /snapshot maangti hai,
+// isliye idle-stop shayad hi kabhi trigger hota — is gating se koi bandwidth
+// nahi bachti, sirf har cold-start par WARMUP_MS ka extra wait milta hai.
+// Ab feeds boot par hi start hoke hamesha chalti hain. "false" karke purana
+// on-demand (idle 60s ke baad WS band) rollback ke liye wapas mila sakte ho.
+const ALWAYS_ON_FEEDS = (Deno.env.get("ALWAYS_ON_FEEDS") ?? "true").toLowerCase() !== "false";
+// (2026-09-27) DEPTH_ENABLED — market-depth (/ws/depth, order-book) feature ko
+// abhi ke liye OFF rakha hai (sirf option-chain/snapshot chahiye). Code hataya
+// nahi hai — sirf route pe gate laga hai. Wapas chahiye ho to env
+// DEPTH_ENABLED=true karke bina kisi aur badlaav ke on ho jaayega.
+const DEPTH_ENABLED = (Deno.env.get("DEPTH_ENABLED") ?? "false").toLowerCase() === "true";
 
 const SYMBOL_PREFIX = "BTC-";          // sirf BTC options (app.py bhi sirf BTCUSDT use karta hai)
 const DEFAULT_STRIKES = 20;            // ATM ke dono taraf — app.py BINANCE_OC_STRIKE_WINDOW jaisa
@@ -531,6 +543,8 @@ function ensureFeeds(): boolean {
 }
 
 function stopFeedsAndClear() {
+  // (2026-09-27) Ab automatic idle-stop se call nahi hoti (feeds ALWAYS_ON_FEEDS
+  // mein hamesha chalti hain) — function sirf rollback/manual use ke liye rakha hai.
   for (const f of Object.values(feeds)) f.stop();
   feedsStopped = true;
   quotes.clear();
@@ -543,7 +557,7 @@ function stopFeedsAndClear() {
 
 setInterval(() => {
   const t = nowMs();
-  if (!feedsStopped && t - lastDemand > IDLE_STOP_MS) {
+  if (!ALWAYS_ON_FEEDS && !feedsStopped && t - lastDemand > IDLE_STOP_MS) {
     stopFeedsAndClear();
     return;
   }
@@ -555,6 +569,12 @@ setInterval(() => {
         symInfo.delete(sym);
       }
     }
+    // (2026-09-27) Feeds ab lagbhag hamesha chalti hain, isliye ticker (OI/
+    // volume/chg%) ab sirf ek-baar-cold-start par refresh hona kaafi nahi —
+    // warna ye values hamesha ke liye freeze reh jaayengi. refreshTicker()
+    // apna khud ka TICKER_TTL_MS + backoff gate check karta hai, isliye yahan
+    // har 5s call karna safe hai (Binance ko usse zyada baar hit nahi karega).
+    refreshTicker(false).catch(() => { /* best-effort background refresh */ });
   }
   // NAYA: ab do INDEPENDENT call-sessions hain (Binance side, App side) —
   // dono apne-apne idle-timeout se alag-alag "ended" mark hote hain.
@@ -3263,7 +3283,14 @@ async function handleHttp(req: Request): Promise<Response> {
 
     // ── Live order-book WS (BTC options, diff-depth, 3s throttle push) ──
     // Browser: wss://<engine>/ws/depth?symbol=BTC-260926-84000-C
+    // (2026-09-27) Abhi ke liye DISABLED — DEPTH_ENABLED=true env se wapas on.
     if (url.pathname === "/ws/depth") {
+      if (!DEPTH_ENABLED) {
+        return new Response(
+          JSON.stringify({ error: "Market depth abhi disabled hai — sirf /snapshot (option chain) active hai" }),
+          { status: 503, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } },
+        );
+      }
       const symbol = url.searchParams.get("symbol");
       if (!symbol) return new Response("symbol query param required", { status: 400 });
       if ((req.headers.get("upgrade") ?? "").toLowerCase() !== "websocket") {
@@ -3411,6 +3438,17 @@ async function handleHttp(req: Request): Promise<Response> {
 // hi jagah se lag jaata hai. /ws/depth ISME NAHI aata (wo WebSocket hai,
 // uska count DepthBook.addClient()/pushToClients() mein alag se hota hai) —
 // warna WS connection ka REST-jaisa double-count ho jaata.
+// ── Boot-time feed kickoff (2026-09-27) ────────────────────────────────────
+// Yahan (file ke bilkul aakhir mein, Deno.serve() se theek pehle) isliye
+// rakha hai kyonki ensureFeeds() → startSession() upar defined kai saare
+// module-level `let`/`const` (jaise sessionStartedAt) ko chhoote hain — agar
+// ye call file ke upar (unki declaration se pehle) hota to TDZ error aata.
+// Yahan tak module poora load ho chuka hota hai, sab kuch initialized hai.
+if (ALWAYS_ON_FEEDS) {
+  ensureFeeds();
+  warmup(WARMUP_MS).catch(() => { /* boot-warmup best-effort hai, fail par ignore */ });
+}
+
 Deno.serve({ port: PORT }, async (req: Request) => {
   const isWsDepth = new URL(req.url).pathname === "/ws/depth";
   if (!isWsDepth) { noteAppActivity(); callTable.fromApp.rest++; }
