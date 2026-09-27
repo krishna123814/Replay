@@ -2960,19 +2960,32 @@ function startPolling() {
 // (jaise https://your-service.onrender.com/status.html), to /health usi
 // origin se turant try karo — sahi hua to URL-box hide karke seedha connect
 // ho jao. File://  ya kisi aur jagah se khola ho to manual input dikhao.
+// (2026-09-27) FIX: pehle sirf EK attempt hota tha — agar Render cold-start
+// (free tier, wake-up) ya ek transient network blip ki wajah se pehla /health
+// fetch fail ho jaaye, to poori auto-detect hamesha ke liye fail maan li
+// jaati thi aur user ko manually URL type karna padta tha. Ab isi origin par
+// kuch retries (chhote delay ke saath) karte hain pehle hi maan lene se pehle.
+async function tryAutoDetectOnce() {
+  const r = await fetch(location.origin + "/health", { cache: "no-store" });
+  if (!r.ok) return false;
+  await r.json();  // confirm ye wahi API hai (JSON parse ho raha hai)
+  urlInput.value = location.origin;
+  urlbarEl.style.display = "none";
+  originNote.style.display = "block";
+  originNote.textContent = "🔗 Auto-connected: " + location.origin + " (isi service se ye page serve ho rahi hai)";
+  startPolling();
+  return true;
+}
 async function tryAutoDetect() {
   if (location.protocol === "file:") return false;
-  try {
-    const r = await fetch(location.origin + "/health", { cache: "no-store" });
-    if (!r.ok) return false;
-    await r.json();  // confirm ye wahi API hai (JSON parse ho raha hai)
-    urlInput.value = location.origin;
-    urlbarEl.style.display = "none";
-    originNote.style.display = "block";
-    originNote.textContent = "🔗 Auto-connected: " + location.origin + " (isi service se ye page serve ho rahi hai)";
-    startPolling();
-    return true;
-  } catch { return false; }
+  const attempts = 4;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      if (await tryAutoDetectOnce()) return true;
+    } catch { /* ignore, retry below */ }
+    if (i < attempts - 1) await new Promise((res) => setTimeout(res, 1500));
+  }
+  return false;
 }
 
 saveBtn.addEventListener("click", () => {
