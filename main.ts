@@ -581,6 +581,12 @@ function refreshTicker(force = false): Promise<void> {
   if (tickerInflight) return tickerInflight;
   const t0 = nowMs();
   if (!force && (t0 - tickerTs < TICKER_TTL_MS || t0 < tickerNextTryMs)) return Promise.resolve();
+  // (2026-09-26) Shared circuit-breaker: agar kisi bhi path (ticker/forward/trade)
+  // ne abhi-abhi 429/418 khaaya hai to bnBackoffUntil set hai — is window ke andar
+  // Binance ko ek aur ticker-call bhejna hi nahi (chahe force=true ho), kyunki
+  // isi tarah ka "429 ke turant baad retry" pattern hi 418-escalation ki wajah
+  // ban sakta hai (Binance WAF guidance).
+  if (t0 < bnBackoffUntil) return Promise.resolve();
   tickerInflight = (async () => {
     try {
       const r = await fetch("https://eapi.binance.com/eapi/v1/ticker");
@@ -588,13 +594,11 @@ function refreshTicker(force = false): Promise<void> {
       if (!r.ok) {
         tickerErr = `ticker HTTP ${r.status}`;
         restFail("24h-ticker (refreshTicker)", tickerErr);
-        // 429 (rate-limit) / 418 (ban) → lamba backoff; Retry-After header ho to usi ko maano
+        // 429 (rate-limit) / 418 (ban) → shared backoff + exact error capture
         if (r.status === 429 || r.status === 418) {
-          const retryAfterSec = parseInt(r.headers.get("retry-after") ?? "", 10);
-          const backoffMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
-            ? retryAfterSec * 1000
-            : Math.max(TICKER_TTL_MS * 4, 20_000);
-          tickerNextTryMs = nowMs() + backoffMs;
+          const bodyText = await r.text().catch(() => "");
+          const waitSec = applyBnBackoff("/eapi/v1/ticker (refreshTicker)", r, bodyText);
+          tickerNextTryMs = nowMs() + waitSec * 1000;
         } else {
           tickerNextTryMs = nowMs() + TICKER_TTL_MS;   // normal fail → sirf ek TTL cycle skip
         }
@@ -687,7 +691,7 @@ function rowFor(sym: string, q: Quote, t: number): unknown[] {
   return row;
 }
 
-function buildSnapshot(strikeWindow: number, maxExpiries: number) {
+function buildSnapshot(strikeWindow: number, maxExpiries: number, onlyExpiry?: string) {
   const t = nowMs();
   const byExp = new Map<string, Map<number, string[]>>();
   for (const [sym, info] of symInfo) {
@@ -703,7 +707,20 @@ function buildSnapshot(strikeWindow: number, maxExpiries: number) {
   const price = spot.price;
   if (price !== null) {
     let exps = [...byExp.keys()].sort(); // YYMMDD → lexicographic = chronological
-    if (maxExpiries > 0) exps = exps.slice(0, maxExpiries);
+    // (2026-09-27) onlyExpiry — HF ab jo expiry actually screen par khuli
+    // hai wahi bhejti hai (?expiry=YYMMDD), taaki response sirf usi expiry
+    // ke rows tak simit rahe — baaki expiries ka data client tak bilkul
+    // nahi jaata (payload chhota, aur "kaunsi expiry live honi chahiye"
+    // ka ambiguity khatam). onlyExpiry maxExpiries se PEHLE priority leta
+    // hai; agar onlyExpiry di gayi symInfo mein maujood nahi (abhi tak WS
+    // se koi tick nahi aaya us expiry ke liye), to exps khaali ho jaayegi
+    // aur rows bhi khaali aayenge — caller (app.py) isko "abhi tak data
+    // nahi aaya" jaisa treat karega, koi crash nahi.
+    if (onlyExpiry) {
+      exps = exps.filter((e) => e === onlyExpiry);
+    } else if (maxExpiries > 0) {
+      exps = exps.slice(0, maxExpiries);
+    }
     for (const exp of exps) {
       const sm = byExp.get(exp)!;
       const strikes = [...sm.keys()].sort((a, b) => a - b);
@@ -733,6 +750,7 @@ function buildSnapshot(strikeWindow: number, maxExpiries: number) {
     ticker_age_ms: tickerTs ? t - tickerTs : null,
     ticker_error: tickerErr,
     total_symbols: quotes.size,
+    only_expiry: onlyExpiry ?? null,
     keys: SNAP_KEYS,
     rows,
   };
@@ -743,12 +761,31 @@ async function handleSnapshot(req: Request, url: URL): Promise<Response> {
   const strikeWindow = Number.isFinite(sw) && sw >= 0 ? Math.min(sw, 1000) : DEFAULT_STRIKES;
   const me = parseInt(url.searchParams.get("expiries") ?? "", 10);
   const maxExpiries = Number.isFinite(me) && me > 0 ? me : 0; // 0 = saari expiries
+  // ?expiry=YYMMDD (Binance symbol ka date-part, e.g. "250630") — sirf isi
+  // expiry ke rows chahiye. Format-check halka rakha (6 digit numeric) taaki
+  // galat/garbage query param silently ignore ho jaaye, crash na ho.
+  const expRaw = url.searchParams.get("expiry") ?? "";
+  const onlyExpiry = /^\d{6}$/.test(expRaw) ? expRaw : undefined;
 
   const cold = ensureFeeds();
   if (cold) await warmup(WARMUP_MS);
-  else void refreshTicker(false);
+  // (2026-09-27) FIX — pehle yahan har non-cold request par bhi
+  // `refreshTicker(false)` chalta tha, jo har ~TICKER_TTL_MS (5 sec) mein
+  // Binance ko REST `/eapi/v1/ticker` call bhejta rehta tha — yahi Render
+  // ki IP par ban ka asli chalu (ongoing) reason tha, kyunki mark/trade/
+  // spot to WebSocket se aate hain (inbound, rate-limit-free), sirf ye
+  // ticker-REST hi baar-baar Binance ko HIT karta tha.
+  // AB: REST sirf EK BAAR chalti hai — jab feeds cold-start hoti hain
+  // (upar warmup() ke andar, refreshTicker(true)), poori chain (saari
+  // expiries/strikes) ka OI/volume/bid/ask/last ek baar mein le lete hain.
+  // Uske baad is poore session mein (jab tak IDLE_STOP_SEC se zyada idle
+  // hoke session khatam na ho) koi aur REST call Binance ko nahi jaati —
+  // sirf WebSocket ticks (mark/trade) se mark/bid/ask/last/greeks live
+  // update hote rahte hain. Trade-off: OI/volume/chg% (WS pe available
+  // nahi hain) is session ke baaki hisse mein WAHI purani values par
+  // freeze rahenge, jab tak session dobara cold-start na ho.
 
-  return respondJson(req, buildSnapshot(strikeWindow, maxExpiries));
+  return respondJson(req, buildSnapshot(strikeWindow, maxExpiries, onlyExpiry));
 }
 
 // (2026-09-25) /orderbook route HATA DIYA — dead code tha, koi caller nahi
@@ -1468,7 +1505,75 @@ function buildQuery(p: Params): string {
 }
 
 // Binance rate-limit (429) / IP-ban (418) ke baad hum khud bhi kuch der ruk jaate hain
+// (2026-09-26) Ab YE HI backoff teeno outbound path share karte hain — signedCall
+// (trade), refreshTicker, aur generic REST-forward (/api/, /eapi/). Pehle sirf
+// signedCall isko dekhta tha; refreshTicker apna alag tickerNextTryMs rakhta tha
+// aur REST-forward ke paas koi backoff tha hi nahi — isliye ek 418 ke baad bhi
+// forward-path Binance ko hammer karta reh sakta tha, jo ban lamba kar sakta hai.
 let bnBackoffUntil = 0;
+
+// ── Exact Binance error capture (2026-09-26) ────────────────────────────────
+// Pehle sirf status-code store hota tha ("ticker HTTP 418") — Binance ka asli
+// reason (JSON body ka `code`/`msg`), Retry-After, aur saare X-MBX-* headers
+// kahin log/store nahi hote the. Binance khud confirm karta hai ki 418 ek
+// undocumented WAF-level IP restriction bhi ho sakta hai (sirf weight-limit
+// nahi) — isliye jitna signal capture kar sakein utna zaroori hai taaki agli
+// baar pata chale weight-issue tha ya IP/WAF-issue.
+interface LimitEvent {
+  captured_at_ms: number;
+  endpoint: string;
+  status: number;
+  retry_after_sec: number | null;
+  binance_code: number | null;
+  binance_msg: string | null;
+  mbx_headers: Record<string, string>;
+  backoff_applied_sec: number;
+}
+let lastLimitEvent: LimitEvent | null = null;
+
+function lastLimitEventReport(): (LimitEvent & { age_ms: number }) | null {
+  if (!lastLimitEvent) return null;
+  return { ...lastLimitEvent, age_ms: nowMs() - lastLimitEvent.captured_at_ms };
+}
+
+// 429/418 milte hi: (a) shared bnBackoffUntil set karta hai — 418 ke liye
+// minimum 5 min (Binance FAQ: WAF-level IP ban ~5 min se shuru hota hai; hum
+// safe-side wahi minimum rakhte hain, Retry-After bada ho to usi ko maanenge),
+// 429 ke liye Retry-After ya 10s. (b) exact error (code/msg/headers) capture
+// karta hai lastLimitEvent mein. Returns: kitna backoff laga (seconds), taaki
+// caller apna khud ka local retry-timer (jaise tickerNextTryMs) bhi sync kar sake.
+function applyBnBackoff(endpoint: string, resp: Response, bodyText: string): number {
+  const ra = parseInt(resp.headers.get("retry-after") ?? "", 10);
+  const retryAfterSec = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 1800) : null;  // sanity cap: 30 min
+  const minSec = resp.status === 418 ? 300 : 10;
+  const waitSec = retryAfterSec != null ? Math.max(retryAfterSec, resp.status === 418 ? minSec : 0) : minSec;
+  bnBackoffUntil = Math.max(bnBackoffUntil, nowMs() + waitSec * 1000);
+
+  const mbxHeaders: Record<string, string> = {};
+  for (const [k, v] of resp.headers.entries()) {
+    if (k.toLowerCase().startsWith("x-mbx")) mbxHeaders[k] = v;
+  }
+  let binanceCode: number | null = null;
+  let binanceMsg: string | null = null;
+  try {
+    const j = JSON.parse(bodyText);
+    if (j && typeof j === "object" && !Array.isArray(j)) {
+      if (Number.isFinite(Number(j.code))) binanceCode = Number(j.code);
+      if (typeof j.msg === "string") binanceMsg = j.msg.slice(0, 300);
+    }
+  } catch { /* body JSON nahi tha (ya empty) — koi baat nahi, headers/status to mil gaye */ }
+
+  lastLimitEvent = {
+    captured_at_ms: nowMs(), endpoint, status: resp.status,
+    retry_after_sec: retryAfterSec, binance_code: binanceCode, binance_msg: binanceMsg,
+    mbx_headers: mbxHeaders, backoff_applied_sec: waitSec,
+  };
+  console.log(
+    `[limit-event] ${endpoint} HTTP ${resp.status} — code:${binanceCode} msg:"${binanceMsg}" ` +
+    `retry-after:${retryAfterSec ?? "n/a"}s backoff:${waitSec}s`,
+  );
+  return waitSec;
+}
 
 interface CallOpts { bypassBackoff?: boolean }
 
@@ -1509,9 +1614,7 @@ async function signedCall(
     } catch { body = JSON.stringify({ raw: text.slice(0, 500) }); }
 
     if (r.status === 429 || r.status === 418) {
-      const ra = parseInt(r.headers.get("retry-after") ?? "", 10);
-      const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra, 1800) : (r.status === 418 ? 120 : 10);
-      bnBackoffUntil = Math.max(bnBackoffUntil, nowMs() + wait * 1000);
+      const wait = applyBnBackoff(path, r, text);
       console.log(`[trade] Binance HTTP ${r.status} — backoff ${wait}s`);
       return { status: r.status, body };
     }
@@ -2740,6 +2843,11 @@ async function pollOnce() {
       ["Binance used weight", ratelimit.binance_used_weight_1m != null ? ratelimit.binance_used_weight_1m + " / " + ratelimit.weight_limit_1m : "—"],
       ["IP ban (418)", ratelimit.ip_banned ? ("🔴 Active — " + fmtAgo(ratelimit.ip_ban_age_ms) + " se") : "🟢 Nahi"],
       ["Agla auto-check", ratelimit.ip_banned ? ("~" + Math.ceil(ratelimit.ip_ban_next_probe_in_ms / 1000) + "s baad") : "—"],
+      ["Local backoff (circuit-breaker)", ratelimit.bn_backoff_remaining_ms > 0 ? ("🟠 " + Math.ceil(ratelimit.bn_backoff_remaining_ms / 1000) + "s baaki") : "🟢 Nahi"],
+      ["Aakhri Binance error", ratelimit.last_limit_event
+        ? ("HTTP " + ratelimit.last_limit_event.status + " — code:" + (ratelimit.last_limit_event.binance_code ?? "n/a") +
+           " \"" + (ratelimit.last_limit_event.binance_msg ?? "n/a") + "\" (" + fmtAgo(ratelimit.last_limit_event.age_ms) + " pehle)")
+        : "—"],
     ];
     topStats.innerHTML = stats.map(([label, value]) =>
       '<div class="stat"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>'
@@ -3108,7 +3216,14 @@ async function handleHttp(req: Request): Promise<Response> {
     // Rate-limit stats — koi secret nahi, browser seedha yahan se poll kar sakta hai
     // (jaise /status hai). Header icon (baad mein banega) isko use karega.
     if (url.pathname === "/ratelimit") {
-      return respondJson(req, { ...bnRateStats(), last_fail_snapshot: lastFailSnapshotReport() });
+      return respondJson(req, {
+        ...bnRateStats(),
+        last_fail_snapshot: lastFailSnapshotReport(),
+        // NAYA (2026-09-26): exact Binance error (code/msg/x-mbx-* headers) jo
+        // aakhri 429/418 par mila, + shared circuit-breaker kitni der aur active hai.
+        last_limit_event: lastLimitEventReport(),
+        bn_backoff_remaining_ms: Math.max(0, bnBackoffUntil - nowMs()),
+      });
     }
 
     // REST call health — snapshot (per-endpoint status) + rolling recent-log.
@@ -3221,6 +3336,20 @@ async function handleHttp(req: Request): Promise<Response> {
     // Health-tracker key: prefix ke hisaab se ("/api/" → spot forward, "/eapi/" → options forward)
     const healthKey = `rest-forward ${prefix}`;
 
+    // (2026-09-26) Shared circuit-breaker: agar 429/418 abhi haal hi mein kahin
+    // (ticker/trade/forward — koi bhi path) se laga hai, to bnBackoffUntil window
+    // ke andar Binance ko is call ke liye bhi mat bhejo — pehle ye path (jise
+    // 429/418 ke baad bhi koi backoff nahi tha) forward-loop chalte rehne par
+    // Binance ko hammer kar sakta tha, jo ban lamba/severe kar sakta hai.
+    if (nowMs() < bnBackoffUntil) {
+      restFail(healthKey, "local circuit-breaker (recent 429/418) — Binance ko call nahi bheji", false);
+      const waitS = Math.ceil((bnBackoffUntil - nowMs()) / 1000);
+      return new Response(
+        JSON.stringify({ error: `Binance rate-limit/ban backoff chal raha hai — ${waitS}s baad try karo` }),
+        { status: 429, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" } },
+      );
+    }
+
     let upstreamResp: Response;
     try {
       upstreamResp = await fetch(upstreamUrl, {
@@ -3250,6 +3379,14 @@ async function handleHttp(req: Request): Promise<Response> {
 
     let respBody = await upstreamResp.text();
     const ct = upstreamResp.headers.get("Content-Type") ?? "application/json";
+
+    // 429/418 → shared backoff lagao + exact Binance error (code/msg/x-mbx-*
+    // headers) capture karo. respBody yahan tak already text ban chuka hai,
+    // isliye body dobara padhne ki zaroorat nahi (Response body sirf ek baar
+    // readable hoti hai).
+    if (upstreamResp.status === 429 || upstreamResp.status === 418) {
+      applyBnBackoff(url.pathname, upstreamResp, respBody);
+    }
 
     if (filterable && upstreamResp.status === 200) {
       try {
