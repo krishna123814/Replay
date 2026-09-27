@@ -2786,7 +2786,7 @@ const DASHBOARD_HTML = `<!doctype html>
   <h2>Depth / Order-Book Health (per option-strike, live)</h2>
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Symbol</th><th>Status</th><th>Clients</th><th>Last update</th><th>Last error</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Status</th><th>Clients</th><th>REST (eapi)</th><th>WS ever open?</th><th>Last close</th><th>Last update</th><th>Last error / diagnosis</th></tr></thead>
       <tbody id="depthBookRows"></tbody>
     </table>
   </div>
@@ -2938,10 +2938,13 @@ async function pollOnce() {
             '<tr class="' + (b.status === "error" ? "row-fail" : "") + '"><td>' + b.symbol +
             '</td><td>' + (b.status === "live" ? "🟢 live" : b.status === "error" ? "🔴 error" : "🟡 " + b.status) +
             '</td><td>' + b.clients +
+            '</td><td>' + (b.rest_ok === true ? "🟢 OK" : b.rest_ok === false ? "🔴 fail" : "⚪ untested") +
+            '</td><td>' + (b.ws_ever_opened ? "🟢 haan" : "🔴 kabhi nahi") +
+            '</td><td>' + (b.last_close_code != null ? ("code " + b.last_close_code + (b.last_close_clean === false ? " (unclean)" : "")) : "—") +
             '</td><td>' + fmtAgo(b.age_ms) +
-            '</td><td>' + (b.last_error || "—") + '</td></tr>'
+            '</td><td style="max-width:420px">' + (b.last_error || "—") + '</td></tr>'
           ).join("")
-        : '<tr><td colspan="5" class="empty">Abhi koi order-book khula nahi hai (koi client connected nahi)</td></tr>';
+        : '<tr><td colspan="8" class="empty">Abhi koi order-book khula nahi hai (koi client connected nahi)</td></tr>';
     }
 
     // ── Endpoint health cards ──
@@ -3109,6 +3112,30 @@ class DepthBook {
   status: "idle" | "connecting" | "live" | "error" = "idle";
   lastError: string | null = null;
 
+  // (NAYA — 2026-09-27) Exact root-cause diagnostics. Purpose: har failure ko
+  // do buckets mein clearly separate karna —
+  //  (A) network/IP-level block: nbstream.binance.com se TCP/TLS handshake
+  //      hi complete nahi ho raha (onopen kabhi fire nahi hota)
+  //  (B) stream-level drop: handshake ho gaya tha (onopen fire hua), phir
+  //      baad mein close hua — yeh alag problem hai (rate-limit/idle-timeout/
+  //      symbol issue), network block nahi.
+  // REST (eapi.binance.com) alag domain hai isliye uska apna success/fail
+  // track karte hain — agar REST OK hai par WS fail, to yeh confirm karta hai
+  // ki block specifically WS gateway (nbstream) ke liye hai.
+  restOk: boolean | null = null;         // null = abhi test nahi hua
+  restLastError: string | null = null;
+  restLastOkTs = 0;
+  wsOpenedThisAttempt = false;           // is attempt mein onopen fire hua?
+  everConnectedOk = false;               // process life mein kabhi bhi onopen fire hua?
+  connectStartTs = 0;
+  openedAtTs = 0;
+  lastCloseCode: number | null = null;
+  lastCloseReason = "";
+  lastCloseWasClean: boolean | null = null;
+  lastErrorEventInfo: string | null = null;
+  // deno-lint-ignore no-explicit-any
+  hsTimeoutTimer: any = null;
+
   constructor(public symbol: string) {}
 
   addClient(ws: WebSocket) {
@@ -3152,11 +3179,16 @@ class DepthBook {
       let d: any = null;
       try { d = await r.json(); } catch { /* ignore parse fail below */ }
       if (!r.ok || !d || (!d.bids && !d.asks)) {
+        this.restOk = false;
+        this.restLastError = `Snapshot fail — HTTP ${r.status}`;
         this.lastError = `Snapshot fail — HTTP ${r.status}`;
         this.status = "error";
         this.retryTimer = setTimeout(() => this.loadSnapshot().then(() => this.connectUpstream()), 3000);
         return;
       }
+      this.restOk = true;
+      this.restLastError = null;
+      this.restLastOkTs = nowMs();
       this.bidsMap = new Map(); this.asksMap = new Map();
       depthApplySide(this.bidsMap, d.bids);
       depthApplySide(this.asksMap, d.asks);
@@ -3167,6 +3199,8 @@ class DepthBook {
       this.lastUpdateTs = nowMs();
       for (const ev of buffered) this.applyEvent(ev);
     } catch (e) {
+      this.restOk = false;
+      this.restLastError = `Snapshot error: ${e}`;
       this.lastError = `Snapshot error: ${e}`;
       this.status = "error";
       this.retryTimer = setTimeout(() => this.loadSnapshot().then(() => this.connectUpstream()), 3000);
@@ -3174,23 +3208,55 @@ class DepthBook {
   }
   connectUpstream() {
     this.connecting = false;
+    this.connectStartTs = nowMs();
+    this.wsOpenedThisAttempt = false;
     let ws: WebSocket;
     try {
       ws = new WebSocket(`wss://nbstream.binance.com/eoptions/ws/${this.symbol}@depth@100ms`);
     } catch (e) {
       // (2026-09-27) FIX: pehle yahan lastError set hi nahi hota tha —
       // client ko sirf status:"error" milta, wajah kabhi nahi.
-      this.lastError = `Upstream WS connect threw: ${e}`;
+      this.lastError = `Upstream WS connect threw (constructor level, DNS/URL issue ho sakta hai): ${e}`;
       this.status = "error";
       this.scheduleRetry();
       return;
     }
     noteBinanceActivity(); callTable.toBinance.ws++;   // NAYA: Binance depth-WS connect attempt
     this.ws = ws;
+
+    // (NAYA — 2026-09-27) Handshake timeout. Agar 8 second mein onopen nahi
+    // aaya, socket TCP/TLS level par hi atka hai — yeh application-level
+    // reject nahi hai, isliye is case ko alag se pehchanna zaroori hai
+    // (network/firewall/IP-block ka sabse strong signal).
+    if (this.hsTimeoutTimer) { clearTimeout(this.hsTimeoutTimer); this.hsTimeoutTimer = null; }
+    this.hsTimeoutTimer = setTimeout(() => {
+      if (this.ws !== ws || this.wsOpenedThisAttempt) return;
+      this.status = "error";
+      this.lastError =
+        `[HANDSHAKE-HANG] nbstream.binance.com se 8s mein bhi TCP/TLS connect complete nahi hua (onopen kabhi nahi aaya). ` +
+        `REST (eapi.binance.com) status: ${
+          this.restOk === true
+            ? "OK — " + Math.round((nowMs() - this.restLastOkTs) / 1000) + "s pehle kaam kiya"
+            : this.restOk === false
+            ? "yeh bhi FAIL — " + this.restLastError
+            : "abhi test nahi hua"
+        }. ` +
+        (this.restOk === true
+          ? "→ Diagnosis: REST (eapi.binance.com) chal raha hai lekin WS gateway (nbstream.binance.com) ka connect hang ho raha hai — yeh WS-specific block/firewall hai, general Render→Binance network issue nahi."
+          : "→ Diagnosis: REST bhi fail hai, isliye yeh general Render→Binance egress/network issue lagta hai, sirf WS ka nahi.") +
+        ` Retry ho raha hai…`;
+      try { ws.close(); } catch { /* ignore */ }
+    }, 8000);
+
     ws.onopen = () => {
       if (this.ws !== ws) return;
+      this.wsOpenedThisAttempt = true;
+      this.everConnectedOk = true;
+      this.openedAtTs = nowMs();
+      if (this.hsTimeoutTimer) { clearTimeout(this.hsTimeoutTimer); this.hsTimeoutTimer = null; }
       this.status = "live";
       this.lastError = null;
+      this.lastErrorEventInfo = null;
       this.failCount = 0;
     };
     ws.onmessage = (e: MessageEvent) => {
@@ -3204,17 +3270,59 @@ class DepthBook {
       if (!this.snapshotReady) { this.buffer.push(d); return; }
       this.applyEvent(d);
     };
-    ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
+    ws.onerror = (e: Event) => {
+      // (NAYA) Deno/browser ka WS onerror event mein rarely koi readable
+      // message hota hai, par jo bhi milta hai capture kar lete hain —
+      // onclose ke sath milke yeh poora context banata hai.
+      // deno-lint-ignore no-explicit-any
+      const ee = e as any;
+      this.lastErrorEventInfo = (ee && ee.message) ? String(ee.message) : `event type: ${e.type || "unknown"}`;
+      try { ws.close(); } catch { /* ignore */ }
+    };
     ws.onclose = (ev: CloseEvent) => {
       if (this.ws !== ws) return;
+      if (this.hsTimeoutTimer) { clearTimeout(this.hsTimeoutTimer); this.hsTimeoutTimer = null; }
       this.ws = null;
       this.status = "error";
-      // (2026-09-27) FIX: pehle yahan lastError set nahi hota tha — isi
-      // wajah se client hamesha generic "wajah unknown" dikhata tha jab
-      // asli reason ye tha ki Binance ka upstream depth-WS band ho gaya.
-      // Ab exact close-code + reason capture karte hain.
-      this.lastError = `Binance upstream depth-WS band ho gaya — code ${ev.code}` +
-        (ev.reason ? ` (${ev.reason})` : "") + `, retry ho raha hai…`;
+      this.lastCloseCode = ev.code;
+      this.lastCloseReason = ev.reason || "";
+      this.lastCloseWasClean = ev.wasClean;
+
+      const restNote = this.restOk === true
+        ? "REST (eapi.binance.com) OK hai"
+        : this.restOk === false
+        ? "REST bhi fail — " + this.restLastError
+        : "REST abhi test nahi hua";
+
+      if (!this.wsOpenedThisAttempt) {
+        // (2026-09-27) FIX: pehle yahan sirf generic "band ho gaya — code X"
+        // dikhta tha, chahe handshake kabhi complete hua bhi ho ya nahi.
+        // Ab yahi sabse important distinction explicitly nikaalte hain:
+        // handshake kabhi complete hi nahi hua (onopen fire hi nahi hua) —
+        // yeh network/IP-block ka strong signal hai, kyunki ev.code = 0 ka
+        // matlab hai koi application-level close-frame nahi mila, TCP-level
+        // hi reset/refuse/drop hua.
+        const ms = nowMs() - this.connectStartTs;
+        this.lastError =
+          `[HANDSHAKE-FAIL] Upstream WS band ho gaya BEFORE onopen — ${ms}ms mein hi close (code ${ev.code}` +
+          (ev.reason ? `, reason: ${ev.reason}` : ", server ne koi reason nahi bheja") +
+          `, wasClean: ${ev.wasClean}). ${restNote}. ` +
+          (this.restOk === true
+            ? "→ Diagnosis: REST kaam kar raha hai par WS handshake reject/drop ho raha hai — yeh confirm karta hai ki block specifically nbstream.binance.com (WS gateway) ke liye hai, Binance ki taraf se ho sakta hai (cloud/datacenter IP block) ya Render ka outbound WS firewall."
+            : "→ Diagnosis: REST bhi fail ho raha hai — general network/egress block lagta hai, sirf WS ka nahi.") +
+          (this.lastErrorEventInfo ? ` onerror detail: ${this.lastErrorEventInfo}.` : "") +
+          ` Retry ho raha hai…`;
+      } else {
+        // Connect successful hua tha (onopen fire hua), phir baad mein drop
+        // hua — yeh ALAG problem hai: network block nahi (connection ek baar
+        // ban chuka tha), balki stream-level issue (idle timeout, rate-limit,
+        // ya Binance ne stream reset kiya).
+        const secOpen = this.openedAtTs ? Math.round((nowMs() - this.openedAtTs) / 1000) : null;
+        this.lastError =
+          `[STREAM-DROP] Upstream WS successfully connect hua tha, phir ${secOpen != null ? secOpen + "s baad" : ""} band ho gaya ` +
+          `(code ${ev.code}${ev.reason ? `, reason: ${ev.reason}` : ""}, wasClean: ${ev.wasClean}). ` +
+          `→ Diagnosis: yeh network/IP block NAHI hai (handshake pehle successful ho chuka tha) — likely idle-timeout, Binance-side stream reset, ya rate-limit hai. Retry ho raha hai…`;
+      }
       this.scheduleRetry();
     };
   }
@@ -3265,6 +3373,18 @@ class DepthBook {
       // dikhta tha, chahe asli reason (snapshot fail, upstream WS close,
       // IP-ban) kuch bhi ho. Ab yahan se asli lastError bhi jaata hai.
       error: this.status === "error" ? this.lastError : null,
+      // (NAYA — 2026-09-27) Structured diagnosis fields — chart.html iski
+      // wajah se ab ek chhota "Render ↔ Binance diagnosis" box dikha sakta
+      // hai, sirf ek lambi error-string parse kiye bina.
+      diag: {
+        rest_ok: this.restOk,
+        rest_last_error: this.restLastError,
+        ws_ever_opened: this.everConnectedOk,
+        last_close_code: this.lastCloseCode,
+        last_close_reason: this.lastCloseReason,
+        last_close_clean: this.lastCloseWasClean,
+        fail_count: this.failCount,
+      },
       ts: nowMs(),
     });
     for (const c of this.clients) {
@@ -3316,6 +3436,17 @@ async function handleHttp(req: Request): Promise<Response> {
           clients: b.clients.size,
           age_ms: b.lastUpdateTs ? t - b.lastUpdateTs : null,
           last_error: b.lastError,
+          // (NAYA — 2026-09-27) exact diagnosis fields — dekho DepthBook
+          // class comment (connectUpstream) is DepthBook class ke top par.
+          rest_ok: b.restOk,                     // eapi.binance.com REST kaam kar raha hai?
+          rest_last_error: b.restLastError,
+          ws_ever_opened: b.everConnectedOk,      // process life mein kabhi WS handshake successful hua?
+          ws_opened_this_attempt: b.wsOpenedThisAttempt,
+          last_close_code: b.lastCloseCode,
+          last_close_reason: b.lastCloseReason,
+          last_close_clean: b.lastCloseWasClean,
+          last_error_event: b.lastErrorEventInfo,
+          fail_count: b.failCount,
         })),
       });
     }
