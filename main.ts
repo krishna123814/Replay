@@ -2852,6 +2852,8 @@ async function pollOnce() {
     // ── Top stats row (from /status + /ratelimit) ──
     const stats = [
       ["Feeds running", status.feeds_running ? "✅ Yes" : "❌ No"],
+      ["Feeds mode", status.feeds_mode === "always-on" ? "🟢 Always-on" : "🟡 On-demand"],
+      ["Market depth (/ws/depth)", status.depth_enabled ? "🟢 Enabled" : "⚪ Disabled (sirf option chain)"],
       ["Symbols tracked", status.symbols],
       ["Spot price", status.spot != null ? status.spot : "—"],
       ["Ticker age", fmtAgo(status.ticker_age_ms)],
@@ -3208,7 +3210,10 @@ async function handleHttp(req: Request): Promise<Response> {
   try {
     // Health-check
     if (url.pathname === "/") {
-      return new Response("Binance proxy is running ✅ (on-demand /snapshot enabled)", { status: 200 });
+      return new Response(
+        `Binance proxy is running ✅ (feeds: ${ALWAYS_ON_FEEDS ? "always-on" : "on-demand"}, depth: ${DEPTH_ENABLED ? "enabled" : "disabled"})`,
+        { status: 200 },
+      );
     }
 
     // Diagnostics — koi secret nahi
@@ -3216,6 +3221,8 @@ async function handleHttp(req: Request): Promise<Response> {
       const t = nowMs();
       return respondJson(req, {
         feeds_running: !feedsStopped,
+        feeds_mode: ALWAYS_ON_FEEDS ? "always-on" : "on-demand",
+        depth_enabled: DEPTH_ENABLED,
         last_snapshot_request_age_ms: lastDemand ? t - lastDemand : null,
         symbols: quotes.size,
         spot: spot.price,
