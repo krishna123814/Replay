@@ -2855,6 +2855,9 @@ async function pollOnce() {
     const stats = [
       ["Feeds running", status.feeds_running ? "✅ Yes" : "❌ No"],
       ["Feeds mode", status.feeds_mode === "always-on" ? "🟢 Always-on" : "🟡 On-demand"],
+      ["WS: option mark (btcusdt@optionMarkPrice)", status.feeds?.mark?.connected ? ("🟢 Connected — " + fmtAgo(status.feeds.mark.age_ms) + " pehle msg") : "🔴 Disconnected"],
+      ["WS: option trade (btcusdt@optionTrade)", status.feeds?.trade?.connected ? ("🟢 Connected — " + fmtAgo(status.feeds.trade.age_ms) + " pehle msg") : "🔴 Disconnected"],
+      ["WS: spot (btcusdt@aggTrade)", status.feeds?.spot?.connected ? ("🟢 Connected — " + fmtAgo(status.feeds.spot.age_ms) + " pehle msg") : "🔴 Disconnected"],
       ["Market depth (/ws/depth)", status.depth_enabled ? "🟢 Enabled" : "⚪ Disabled (sirf option chain)"],
       ["Symbols tracked", status.symbols],
       ["Spot price", status.spot != null ? status.spot : "—"],
@@ -3006,6 +3009,24 @@ urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.cli
   const saved = loadSavedUrl();
   if (saved) {
     urlInput.value = saved;
+    startPolling();
+    return;
+  }
+  // (2026-09-27) FIX — pehle yahan koi 'else' nahi tha: agar auto-detect
+  // (transient network blip / cold-start delay) FAIL ho jaaye AUR koi saved
+  // URL bhi na ho, to page silently ruk jaata tha — na koi error dikhta tha,
+  // na koi data (livePill apni default "disconnected" HTML state mein hi
+  // reh jaata, kyunki pollOnce() kabhi call hi nahi hoti thi). User ke liye
+  // ye "kuch bhi nahi dikh raha" jaisa lagta tha.
+  // AB: agar ye page khud isi Render origin se serve ho rahi hai (file://
+  // nahi hai), to bhi seedha location.origin try karo aur ek visible warning
+  // dikhao — taaki page KABHI silently blank na rahe, aur agar pehla connect
+  // fail bhi ho jaaye to agla 4s poll khud retry karega (setInterval already
+  // isi ke upar chalta hai).
+  if (location.protocol !== "file:") {
+    urlInput.value = location.origin;
+    errBox.style.display = "block";
+    errBox.textContent = "⚠️ Auto-connect pehli koshish mein fail hua (Render abhi jaag raha ho sakta hai) — retry ho raha hai...";
     startPolling();
   }
 })();
