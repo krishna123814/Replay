@@ -40,11 +40,13 @@ const FILTER_REST = (Deno.env.get("FILTER_REST") ?? "true").toLowerCase() !== "f
 // Ab feeds boot par hi start hoke hamesha chalti hain. "false" karke purana
 // on-demand (idle 60s ke baad WS band) rollback ke liye wapas mila sakte ho.
 const ALWAYS_ON_FEEDS = (Deno.env.get("ALWAYS_ON_FEEDS") ?? "true").toLowerCase() !== "false";
-// (2026-09-27) DEPTH_ENABLED — market-depth (/ws/depth, order-book) feature ko
-// abhi ke liye OFF rakha hai (sirf option-chain/snapshot chahiye). Code hataya
-// nahi hai — sirf route pe gate laga hai. Wapas chahiye ho to env
-// DEPTH_ENABLED=true karke bina kisi aur badlaav ke on ho jaayega.
-const DEPTH_ENABLED = (Deno.env.get("DEPTH_ENABLED") ?? "false").toLowerCase() === "true";
+// (2026-09-27) DEPTH_ENABLED — market-depth (/ws/depth, order-book) feature.
+// Pehle default OFF tha (sirf option-chain/snapshot chahiye tha). Ab
+// RE-ENABLED by default — isi proxy (my-engine-au06 = main.ts) ko depth ke
+// liye bhi use kar rahe hain (alag "render2" account discontinue kar diya,
+// chart.html ab isi URL par /ws/depth hit karta hai). Env DEPTH_ENABLED=false
+// karke bina kisi aur badlaav ke wapas off ho jaayega.
+const DEPTH_ENABLED = (Deno.env.get("DEPTH_ENABLED") ?? "true").toLowerCase() !== "false";
 
 const SYMBOL_PREFIX = "BTC-";          // sirf BTC options (app.py bhi sirf BTCUSDT use karta hai)
 const DEFAULT_STRIKES = 20;            // ATM ke dono taraf — app.py BINANCE_OC_STRIKE_WINDOW jaisa
@@ -3303,7 +3305,7 @@ async function handleHttp(req: Request): Promise<Response> {
 
     // ── Live order-book WS (BTC options, diff-depth, 3s throttle push) ──
     // Browser: wss://<engine>/ws/depth?symbol=BTC-260926-84000-C
-    // (2026-09-27) Abhi ke liye DISABLED — DEPTH_ENABLED=true env se wapas on.
+    // (2026-09-27) RE-ENABLED by default. Env DEPTH_ENABLED=false karke off.
     if (url.pathname === "/ws/depth") {
       if (!DEPTH_ENABLED) {
         return new Response(
