@@ -2873,7 +2873,7 @@ async function pollOnce() {
       ["Local backoff (circuit-breaker)", ratelimit.bn_backoff_remaining_ms > 0 ? ("🟠 " + Math.ceil(ratelimit.bn_backoff_remaining_ms / 1000) + "s baaki") : "🟢 Nahi"],
       ["Aakhri Binance error", ratelimit.last_limit_event
         ? ("HTTP " + ratelimit.last_limit_event.status + " — code:" + (ratelimit.last_limit_event.binance_code ?? "n/a") +
-           " \"" + (ratelimit.last_limit_event.binance_msg ?? "n/a") + "\" (" + fmtAgo(ratelimit.last_limit_event.age_ms) + " pehle)")
+           " \\"" + (ratelimit.last_limit_event.binance_msg ?? "n/a") + "\\" (" + fmtAgo(ratelimit.last_limit_event.age_ms) + " pehle)")
         : "—"],
     ];
     topStats.innerHTML = stats.map(([label, value]) =>
