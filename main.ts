@@ -3212,7 +3212,15 @@ class DepthBook {
     this.wsOpenedThisAttempt = false;
     let ws: WebSocket;
     try {
-      ws = new WebSocket(`wss://nbstream.binance.com/eoptions/ws/${this.symbol}@depth@100ms`);
+      // (FIX — 2026-09-27) Binance ne clarify kiya: Options WS ke liye
+      // "<symbol>@depth@100ms" ek documented stream name nahi hai. Do valid
+      // options hain — (a) partial-depth: <symbol>@depth<10|20|50|100>@100ms
+      // (fixed-level snapshot push, diff-merge ki zaroorat nahi), ya
+      // (b) diff-depth: <symbol>@depth1000 (bina @100ms suffix ke) — yehi
+      // wala humare existing snapshot+diff (U/u/pu) merge logic (applyEvent)
+      // ke saath match karta hai, isliye ismein switch kiya, poora
+      // architecture badalne ki zaroorat nahi padi.
+      ws = new WebSocket(`wss://nbstream.binance.com/eoptions/ws/${this.symbol}@depth1000`);
     } catch (e) {
       // (2026-09-27) FIX: pehle yahan lastError set hi nahi hota tha —
       // client ko sirf status:"error" milta, wajah kabhi nahi.
