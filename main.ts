@@ -2778,6 +2778,19 @@ const DASHBOARD_HTML = `<!doctype html>
     </table>
   </div>
 
+  <!-- (2026-09-27) NAYA — per-symbol depth/order-book health. /status ka
+       depth_books[] pehle se ye data bhejta tha (status, age, last_error)
+       par dashboard kabhi render nahi karta tha — isi wajah se koi strike
+       ka book Binance-side fail ho jaaye to yahan se pata hi nahi chalta
+       tha, chart kholne par hi dikhta tha ("wajah unknown" wala issue). -->
+  <h2>Depth / Order-Book Health (per option-strike, live)</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Symbol</th><th>Status</th><th>Clients</th><th>Last update</th><th>Last error</th></tr></thead>
+      <tbody id="depthBookRows"></tbody>
+    </table>
+  </div>
+
   <h2>Endpoint Health (3+ consecutive fails → failing)</h2>
   <div class="cards" id="cards"></div>
 
@@ -2800,6 +2813,7 @@ const cardsEl = document.getElementById("cards");
 const rowsEl = document.getElementById("rows");
 const epBreakdownRows = document.getElementById("epBreakdownRows");
 const depthSymRows = document.getElementById("depthSymRows");
+const depthBookRows = document.getElementById("depthBookRows");
 const freezeMeta = document.getElementById("freezeMeta");
 const freezeRows = document.getElementById("freezeRows");
 const urlbarEl = document.querySelector(".urlbar");
@@ -2915,6 +2929,19 @@ async function pollOnce() {
             '<tr><td>' + s.symbol + '</td><td>' + s.sent + '</td></tr>'
           ).join("")
         : '<tr><td colspan="2" class="empty">Last 5 min mein koi depth call Binance tak nahi gayi</td></tr>';
+    }
+
+    // ── Depth / order-book per-symbol health (NAYA) ──
+    if (depthBookRows) {
+      depthBookRows.innerHTML = status.depth_books && status.depth_books.length
+        ? status.depth_books.map((b) =>
+            '<tr class="' + (b.status === "error" ? "row-fail" : "") + '"><td>' + b.symbol +
+            '</td><td>' + (b.status === "live" ? "🟢 live" : b.status === "error" ? "🔴 error" : "🟡 " + b.status) +
+            '</td><td>' + b.clients +
+            '</td><td>' + fmtAgo(b.age_ms) +
+            '</td><td>' + (b.last_error || "—") + '</td></tr>'
+          ).join("")
+        : '<tr><td colspan="5" class="empty">Abhi koi order-book khula nahi hai (koi client connected nahi)</td></tr>';
     }
 
     // ── Endpoint health cards ──
@@ -3150,7 +3177,11 @@ class DepthBook {
     let ws: WebSocket;
     try {
       ws = new WebSocket(`wss://nbstream.binance.com/eoptions/ws/${this.symbol}@depth@100ms`);
-    } catch {
+    } catch (e) {
+      // (2026-09-27) FIX: pehle yahan lastError set hi nahi hota tha —
+      // client ko sirf status:"error" milta, wajah kabhi nahi.
+      this.lastError = `Upstream WS connect threw: ${e}`;
+      this.status = "error";
       this.scheduleRetry();
       return;
     }
@@ -3159,6 +3190,7 @@ class DepthBook {
     ws.onopen = () => {
       if (this.ws !== ws) return;
       this.status = "live";
+      this.lastError = null;
       this.failCount = 0;
     };
     ws.onmessage = (e: MessageEvent) => {
@@ -3173,10 +3205,16 @@ class DepthBook {
       this.applyEvent(d);
     };
     ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
-    ws.onclose = () => {
+    ws.onclose = (ev: CloseEvent) => {
       if (this.ws !== ws) return;
       this.ws = null;
       this.status = "error";
+      // (2026-09-27) FIX: pehle yahan lastError set nahi hota tha — isi
+      // wajah se client hamesha generic "wajah unknown" dikhata tha jab
+      // asli reason ye tha ki Binance ka upstream depth-WS band ho gaya.
+      // Ab exact close-code + reason capture karte hain.
+      this.lastError = `Binance upstream depth-WS band ho gaya — code ${ev.code}` +
+        (ev.reason ? ` (${ev.reason})` : "") + `, retry ho raha hai…`;
       this.scheduleRetry();
     };
   }
@@ -3221,6 +3259,12 @@ class DepthBook {
       bids: this.topRows(this.bidsMap, true),
       asks: this.topRows(this.asksMap, false),
       status: this.status,
+      // (2026-09-27) FIX: pehle yahan 'error' field bhejta hi nahi tha —
+      // client (chart.html) ko status:"error" milta tha par wajah kabhi
+      // nahi, isliye hamesha generic "Render: book error (wajah unknown)"
+      // dikhta tha, chahe asli reason (snapshot fail, upstream WS close,
+      // IP-ban) kuch bhi ho. Ab yahan se asli lastError bhi jaata hai.
+      error: this.status === "error" ? this.lastError : null,
       ts: nowMs(),
     });
     for (const c of this.clients) {
