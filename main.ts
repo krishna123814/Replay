@@ -101,6 +101,7 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
     const data = parseBinance(await r.text());
     if (!r.ok) {
       stats.errors++;
+      log(`BINANCE ERR ${method} ${path} -> HTTP ${r.status} ${JSON.stringify(data).slice(0, 250)}`);
       const m = /banned until (\d+)/.exec(String(data?.msg ?? ""));
       if (m) banUntil = Number(m[1]);
       else if (r.status === 418 || r.status === 429) banUntil = Date.now() + 60_000;
@@ -563,7 +564,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (method === "GET" && (path.startsWith("/api/") || path.startsWith("/eapi/"))) return forwardPublic(url, res);
 
   if (!path.startsWith("/trade/") && !path.startsWith("/rules/")) return send(res, 404, { ok: false, msg: "not found" });
-  if (!authOk(req)) return send(res, 401, { ok: false, msg: "bad or missing X-Trade-Token" });
+  if (!authOk(req)) {
+    log(`AUTH FAIL ${method} ${path} — token ${req.headers["x-trade-token"] ? "mismatch" : "missing"}`);
+    return send(res, 401, { ok: false, msg: "bad or missing X-Trade-Token" });
+  }
 
   const body: Json = method === "POST" ? await readBody(req) : {};
   const sym = String(url.searchParams.get("symbol") ?? "");
