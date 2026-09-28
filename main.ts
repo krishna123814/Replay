@@ -12,6 +12,7 @@
 //   Auth: header X-Trade-Token == TRADE_TOKEN  (sirf /trade/* aur /rules/* par)
 //   GET  /trade/status /trade/account /trade/positions /trade/orders/open[?symbol]
 //        /trade/ticksize?symbol /trade/fills /trade/orders/history /trade/bill /trade/exercise
+//        /trade/latency?mode=public|signed  (latency probe — sirf timing, koi order nahi)
 //   POST /trade/order /trade/cancel /trade/cancel-all /trade/panic
 //   POST /rules/create  GET /rules/list  POST /rules/cancel
 //   GET  /health /ping /  (no auth, keep-alive)   GET /snapshot (legacy option-chain snapshot)
@@ -26,6 +27,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 type Json = any;
 type Params = Record<string, string | number | boolean | null | undefined>;
 type BResult = { ok: boolean; status: number; data: Json };
+// Latency probe ke liye: Binance fetch ke asli send / headers-aaye / body-poori-aayi ke timestamps (performance.now, ms)
+type BnTrace = { send?: number; hdr?: number; recv?: number };
 
 // ───────────────────────── config ─────────────────────────
 const env = (k: string, d = ""): string => (process.env[k] ?? d).trim();
@@ -80,7 +83,7 @@ async function syncTime(): Promise<void> {
   } catch (e) { log("syncTime fail:", errMsg(e)); }
 }
 
-async function bn(method: string, path: string, params: Params = {}, signed = false): Promise<BResult> {
+async function bn(method: string, path: string, params: Params = {}, signed = false, trace?: BnTrace): Promise<BResult> {
   if (Date.now() < banUntil) {
     return { ok: false, status: 429, data: { code: -1003, msg: `Binance IP-ban active (~${Math.ceil((banUntil - Date.now()) / 1000)}s baaki) — request bheji nahi` } };
   }
@@ -97,8 +100,12 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
   stats.calls++;
   stats.lastCallAt = Date.now();
   try {
+    if (trace) trace.send = performance.now();
     const r = await fetch(`${EAPI}${path}${query ? "?" + query : ""}`, { method, headers, signal: AbortSignal.timeout(15000) });
-    const data = parseBinance(await r.text());
+    if (trace) trace.hdr = performance.now();
+    const bodyText = await r.text();
+    if (trace) trace.recv = performance.now();
+    const data = parseBinance(bodyText);
     if (!r.ok) {
       stats.errors++;
       log(`BINANCE ERR ${method} ${path} -> HTTP ${r.status} ${JSON.stringify(data).slice(0, 250)}`);
@@ -542,6 +549,7 @@ async function forwardPublic(url: URL, res: ServerResponse): Promise<void> {
 
 // ───────────────────────── router ─────────────────────────
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const tRecv = performance.now();   // latency probe: request Render ke handler tak pahunchi
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = (req.method ?? "GET").toUpperCase();
@@ -583,6 +591,27 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           persistence: SB_URL && SB_KEY ? "supabase" : "memory+tmp", timeOffsetMs: timeOffset,
         });
       case "/trade/account": return sendB(res, await bn("GET", "/eapi/v1/account", {}, true));
+      case "/trade/latency": {
+        // Latency probe — order nahi bhejta. signed = /eapi/v1/account (order jaisa signed path),
+        // public = /eapi/v1/time (halka). Saare numbers Render ki apni ek clock (performance.now) se hain,
+        // isliye clock-mismatch ka koi asar nahi.
+        const mode = url.searchParams.get("mode") === "signed" ? "signed" : "public";
+        const tr: BnTrace = {};
+        const r = mode === "signed"
+          ? await bn("GET", "/eapi/v1/account", {}, true, tr)
+          : await bn("GET", "/eapi/v1/time", {}, false, tr);
+        const tSend = performance.now();
+        const got = tr.send !== undefined && tr.recv !== undefined;
+        return send(res, 200, {
+          ok: true, mode, binance_ok: r.ok, binance_status: r.status,
+          binance_msg: r.ok ? null : String(r.data?.msg ?? "").slice(0, 160),
+          pre_ms: got ? tr.send! - tRecv : null,                            // Render: request mili -> Binance ko bheji (auth + signing)
+          ttfb_ms: got && tr.hdr !== undefined ? tr.hdr - tr.send! : null,  // Binance: bheji -> pehla byte/headers
+          bn_ms: got ? tr.recv! - tr.send! : null,                          // Binance: bheji -> poora reply aaya
+          post_ms: got ? tSend - tr.recv! : null,                           // Render: reply aaya -> HF ko bhejne se pehle
+          span_ms: tSend - tRecv,                                           // Render ke andar kul time
+        });
+      }
       case "/trade/positions": return sendB(res, await bn("GET", "/eapi/v1/position", sym ? { symbol: sym } : {}, true));
       case "/trade/orders/open": return sendB(res, await bn("GET", "/eapi/v1/openOrders", sym ? { symbol: sym } : {}, true));
       case "/trade/ticksize": {
