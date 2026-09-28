@@ -22,6 +22,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
@@ -29,6 +30,10 @@ type Params = Record<string, string | number | boolean | null | undefined>;
 type BResult = { ok: boolean; status: number; data: Json };
 // Latency probe ke liye: Binance fetch ke asli send / headers-aaye / body-poori-aayi ke timestamps (performance.now, ms)
 type BnTrace = { send?: number; hdr?: number; recv?: number };
+// Har HTTP request ka apna context — usme us request ke andar hue saare Binance calls ka total time jodte hain
+// (response header `x-bn-ms`), aur Render ka kul time `x-render-ms`. HF (app.py) ye headers padh ke tab-load
+// latency ka break-up dikhata hai. Sirf timing, koi behaviour change nahi.
+const reqCtx = new AsyncLocalStorage<{ bnMs: number }>();
 
 // ───────────────────────── config ─────────────────────────
 const env = (k: string, d = ""): string => (process.env[k] ?? d).trim();
@@ -100,11 +105,13 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
   stats.calls++;
   stats.lastCallAt = Date.now();
   try {
-    if (trace) trace.send = performance.now();
+    const tb0 = performance.now();
+    if (trace) trace.send = tb0;
     const r = await fetch(`${EAPI}${path}${query ? "?" + query : ""}`, { method, headers, signal: AbortSignal.timeout(15000) });
     if (trace) trace.hdr = performance.now();
     const bodyText = await r.text();
     if (trace) trace.recv = performance.now();
+    { const cx = reqCtx.getStore(); if (cx) cx.bnMs += performance.now() - tb0; }
     const data = parseBinance(bodyText);
     if (!r.ok) {
       stats.errors++;
@@ -550,6 +557,16 @@ async function forwardPublic(url: URL, res: ServerResponse): Promise<void> {
 // ───────────────────────── router ─────────────────────────
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const tRecv = performance.now();   // latency probe: request Render ke handler tak pahunchi
+  {
+    const origWH = res.writeHead.bind(res);
+    (res as Json).writeHead = (...a: Json[]): Json => {
+      try {
+        res.setHeader("x-render-ms", (performance.now() - tRecv).toFixed(2));
+        res.setHeader("x-bn-ms", (reqCtx.getStore()?.bnMs ?? 0).toFixed(2));
+      } catch { /* headers pehle hi ja chuke — ignore */ }
+      return (origWH as Json)(...a);
+    };
+  }
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = (req.method ?? "GET").toUpperCase();
@@ -707,10 +724,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 
 // ───────────────────────── boot ─────────────────────────
 const server = createServer((req, res) => {
-  route(req, res).catch((e: unknown) => {
-    log("route error:", errMsg(e));
-    if (!res.headersSent) send(res, 500, { ok: false, msg: errMsg(e) });
-    else res.end();
+  reqCtx.run({ bnMs: 0 }, () => {
+    route(req, res).catch((e: unknown) => {
+      log("route error:", errMsg(e));
+      if (!res.headersSent) send(res, 500, { ok: false, msg: errMsg(e) });
+      else res.end();
+    });
   });
 });
 
