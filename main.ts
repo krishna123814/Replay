@@ -9,7 +9,7 @@
 //      TEST_SUPABASE_URL + TEST_SUPABASE_KEY (rules restart-proof rakhne ke liye, optional)
 //      SECURE_PASSPHRASE (browser se encrypted POST /secure ke liye; min 12 chars)
 //
-// Contract (app.py se nikala hua):
+// Contract:
 //   Auth: header X-Trade-Token == TRADE_TOKEN  (sirf /trade/* aur /rules/* par)
 //   GET  /trade/status /trade/account /trade/positions /trade/orders/open[?symbol]
 //        /trade/ticksize?symbol /trade/fills /trade/orders/history /trade/bill /trade/exercise
@@ -588,7 +588,7 @@ function secDecrypt(env_: Json): Json {
   return JSON.parse(pt);
 }
 
-// Positions/Orders/Balance/History ka cache — HF wale min-gap jaisa (8s / 60s / 20s), Binance rate-limit safe
+// Positions/Orders/Balance/History ka cache — min-gap 8s / 60s / 20s, Binance rate-limit safe
 type CacheEnt = { ts: number; val: Json; busy: Promise<void> | null };
 const cPos: CacheEnt = { ts: 0, val: null, busy: null };
 const cHist: CacheEnt = { ts: 0, val: null, busy: null };
@@ -669,7 +669,7 @@ async function secTradeData(tab: string): Promise<Json> {
 }
 
 
-// ── trade_command (HF ka _trade_command_exec + trade_command_run ka port) ──
+// ── trade_command ──
 type IdemEnt = { ts: number; action: string; ack: Json | null; wait: Promise<void>; fin: () => void };
 const idemMap = new Map<string, IdemEnt>();
 const IDEM_TTL_MS = 3600_000;
@@ -686,7 +686,7 @@ async function cmdExec(cmd: Json, cid: string): Promise<{ ok: boolean; msg: stri
       if (!r.ok) return { ok: false, msg: ackMsgOf(r), extra: { data: r.data } };
       let msg = "order sent";
       if (cmd.sl || cmd.tp || cmd.trail) {
-        // entry_price = LIMIT order price (HF jaisa hi); rule fail ho to ab msg mein bhi dikhta hai
+        // entry_price = LIMIT order price; rule fail ho to ab msg mein bhi dikhta hai
         const rc = createRule(symbol, cmd.quantity, cmd.price, cmd.sl, cmd.tp, cmd.trail);
         if (!rc.ok) { msg += ` | ⚠️ SL/TP rule SAVE NAHI HUA: ${rc.msg}`; log(`rules_create FAILED (place_order): ${rc.msg}`); }
       }
