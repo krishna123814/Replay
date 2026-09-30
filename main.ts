@@ -62,7 +62,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // Render ki apni disk ephemeral hai, isliye rules/journal/render_log HF Space ke /data (persistent volume) me jaate hain.
 // Auth: header X-Store-Token. Space private ho to HF_ACCESS_TOKEN (Authorization: Bearer hf_...) bhi lagta hai.
 let storeWarnedVolatile = false;
+const storeState = { lastOkAt: 0, lastFailAt: 0, lastStatus: 0 as number, lastFail: "" };
 async function storeCall(method: "GET" | "POST", name: "rules" | "journal" | "log", body?: Json, timeoutMs = 12000): Promise<BResult> {
+  try { return await storeCallRaw(method, name, body, timeoutMs); }
+  catch (e) { storeState.lastFailAt = Date.now(); storeState.lastFail = errMsg(e).slice(0, 100); throw e; }
+}
+async function storeCallRaw(method: "GET" | "POST", name: "rules" | "journal" | "log", body: Json | undefined, timeoutMs: number): Promise<BResult> {
   const headers: Record<string, string> = { "x-store-token": STORE_TOKEN, "content-type": "application/json" };
   if (HF_ACCESS) headers.authorization = `Bearer ${HF_ACCESS}`;
   const r = await fetch(`${STORE_URL}/api/render_store/${name}`, {
@@ -70,6 +75,9 @@ async function storeCall(method: "GET" | "POST", name: "rules" | "journal" | "lo
   });
   let data: Json = null;
   try { data = await r.json(); } catch { /* non-JSON (HF error page) */ }
+  storeState.lastStatus = r.status;
+  if (r.ok) storeState.lastOkAt = Date.now();
+  else { storeState.lastFailAt = Date.now(); storeState.lastFail = `HTTP ${r.status} ${String(data?.msg ?? "").slice(0, 80)}`; }
   if (r.ok && data?.persistent === false && !storeWarnedVolatile) {
     storeWarnedVolatile = true;
     log("WARNING: HF /data mount nahi mila — store data ephemeral folder me ja raha hai (Space restart par udd jaayega)");
@@ -1022,6 +1030,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       ok: true, service: "my-engine-render", uptime_s: Math.round((Date.now() - stats.started) / 1000),
       trading_enabled: tradingEnabled(), rules_live: rules.filter((r) => r.status === "active" || r.status === "triggered").length,
       binance: { calls: stats.calls, errors: stats.errors, ban_s: Math.max(0, Math.ceil((banUntil - Date.now()) / 1000)) },
+      store: {
+        persistence: STORE_ON ? "hf_data" : "memory+tmp", configured: STORE_ON, rules_synced: rulesSynced,
+        last_ok_s_ago: storeState.lastOkAt ? Math.round((Date.now() - storeState.lastOkAt) / 1000) : null,
+        last_fail: storeState.lastFailAt ? `${Math.round((Date.now() - storeState.lastFailAt) / 1000)}s ago: ${storeState.lastFail}` : null,
+        journal_queue: journalQ.length, log_pending: rlogPending.length,
+      },
     }, true);
   }
   if (method === "GET" && (path.startsWith("/api/") || path.startsWith("/eapi/"))) return forwardPublic(url, res);
