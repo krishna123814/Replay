@@ -16,7 +16,7 @@
 //   POST /trade/order /trade/cancel /trade/cancel-all /trade/panic
 //   POST /rules/create  GET /rules/list  POST /rules/cancel
 //   POST /secure  (browser se AES-256-GCM encrypted; actions: ping, trade_data, trade_command[place_order,cancel_order,cancel_all,panic,close_position,add_rule,remove_rule])
-//   GET  /health /ping /  (no auth, keep-alive)   GET /snapshot (legacy option-chain snapshot)
+//   GET  /health /ping /  (no auth, keep-alive)
 //   GET  /api/v3/* , /eapi/v1/*  -> SIRF public whitelist (signed/private calls yahan se nahi jaate)
 
 import { createServer } from "node:http";
@@ -446,82 +446,6 @@ async function doPanic(): Promise<Json> {
   return { ok, cancel_ok: cancelOk, closes, notes };
 }
 
-// ───────────────────────── option mark WebSocket (/snapshot ke liye) ─────────────────────────
-type MarkRow = { mark: number; bid: number; ask: number; iv: number; delta: number; gamma: number; theta: number; vega: number; ts: number };
-const marks = new Map<string, MarkRow>();
-let spot: { price: number; ts: number } | null = null;
-let wsLive = false;
-let wsLastMsg = 0;
-let wsRef: Json = null;
-
-function startMarkWs(): void {
-  const WS = (globalThis as Json).WebSocket;
-  if (!WS) { log("global WebSocket nahi hai (Node 22+ chahiye) — /snapshot khaali rahega"); return; }
-  const connect = (): void => {
-    try {
-      const ws = new WS("wss://fstream.binance.com/market/ws/btcusdt@optionMarkPrice");
-      wsRef = ws;
-      ws.onopen = () => { wsLive = true; log("mark WS connected"); };
-      ws.onmessage = (ev: Json) => {
-        wsLastMsg = Date.now();
-        let j: Json;
-        try { j = JSON.parse(String(ev.data)); } catch { return; }
-        for (const m of (Array.isArray(j) ? j : [j]) as Json[]) {
-          if (!m || !m.s) continue;
-          marks.set(String(m.s), {
-            mark: num(m.mp), bid: num(m.bo), ask: num(m.ao), iv: num(m.vo ?? ((num(m.b) + num(m.a)) / 2)),
-            delta: num(m.d), gamma: num(m.g), theta: num(m.t), vega: num(m.v), ts: Date.now(),
-          });
-          if (num(m.i) > 0) spot = { price: num(m.i), ts: Date.now() };
-        }
-      };
-      const retry = (): void => { wsLive = false; setTimeout(connect, 3000); };
-      ws.onclose = retry;
-      ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
-    } catch (e) { log("mark WS start fail:", errMsg(e)); setTimeout(connect, 5000); }
-  };
-  connect();
-  setInterval(() => {   // half-open socket watchdog
-    if (wsLive && Date.now() - wsLastMsg > 60_000) { try { wsRef?.close(); } catch { /* ignore */ } }
-  }, 15_000);
-}
-
-function buildSnapshot(nStrikes: number, nExpiries: number): Json {
-  const now = Date.now();
-  const parsed: { sym: string; exp: string; strike: number }[] = [];
-  for (const sym of marks.keys()) {
-    const m = /^BTC-(\d{6})-(\d+)-[CP]$/.exec(sym);
-    if (m) parsed.push({ sym, exp: m[1], strike: Number(m[2]) });
-  }
-  let exps = [...new Set(parsed.map((p) => p.exp))].sort();
-  if (nExpiries > 0) exps = exps.slice(0, nExpiries);
-  const allowed = new Set<string>();
-  for (const e of exps) {
-    const strikes = [...new Set(parsed.filter((p) => p.exp === e).map((p) => p.strike))].sort((a, b) => a - b);
-    let pick = strikes;
-    if (nStrikes > 0 && spot && strikes.length) {
-      let idx = 0;
-      strikes.forEach((s, i) => { if (Math.abs(s - spot!.price) < Math.abs(strikes[idx] - spot!.price)) idx = i; });
-      pick = strikes.slice(Math.max(0, idx - nStrikes), idx + nStrikes + 1);
-    }
-    for (const p of parsed) if (p.exp === e && pick.includes(p.strike)) allowed.add(p.sym);
-  }
-  const rows: Json[] = [];
-  for (const sym of allowed) {
-    const m = marks.get(sym)!;
-    rows.push([sym, m.mark, m.bid, m.ask, m.iv, m.delta, m.gamma, m.theta, m.vega, now - m.ts]);
-  }
-  return {
-    keys: ["mark", "bid", "ask", "iv", "delta", "gamma", "theta", "vega", "mark_age_ms"], rows,
-    feeds: {
-      mark: { connected: wsLive, age_ms: wsLastMsg ? now - wsLastMsg : null },
-      trade: { connected: false, age_ms: null },
-      spot: { connected: wsLive && !!spot },
-    },
-    spot: spot?.price ?? null, spot_age_ms: spot ? now - spot.ts : null,
-  };
-}
-
 // ───────────────────────── HTTP helpers ─────────────────────────
 function send(res: ServerResponse, status: number, body: Json, cors = false): void {
   const headers: Record<string, string> = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
@@ -927,11 +851,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       ok: true, service: "my-engine-render", uptime_s: Math.round((Date.now() - stats.started) / 1000),
       trading_enabled: tradingEnabled(), rules_live: rules.filter((r) => r.status === "active" || r.status === "triggered").length,
       binance: { calls: stats.calls, errors: stats.errors, ban_s: Math.max(0, Math.ceil((banUntil - Date.now()) / 1000)) },
-      mark_ws: { connected: wsLive, symbols: marks.size },
     }, true);
-  }
-  if (path === "/snapshot" && method === "GET") {
-    return send(res, 200, buildSnapshot(num(url.searchParams.get("strikes")), num(url.searchParams.get("expiries"))), true);
   }
   if (method === "GET" && (path.startsWith("/api/") || path.startsWith("/eapi/"))) return forwardPublic(url, res);
 
@@ -1050,7 +970,6 @@ async function main(): Promise<void> {
   await syncTime();
   setInterval(() => { void syncTime(); }, 5 * 60_000);
   setInterval(() => { void engineTick(); }, 5000);
-  startMarkWs();
   server.listen(PORT, "0.0.0.0", () => log(`my-engine server up on :${PORT} | trading_enabled=${tradingEnabled()} | rules=${rules.length}`));
 }
 process.on("unhandledRejection", (e) => log("unhandledRejection:", errMsg(e)));
