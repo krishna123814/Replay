@@ -6,8 +6,10 @@
 //
 // ENV: PORT, OPT_API_KEY, OPT_SECRET_KEY, TRADE_TOKEN, TRADING_ENABLED (true/false),
 //      BREVO_API_KEY, ALERT_EMAIL_TO, [BREVO_SENDER_EMAIL], [MAX_ORDER_QTY], [MAX_ORDER_USDT],
-//      TEST_SUPABASE_URL + TEST_SUPABASE_KEY (rules restart-proof rakhne ke liye, optional)
+//      HF_STORE_URL + HF_STORE_TOKEN (rules / trade journal / render_log HF Space ke /data me — app.py ke /api/render_store/*;
+//        HF_STORE_URL = https://<owner>-<space>.hf.space ; HF_STORE_TOKEN = app.py wale RENDER_STORE_TOKEN jaisa hi), [HF_ACCESS_TOKEN: sirf Space private ho to]
 //      SECURE_PASSPHRASE (browser se encrypted POST /secure ke liye; min 12 chars)
+//      render_log / trade_journal / rules: ab Supabase nahi — HF Space persistent storage (/data/app_state/render/)
 //
 // Contract:
 //   Auth: header X-Trade-Token == TRADE_TOKEN  (sirf /trade/* aur /rules/* par)
@@ -23,6 +25,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createCipheriv, createDecipheriv, createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Json = any;
@@ -40,10 +43,10 @@ const MAX_ORDER_USDT = Number(env("MAX_ORDER_USDT", "5000")) || 5000;
 const BREVO_KEY = env("BREVO_API_KEY");
 const ALERT_TO = env("ALERT_EMAIL_TO");
 const ALERT_FROM = env("BREVO_SENDER_EMAIL") || ALERT_TO;
-const SB_URL = (env("TEST_SUPABASE_URL") || env("SUPABASE_URL")).replace(/\/+$/, "");
-const SB_KEY =
-  env("TEST_SUPABASE_KEY") || env("TEST_SUPABASE_SERVICE_KEY") ||
-  env("TEST_SUPABASE_ANON_KEY") || env("SUPABASE_KEY");
+const STORE_URL = env("HF_STORE_URL").replace(/\/+$/, "");
+const STORE_TOKEN = env("HF_STORE_TOKEN");
+const HF_ACCESS = env("HF_ACCESS_TOKEN");
+const STORE_ON = !!(STORE_URL && STORE_TOKEN);
 
 const EAPI = "https://eapi.binance.com";
 const SPOT_HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"];
@@ -54,6 +57,113 @@ const tradingEnabled = (): boolean => ["true", "1", "yes", "on"].includes(env("T
 const log = (...a: unknown[]): void => console.log(new Date().toISOString(), ...a);
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// ───────────────────────── HF persistent store (app.py /api/render_store/<rules|journal|log>) ─────────────────────────
+// Render ki apni disk ephemeral hai, isliye rules/journal/render_log HF Space ke /data (persistent volume) me jaate hain.
+// Auth: header X-Store-Token. Space private ho to HF_ACCESS_TOKEN (Authorization: Bearer hf_...) bhi lagta hai.
+let storeWarnedVolatile = false;
+async function storeCall(method: "GET" | "POST", name: "rules" | "journal" | "log", body?: Json, timeoutMs = 12000): Promise<BResult> {
+  const headers: Record<string, string> = { "x-store-token": STORE_TOKEN, "content-type": "application/json" };
+  if (HF_ACCESS) headers.authorization = `Bearer ${HF_ACCESS}`;
+  const r = await fetch(`${STORE_URL}/api/render_store/${name}`, {
+    method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs),
+  });
+  let data: Json = null;
+  try { data = await r.json(); } catch { /* non-JSON (HF error page) */ }
+  if (r.ok && data?.persistent === false && !storeWarnedVolatile) {
+    storeWarnedVolatile = true;
+    log("WARNING: HF /data mount nahi mila — store data ephemeral folder me ja raha hai (Space restart par udd jaayega)");
+  }
+  return { ok: r.ok && !!data && data.ok !== false, status: r.status, data };
+}
+// Same batch dobara bheje (retry) to app.py duplicate na likhe — batch ke content se stable id
+const batchId = (rows: Json[]): string => createHash("sha1").update(JSON.stringify(rows)).digest("hex").slice(0, 20);
+
+// ───────────────────────── render_log (HF store `log`, HOURLY batch write) ─────────────────────────
+// Kya chal raha hai Render par — teen raste: browser>render (/secure), render>binance (bn()), render (engine/boot/shutdown).
+//  • kind 'summary' : reads ki har-minute ki ek row (hop+src ke hisaab se: calls, fails, avg/max ms)
+//  • kind 'fail'    : har fail alag row (same minute + same error = ek row, `calls` me ginti)
+//  • kind 'order'   : order/cancel/panic/close/rule-exit
+//  • kind 'event'   : boot / shutdown / IP-ban start
+// Memory me jama hota hai, HF store me sirf har 1 ghante me (+ shutdown par) ek batch jaata hai. /tmp me backup file. Purani rows (30 din+) app.py hatata hai.
+// Kabhi throw nahi karta, kisi request ko block nahi karta. API key / signature / passphrase kabhi log nahi hote.
+const HOP_RB = "render>binance";
+const HOP_BR = "browser>render";
+const RLOG_FLUSH_MS = 60 * 60_000;
+const RLOG_KEEP_DAYS = 30;
+const RLOG_FILE = "/tmp/render_log.jsonl";
+type RAgg = { ts: string; kind: string; hop: string; src: string; endpoint: string | null; calls: number; fails: number; ms_sum: number; ms_max: number; status: number | null; msg: string | null };
+const rlogAgg = new Map<string, RAgg>();
+const rlogRows: Json[] = [];
+let rlogPending: Json[] = [];
+let rlogBusy = false;
+let rlogLastPrune = 0;
+const srcStore = new AsyncLocalStorage<string>();
+const minuteIso = (t = Date.now()): string => new Date(Math.floor(t / 60_000) * 60_000).toISOString();
+
+function srcOfPath(path: string): string {
+  const s = srcStore.getStore();
+  if (s) return s;
+  if (path.endsWith("/account")) return "balance";
+  if (path.endsWith("/position")) return "positions";
+  if (path.endsWith("/openOrders")) return "orders";
+  if (/\/(userTrades|historyOrders|bill|exerciseRecord)$/.test(path)) return "history";
+  if (/\/(order|allOpenOrders)$/.test(path)) return "order";
+  return "public";
+}
+function rlogCall(hop: string, src: string, endpoint: string, ms: number, ok: boolean, status: number | null, err?: unknown): void {
+  try {
+    const m = minuteIso();
+    const k = `s|${m}|${hop}|${src}`;
+    let a = rlogAgg.get(k);
+    if (!a) { a = { ts: m, kind: "summary", hop, src, endpoint: null, calls: 0, fails: 0, ms_sum: 0, ms_max: 0, status: null, msg: null }; rlogAgg.set(k, a); }
+    a.calls++; a.ms_sum += ms; if (ms > a.ms_max) a.ms_max = ms;
+    if (!ok) {
+      a.fails++;
+      const em = String(err ?? "").replace(/signature=[0-9a-f]+/gi, "signature=***").slice(0, 200);
+      const fk = `f|${m}|${hop}|${src}|${endpoint}|${status}|${em.slice(0, 80)}`;
+      let f = rlogAgg.get(fk);
+      if (!f) { f = { ts: m, kind: "fail", hop, src, endpoint, calls: 0, fails: 0, ms_sum: 0, ms_max: 0, status, msg: em }; rlogAgg.set(fk, f); }
+      f.calls++; f.fails++; f.ms_sum += ms; if (ms > f.ms_max) f.ms_max = ms;
+    }
+    if (rlogAgg.size > 4000) { const first = rlogAgg.keys().next().value; if (first !== undefined) rlogAgg.delete(first); }
+  } catch { /* logging kabhi kaam nahi bigadta */ }
+}
+function rlogRow(kind: "order" | "event", hop: string, src: string, endpoint: string | null, ok: boolean, msg: string, extra: Json = null): void {
+  try {
+    rlogRows.push({ ts: new Date().toISOString(), kind, hop, src, endpoint, calls: 1, fails: ok ? 0 : 1, avg_ms: null, max_ms: null, status: null, msg: String(msg).slice(0, 300), extra });
+    if (rlogRows.length > 2000) rlogRows.splice(0, rlogRows.length - 2000);
+  } catch { /* ignore */ }
+}
+function rlogFinalize(): Json[] {
+  const rows: Json[] = [];
+  for (const a of rlogAgg.values()) {
+    rows.push({ ts: a.ts, kind: a.kind, hop: a.hop, src: a.src, endpoint: a.endpoint, calls: a.calls, fails: a.fails,
+      avg_ms: a.calls ? Math.round(a.ms_sum / a.calls) : null, max_ms: Math.round(a.ms_max), status: a.status, msg: a.msg, extra: null });
+  }
+  rlogAgg.clear();
+  rows.push(...rlogRows.splice(0));
+  return rows;
+}
+async function rlogFlush(reason: string): Promise<void> {
+  const fresh = rlogFinalize();
+  if (fresh.length) {
+    try { appendFileSync(RLOG_FILE, fresh.map((r) => JSON.stringify(r)).join("\n") + "\n"); } catch { /* ephemeral disk */ }
+    rlogPending.push(...fresh);
+  }
+  if (!rlogPending.length || rlogBusy) return;
+  if (!STORE_ON) { rlogPending = []; return; }      // sirf /tmp file
+  rlogBusy = true;
+  try {
+    while (rlogPending.length) {
+      const batch = rlogPending.slice(0, 500);
+      const r = await storeCall("POST", "log", { batch_id: batchId(batch), rows: batch });
+      if (!r.ok) { log(`render_log store fail (${reason}):`, r.status, JSON.stringify(r.data ?? "").slice(0, 200)); break; }
+      rlogPending.splice(0, batch.length);
+    }
+  } catch (e) { log(`render_log store error (${reason}):`, errMsg(e)); }
+  finally { rlogBusy = false; if (rlogPending.length > 5000) rlogPending.splice(0, rlogPending.length - 5000); }
+}
 
 // ───────────────────────── Binance client ─────────────────────────
 let timeOffset = 0;
@@ -83,10 +193,13 @@ async function syncTime(): Promise<void> {
 }
 
 async function bn(method: string, path: string, params: Params = {}, signed = false): Promise<BResult> {
+  const src = srcOfPath(path);
   if (Date.now() < banUntil) {
+    rlogCall(HOP_RB, src, path, 0, false, 429, "IP-ban active — request bheji nahi");
     return { ok: false, status: 429, data: { code: -1003, msg: `Binance IP-ban active (~${Math.ceil((banUntil - Date.now()) / 1000)}s baaki) — request bheji nahi` } };
   }
   if (signed && (!API_KEY || !SECRET)) {
+    rlogCall(HOP_RB, src, path, 0, false, 500, "OPT_API_KEY / OPT_SECRET_KEY env set nahi");
     return { ok: false, status: 500, data: { code: 0, msg: "OPT_API_KEY / OPT_SECRET_KEY Render env mein set nahi hain" } };
   }
   let query = qs(params);
@@ -98,19 +211,27 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
   if (API_KEY) headers["X-MBX-APIKEY"] = API_KEY;
   stats.calls++;
   stats.lastCallAt = Date.now();
+  const t0 = Date.now();
   try {
     const r = await fetch(`${EAPI}${path}${query ? "?" + query : ""}`, { method, headers, signal: AbortSignal.timeout(15000) });
     const data = parseBinance(await r.text());
+    const ms = Date.now() - t0;
     if (!r.ok) {
       stats.errors++;
       log(`BINANCE ERR ${method} ${path} -> HTTP ${r.status} ${JSON.stringify(data).slice(0, 250)}`);
+      rlogCall(HOP_RB, src, path, ms, false, r.status, `${data?.code ?? ""} ${data?.msg ?? "HTTP " + r.status}`.trim());
+      const wasBanned = Date.now() < banUntil;
       const m = /banned until (\d+)/.exec(String(data?.msg ?? ""));
       if (m) banUntil = Number(m[1]);
       else if (r.status === 418 || r.status === 429) banUntil = Date.now() + 60_000;
+      if (!wasBanned && Date.now() < banUntil) rlogRow("event", HOP_RB, "ban", path, false, `IP-ban shuru (HTTP ${r.status}) ~${Math.ceil((banUntil - Date.now()) / 1000)}s`, { until: banUntil });
+    } else {
+      rlogCall(HOP_RB, src, path, ms, true, r.status);
     }
     return { ok: r.ok, status: r.status, data };
   } catch (e) {
     stats.errors++;
+    rlogCall(HOP_RB, src, path, Date.now() - t0, false, 504, errMsg(e));
     return { ok: false, status: 504, data: { code: 0, msg: `Binance request fail: ${errMsg(e)}` } };
   }
 }
@@ -211,7 +332,7 @@ function alertMail(subject: string, body: string, key = subject): void {
   }).catch((e) => log("brevo fail:", errMsg(e)));
 }
 
-// ───────────────────────── rules store (memory + Supabase + /tmp) ─────────────────────────
+// ───────────────────────── rules store (memory + HF store + /tmp) ─────────────────────────
 type RuleStatus = "active" | "triggered" | "done" | "error" | "cancelled";
 type Rule = {
   id: string; symbol: string; side: "LONG"; entry_qty: number; entry_price: number;
@@ -222,64 +343,99 @@ type Rule = {
 let rules: Rule[] = [];
 const LOCAL_FILE = "/tmp/opt_rules.json";
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-
-const sbHeaders = (): Record<string, string> => ({ apikey: SB_KEY, authorization: `Bearer ${SB_KEY}`, "content-type": "application/json" });
+// rulesSynced: HF store se ek baar load ho chuka (ya store band hai). Isse pehle store me save NAHI hota —
+// warna load fail hone par khaali list purane rules ko overwrite kar deti.
+let rulesSynced = !STORE_ON;
+let rulesDirty = false;      // store me bhejna baaki hai (fail hua ya abhi bhejna hai)
+let rulesSaving = false;
 
 async function saveRulesNow(): Promise<void> {
   const keep = rules.filter((r) => r.status === "active" || r.status === "triggered").concat(
     rules.filter((r) => r.status !== "active" && r.status !== "triggered").slice(-50));
   rules = keep;
   try { writeFileSync(LOCAL_FILE, JSON.stringify(rules)); } catch { /* ephemeral disk */ }
-  if (!SB_URL || !SB_KEY) return;
+  if (!STORE_ON || !rulesSynced) return;
+  rulesDirty = true;
+  if (rulesSaving) return;             // chalti hui save loop latest `rules` hi bhejegi
+  rulesSaving = true;
   try {
-    const r = await fetch(`${SB_URL}/rest/v1/trade_rules?on_conflict=id`, {
-      method: "POST", headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify({ id: "rules", data: rules }), signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) log("supabase save fail:", r.status, (await r.text()).slice(0, 200));
-  } catch (e) { log("supabase save error:", errMsg(e)); }
+    while (rulesDirty) {
+      rulesDirty = false;
+      try {
+        const r = await storeCall("POST", "rules", { data: rules });
+        if (!r.ok) { rulesDirty = true; log("store rules save fail:", r.status, JSON.stringify(r.data ?? "").slice(0, 200)); break; }
+      } catch (e) { rulesDirty = true; log("store rules save error:", errMsg(e)); break; }
+    }
+  } finally { rulesSaving = false; }
 }
 function persistSoon(): void {
   if (saveTimer) return;
   saveTimer = setTimeout(() => { saveTimer = null; void saveRulesNow(); }, 1000);
 }
-async function loadRules(): Promise<void> {
-  if (SB_URL && SB_KEY) {
+// Store down tha to 30s me dobara koshish (rules ka koi change /tmp me hai par store me nahi)
+setInterval(() => { if (rulesDirty && !rulesSaving) void saveRulesNow(); }, 30_000).unref();
+
+// Boot par store band mila: rules /tmp se chalte rahe, store wapas aate hi merge (store wale jo memory me nahi, jod do)
+async function rulesResync(): Promise<void> {
+  while (!rulesSynced) {
+    await sleep(15_000);
     try {
-      const r = await fetch(`${SB_URL}/rest/v1/trade_rules?id=eq.rules&select=data`, { headers: sbHeaders(), signal: AbortSignal.timeout(10000) });
-      if (r.ok) {
-        const j = (await r.json()) as Json;
-        if (Array.isArray(j) && j[0] && Array.isArray(j[0].data)) { rules = j[0].data as Rule[]; log("rules Supabase se load:", rules.length); return; }
-      } else log("supabase load fail:", r.status);
-    } catch (e) { log("supabase load error:", errMsg(e)); }
+      const r = await storeCall("GET", "rules");
+      if (!r.ok) continue;
+      const stored: Rule[] = Array.isArray(r.data?.data) ? (r.data.data as Rule[]) : [];
+      const have = new Set(rules.map((x) => x.id));
+      for (const x of stored) if (!have.has(x.id)) rules.push(x);
+      rulesSynced = true;
+      log(`rules HF store se late merge: store=${stored.length} total=${rules.length}`);
+      persistSoon();
+    } catch { /* agli baar */ }
+  }
+}
+async function loadRules(): Promise<void> {
+  if (STORE_ON) {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const r = await storeCall("GET", "rules", undefined, 8000);
+        if (r.ok) {
+          rulesSynced = true;
+          if (Array.isArray(r.data?.data)) { rules = r.data.data as Rule[]; log("rules HF store se load:", rules.length); return; }
+          log("HF store me abhi rules nahi — /tmp check hoga");
+          break;
+        }
+        log("store load fail:", r.status);
+      } catch (e) { log("store load error:", errMsg(e)); }
+      await sleep(1500 * (i + 1));
+    }
   }
   try { rules = JSON.parse(readFileSync(LOCAL_FILE, "utf8")) as Rule[]; log("rules local file se load:", rules.length); } catch { rules = []; }
+  if (STORE_ON && !rulesSynced) { log("WARNING: HF store abhi reachable nahi — rules /tmp se; store aate hi merge hoga"); void rulesResync(); }
 }
 
-// ───────────────────────── trade journal (Supabase `trade_journal` + /tmp fallback) ─────────────────────────
+// ───────────────────────── trade journal (HF store `journal` + /tmp fallback) ─────────────────────────
 // Har order/cancel/cancel-all/panic/close + rules-engine exit ki ek row. Kabhi throw nahi karta, order ko block nahi karta.
-// Supabase fail ho to memory queue mein rehta hai (max 500) aur har 30s retry hota hai; /tmp/opt_journal.jsonl hamesha likhi jaati hai.
+// HF store fail ho to memory queue mein rehta hai (max 500) aur har 30s retry hota hai; /tmp/opt_journal.jsonl hamesha likhi jaati hai.
 const JOURNAL_FILE = "/tmp/opt_journal.jsonl";
 const journalQ: Json[] = [];
 let journalBusy = false;
 async function journalFlush(): Promise<void> {
-  if (journalBusy || !journalQ.length || !SB_URL || !SB_KEY) return;
+  if (journalBusy || !journalQ.length || !STORE_ON) return;
   journalBusy = true;
   const batch = journalQ.slice(0, 100);
   try {
-    const r = await fetch(`${SB_URL}/rest/v1/trade_journal`, {
-      method: "POST", headers: { ...sbHeaders(), Prefer: "return=minimal" }, body: JSON.stringify(batch), signal: AbortSignal.timeout(10000),
-    });
+    const r = await storeCall("POST", "journal", { batch_id: batchId(batch), rows: batch });
     if (r.ok) journalQ.splice(0, batch.length);
-    else log("journal supabase fail:", r.status, (await r.text()).slice(0, 200));
-  } catch (e) { log("journal supabase error:", errMsg(e)); }
+    else log("journal store fail:", r.status, JSON.stringify(r.data ?? "").slice(0, 200));
+  } catch (e) { log("journal store error:", errMsg(e)); }
   finally { journalBusy = false; }
 }
 function journal(entry: Json): void {
   try {
     const row = { ts: new Date().toISOString(), ...entry };
+    rlogRow("order", entry?.source === "engine" ? "render" : HOP_BR, String(entry?.action ?? "order"), entry?.symbol ?? null, entry?.ok === true,
+      `${entry?.side ?? ""} ${entry?.qty ?? ""}${entry?.price != null ? " @ " + entry.price : ""} ${entry?.msg ?? ""}`.trim(),
+      { source: entry?.source ?? null, symbol: entry?.symbol ?? null, side: entry?.side ?? null, qty: entry?.qty ?? null, price: entry?.price ?? null, client_order_id: entry?.client_order_id ?? null });
     try { appendFileSync(JOURNAL_FILE, JSON.stringify(row) + "\n"); } catch { /* ephemeral disk */ }
-    if (SB_URL && SB_KEY) {
+    if (STORE_ON) {
       journalQ.push(row);
       if (journalQ.length > 500) journalQ.splice(0, journalQ.length - 500);
       void journalFlush();
@@ -395,6 +551,9 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
 }
 
 async function engineTick(): Promise<void> {
+  return srcStore.run("engine", engineTickInner);
+}
+async function engineTickInner(): Promise<void> {
   if (engineBusy) return;
   const live = rules.filter((r) => r.status === "active" || r.status === "triggered");
   if (!live.length) return;
@@ -500,13 +659,15 @@ async function forwardPublic(url: URL, res: ServerResponse): Promise<void> {
   if (PUBLIC_SPOT.test(path)) {
     let last: { status: number; body: string } = { status: 502, body: '{"msg":"spot unreachable"}' };
     for (const host of SPOT_HOSTS) {
+      const t0 = Date.now();
       try {
         stats.calls++;
         const r = await fetch(`${host}${path}${url.search}`, { signal: AbortSignal.timeout(15000) });
         const body = await r.text();
+        rlogCall(HOP_RB, "public", "spot" + path, Date.now() - t0, r.ok, r.status, r.ok ? "" : body.slice(0, 120));
         if (r.ok) { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" }); return void res.end(body); }
         last = { status: r.status, body };
-      } catch (e) { last = { status: 504, body: JSON.stringify({ msg: errMsg(e) }) }; }
+      } catch (e) { rlogCall(HOP_RB, "public", "spot" + path, Date.now() - t0, false, 504, errMsg(e)); last = { status: 504, body: JSON.stringify({ msg: errMsg(e) }) }; }
     }
     res.writeHead(last.status, { "content-type": "application/json", "access-control-allow-origin": "*" });
     return void res.end(last.body);
@@ -810,7 +971,7 @@ async function secureHandler(req: IncomingMessage, res: ServerResponse): Promise
   const ip = clientIp(req);
   const now = Date.now();
   const f = authFails.get(ip);
-  if (f && f.reset > now && f.n >= 10) return send(res, 429, { ok: false, msg: "bahut galat attempts — 1 min baad try karo" }, true);
+  if (f && f.reset > now && f.n >= 10) { rlogCall(HOP_BR, "auth", "/secure", 0, false, 429, "bahut galat attempts — rate limit"); return send(res, 429, { ok: false, msg: "bahut galat attempts — 1 min baad try karo" }, true); }
   const t0 = Date.now();
   let plain: Json;
   try {
@@ -819,20 +980,30 @@ async function secureHandler(req: IncomingMessage, res: ServerResponse): Promise
     const cur = f && f.reset > now ? f : { n: 0, reset: now + 60_000 };
     cur.n++; authFails.set(ip, cur);
     log(`SECURE FAIL ip=${ip} n=${cur.n}`);
+    rlogCall(HOP_BR, "auth", "/secure", 0, false, 401, "decrypt fail (galat passphrase / kharab body)");
     return send(res, 401, { ok: false, msg: "decrypt fail" }, true);
   }
   const id = String(plain?.id ?? "");
   const ts = Number(plain?.ts);
   if (!/^[\w-]{8,64}$/.test(id) || !Number.isFinite(ts) || Math.abs(now - ts) > SECURE_SKEW_MS) {
+    rlogCall(HOP_BR, "auth", "/secure", 0, false, 400, "ts/id galat ya device clock off");
     return send(res, 400, secEncrypt({ id, ok: false, msg: "ts/id galat ya device clock ±30s se zyada off hai" }), true);
   }
   for (const [k, t] of seenIds) if (now - t > 2 * SECURE_SKEW_MS) seenIds.delete(k);
+  if (seenIds.has(id)) { rlogCall(HOP_BR, "auth", "/secure", 0, false, 409, "replay — id pehle aa chuka hai"); }
   if (seenIds.has(id)) return send(res, 409, secEncrypt({ id, ok: false, msg: "replay — id pehle aa chuka hai" }), true);
   seenIds.set(id, now);
   let out: Json;
-  try { out = await secDispatch(String(plain.action ?? ""), plain.params ?? {}); }
+  const actName = String(plain.action ?? "");
+  const isCmd = actName === "trade_command";
+  try { out = isCmd ? await srcStore.run("order", () => secDispatch(actName, plain.params ?? {})) : await secDispatch(actName, plain.params ?? {}); }
   catch (e) { out = { ok: false, msg: errMsg(e) }; }
   out.render_ms = Date.now() - t0;
+  {
+    const pa = plain.params ?? {};
+    const lsrc = actName === "trade_data" ? `trade_data:${String(pa?.tab ?? "positions")}` : isCmd ? `trade_command:${String(pa?.action ?? "")}` : actName || "?";
+    rlogCall(HOP_BR, lsrc, "/secure", out.render_ms, out.ok !== false, out.ok !== false ? 200 : 400, out.msg);
+  }
   send(res, 200, secEncrypt({ id, ...out }), true);
 }
 
@@ -874,7 +1045,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return send(res, 200, {
           ok: true, tradingEnabled: tradingEnabled(), keysSet: !!(API_KEY && SECRET),
           limits: { maxOrderQty: MAX_ORDER_QTY, maxOrderUsdt: MAX_ORDER_USDT },
-          persistence: SB_URL && SB_KEY ? "supabase" : "memory+tmp", timeOffsetMs: timeOffset,
+          persistence: STORE_ON ? "hf_data" : "memory+tmp", rulesSynced, timeOffsetMs: timeOffset,
         });
       case "/trade/account": return sendB(res, await bn("GET", "/eapi/v1/account", {}, true));
       case "/trade/positions": return sendB(res, await bn("GET", "/eapi/v1/position", sym ? { symbol: sym } : {}, true));
@@ -970,7 +1141,18 @@ async function main(): Promise<void> {
   await syncTime();
   setInterval(() => { void syncTime(); }, 5 * 60_000);
   setInterval(() => { void engineTick(); }, 5000);
+  setInterval(() => { void rlogFlush("hourly"); }, RLOG_FLUSH_MS);
+  rlogRow("event", "render", "boot", null, true, `Render start | trading_enabled=${tradingEnabled()} | rules=${rules.length}`, { rules: rules.length });
   server.listen(PORT, "0.0.0.0", () => log(`my-engine server up on :${PORT} | trading_enabled=${tradingEnabled()} | rules=${rules.length}`));
+}
+let shuttingDown = false;
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    rlogRow("event", "render", "shutdown", null, true, `Render band ho raha hai (${sig}) | uptime ${Math.round((Date.now() - stats.started) / 1000)}s`);
+    void Promise.race([Promise.all([rlogFlush("shutdown"), journalFlush(), rulesDirty ? saveRulesNow() : Promise.resolve()]), sleep(4000)]).finally(() => process.exit(0));
+  });
 }
 process.on("unhandledRejection", (e) => log("unhandledRejection:", errMsg(e)));
 process.on("uncaughtException", (e) => log("uncaughtException:", errMsg(e)));
