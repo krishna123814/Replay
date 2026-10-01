@@ -1,6 +1,6 @@
 // main.ts — My-engine Render server (Binance OPTIONS trade + rules engine + public relay)
 //
-// Runtime: Node 22+ (ya Bun / Deno 2). Sirf built-in modules + global fetch/WebSocket —
+// Runtime: Node 22+ (ya Bun / Deno 2). Sirf built-in modules + global fetch —
 // koi npm dependency nahi. TypeScript-only runtime features (enum etc.) use nahi kiye,
 // isliye `node --experimental-strip-types main.ts`, `tsx main.ts`, `bun main.ts` sab chalte hain.
 //
@@ -25,6 +25,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createCipheriv, createDecipheriv, createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -357,24 +358,47 @@ let rulesSynced = !STORE_ON;
 let rulesDirty = false;      // store me bhejna baaki hai (fail hua ya abhi bhejna hai)
 let rulesSaving = false;
 
-async function saveRulesNow(): Promise<void> {
+// (2026-10-01) EGRESS BACHAT — pehle engineTick har 5s persistSoon() se rules ki poori list HF ko POST karta tha, chahe kuch
+// badla ho ya nahi. Ab signature (rules ka content) badle tabhi POST hota hai:
+//   • kuch bhi badla nahi            -> koi POST nahi (aur /tmp file bhi dobara nahi likhi jaati)
+//   • sirf trailing `high` badla     -> max 30s me ek POST (RULES_HIGH_SAVE_MS)
+//   • status/SL/TP/note/exit badla   -> turant (1s debounce)
+// Shutdown par saveRulesNow(true) throttle ignore karke aakhri state save kar deta hai.
+const RULES_HIGH_SAVE_MS = 30_000;
+const rulesSig = (withHigh: boolean): string => JSON.stringify(withHigh ? rules : rules.map((r) => ({ ...r, high: 0 })));
+let rulesFileSig = "";       // /tmp file me jo last likha
+let rulesSavedFull = "";     // HF store me jo last gaya (high samet)
+let rulesSavedNoHigh = "";   // wahi, high ke bina
+let rulesSavedAt = 0;
+let rulesInflightSig = "";   // abhi POST ho raha hai
+
+async function saveRulesNow(force = false): Promise<void> {
   const keep = rules.filter((r) => r.status === "active" || r.status === "triggered").concat(
     rules.filter((r) => r.status !== "active" && r.status !== "triggered").slice(-50));
   rules = keep;
-  try { writeFileSync(LOCAL_FILE, JSON.stringify(rules)); } catch { /* ephemeral disk */ }
+  const sigFull = rulesSig(true);
+  if (sigFull !== rulesFileSig) {
+    try { writeFileSync(LOCAL_FILE, JSON.stringify(rules)); rulesFileSig = sigFull; } catch { /* ephemeral disk */ }
+  }
   if (!STORE_ON || !rulesSynced) return;
+  if (sigFull === rulesSavedFull) { rulesDirty = false; return; }       // store me pehle se yahi hai
+  if (sigFull === rulesInflightSig) return;                             // yahi abhi ja raha hai
+  if (!force && rulesSig(false) === rulesSavedNoHigh && Date.now() - rulesSavedAt < RULES_HIGH_SAVE_MS) return;   // sirf trailing high badla
   rulesDirty = true;
   if (rulesSaving) return;             // chalti hui save loop latest `rules` hi bhejegi
   rulesSaving = true;
   try {
     while (rulesDirty) {
       rulesDirty = false;
+      const snapFull = rulesSig(true), snapNo = rulesSig(false);
+      rulesInflightSig = snapFull;
       try {
         const r = await storeCall("POST", "rules", { data: rules });
         if (!r.ok) { rulesDirty = true; log("store rules save fail:", r.status, JSON.stringify(r.data ?? "").slice(0, 200)); break; }
+        rulesSavedFull = snapFull; rulesSavedNoHigh = snapNo; rulesSavedAt = Date.now();
       } catch (e) { rulesDirty = true; log("store rules save error:", errMsg(e)); break; }
     }
-  } finally { rulesSaving = false; }
+  } finally { rulesSaving = false; rulesInflightSig = ""; }
 }
 function persistSoon(): void {
   if (saveTimer) return;
@@ -406,7 +430,11 @@ async function loadRules(): Promise<void> {
         const r = await storeCall("GET", "rules", undefined, 8000);
         if (r.ok) {
           rulesSynced = true;
-          if (Array.isArray(r.data?.data)) { rules = r.data.data as Rule[]; log("rules HF store se load:", rules.length); return; }
+          if (Array.isArray(r.data?.data)) {
+            rules = r.data.data as Rule[]; log("rules HF store se load:", rules.length);
+            rulesSavedFull = rulesSig(true); rulesSavedNoHigh = rulesSig(false); rulesSavedAt = Date.now(); rulesFileSig = rulesSavedFull;   // store me yahi hai — dobara POST nahi
+            return;
+          }
           log("HF store me abhi rules nahi — /tmp check hoga");
           break;
         }
@@ -741,11 +769,18 @@ function clientIp(req: IncomingMessage): string {
   const xf = String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim();
   return xf || req.socket.remoteAddress || "?";
 }
-function secEncrypt(obj: Json): { n: string; c: string } {
+// (2026-10-01) EGRESS BACHAT — gz=true (browser ne plaintext me gz:1 bheja) aur JSON >1KB ho to pehle gzip, phir encrypt
+// (encrypt ke baad data compress nahi ho sakta, isliye gzip encrypt se PEHLE). Envelope me z:1 -> browser DecompressionStream.
+function secEncrypt(obj: Json, gz = false): { n: string; c: string; z?: 1 } {
   const iv = randomBytes(12);
   const ci = createCipheriv("aes-256-gcm", secureKey as Buffer, iv);
-  const ct = Buffer.concat([ci.update(JSON.stringify(obj), "utf8"), ci.final(), ci.getAuthTag()]);
-  return { n: iv.toString("base64"), c: ct.toString("base64") };
+  let data = Buffer.from(JSON.stringify(obj), "utf8");
+  let z = false;
+  if (gz && data.length > 1024) { data = gzipSync(data); z = true; }
+  const ct = Buffer.concat([ci.update(data), ci.final(), ci.getAuthTag()]);
+  const out: { n: string; c: string; z?: 1 } = { n: iv.toString("base64"), c: ct.toString("base64") };
+  if (z) out.z = 1;
+  return out;
 }
 function secDecrypt(env_: Json): Json {
   const iv = Buffer.from(String(env_?.n ?? ""), "base64");
@@ -787,10 +822,20 @@ async function ordersHistoryAll(limit: number): Promise<BResult> {
   return { ok: true, status: 200, data: out.slice(0, limit) };
 }
 
-async function secTradeData(tab: string): Promise<Json> {
+// (2026-10-01) EGRESS BACHAT — browser har 3-5s poll karta hai, isliye poori payload har baar nahi bhejte:
+//   • params.h  = browser ke paas jo last hash hai. Data (positions/orders/balance + rules) same ho to msgs khaali + unchanged:true.
+//   • params.ht = browser ke paas history ka ts. History (fills/ohist/bill/exer — sabse bhaari) sirf tab jaati hai jab server ne
+//                 use refresh kiya ho (ts badla) — yaani max 60s me ek baar, har 3s me nahi. Tab pehli baar kholne par browser h/ht
+//                 khaali bhejta hai, to full data jaata hai.
+// Hash me sirf asli data hai; _ts/_age_s/_lat/ts jaise har-call badalne wale fields hash se bahar.
+const hashOf = (v: Json): string => createHash("sha1").update(JSON.stringify(v)).digest("hex").slice(0, 16);
+async function secTradeData(tab: string, prm: Json = {}): Promise<Json> {
   const msgs: Json = {};
   const nowS = Date.now() / 1000;
+  const prevHash = String(prm?.h ?? "");
+  const prevHistTs = Number(prm?.ht ?? 0);
   const aged = (e: Json): Json => (e && e._ts ? { ...e, _age_s: Math.round(Math.max(0, nowS - e._ts) * 100) / 100 } : e);
+  let hash = "";
   if (tab === "balance") {
     const m = await refreshed(cMeta, 20_000, async () => {
       const t0 = Date.now();
@@ -810,16 +855,22 @@ async function secTradeData(tab: string): Promise<Json> {
       } else meta.error = r.data?.msg ?? "account fetch fail";
       return meta;
     });
-    msgs.binance_meta = aged(m);
+    const { ts: _t1, _ts: _t2, _lat: _t3, ...stable } = (m ?? {}) as Json;
+    hash = hashOf(stable);
+    if (hash !== prevHash) msgs.binance_meta = aged(m);
   } else if (tab === "positions" || tab === "orders") {
     const c = await refreshed(cPos, 8_000, async () => {
       const t0 = Date.now();
       const [p, o] = await Promise.all([bn("GET", "/eapi/v1/position", {}, true), bn("GET", "/eapi/v1/openOrders", {}, true)]);
       return { pos: wrap(p, t0), ord: wrap(o, t0), rules: { ok: true, data: rules.map(ruleView) } };
     });
-    msgs.trade_positions = aged(c.pos);
-    msgs.trade_orders = aged(c.ord);
-    msgs.trade_rules = { ok: true, data: rules.map(ruleView) };   // rules memory mein hain — hamesha fresh
+    const rv = rules.map(ruleView);   // rules memory mein hain — hamesha fresh
+    hash = hashOf([c.pos?.ok, c.pos?.data, c.ord?.ok, c.ord?.data, rv]);
+    if (hash !== prevHash) {
+      msgs.trade_positions = aged(c.pos);
+      msgs.trade_orders = aged(c.ord);
+      msgs.trade_rules = { ok: true, data: rv };
+    }
     if (tab === "orders") {
       const h = await refreshed(cHist, 60_000, async () => {
         const t0 = Date.now();
@@ -831,10 +882,12 @@ async function secTradeData(tab: string): Promise<Json> {
         ]);
         return { fills: { ok: fills.ok, data: fills.data }, ohist: wrap(ohist, t0), bill: { ok: bill.ok, data: bill.data }, exer: { ok: exer.ok, data: exer.data }, ts: Date.now() };
       });
-      msgs.trade_history = { ...h, _lat: h.ohist?._lat, _age_s: Math.round(Math.max(0, nowS - (h.ohist?._ts ?? nowS)) * 100) / 100 };
+      if (Number(h?.ts ?? 0) !== prevHistTs) {
+        msgs.trade_history = { ...h, _lat: h.ohist?._lat, _age_s: Math.round(Math.max(0, nowS - (h.ohist?._ts ?? nowS)) * 100) / 100 };
+      }
     }
   }
-  return { ok: true, tab, msgs, ts: Date.now() };
+  return { ok: true, tab, hash, unchanged: hash === prevHash && !Object.keys(msgs).length, msgs, ts: Date.now() };
 }
 
 
@@ -967,7 +1020,7 @@ async function secDispatch(action: string, params: Json): Promise<Json> {
     case "trade_data": {
       const tab = String(params?.tab ?? "positions");
       if (!["positions", "orders", "balance"].includes(tab)) return { ok: false, msg: "tab galat" };
-      return secTradeData(tab);
+      return secTradeData(tab, params);
     }
     case "trade_command": return secTradeCommand(params);
     default: return { ok: false, msg: `action '${action}' allowed nahi hai` };
@@ -1012,7 +1065,7 @@ async function secureHandler(req: IncomingMessage, res: ServerResponse): Promise
     const lsrc = actName === "trade_data" ? `trade_data:${String(pa?.tab ?? "positions")}` : isCmd ? `trade_command:${String(pa?.action ?? "")}` : actName || "?";
     rlogCall(HOP_BR, lsrc, "/secure", out.render_ms, out.ok !== false, out.ok !== false ? 200 : 400, out.msg);
   }
-  send(res, 200, secEncrypt({ id, ...out }), true);
+  send(res, 200, secEncrypt({ id, ...out }, plain.gz === 1), true);
 }
 
 // ───────────────────────── router ─────────────────────────
@@ -1165,7 +1218,7 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
     if (shuttingDown) return;
     shuttingDown = true;
     rlogRow("event", "render", "shutdown", null, true, `Render band ho raha hai (${sig}) | uptime ${Math.round((Date.now() - stats.started) / 1000)}s`);
-    void Promise.race([Promise.all([rlogFlush("shutdown"), journalFlush(), rulesDirty ? saveRulesNow() : Promise.resolve()]), sleep(4000)]).finally(() => process.exit(0));
+    void Promise.race([Promise.all([rlogFlush("shutdown"), journalFlush(), saveRulesNow(true)]), sleep(4000)]).finally(() => process.exit(0));
   });
 }
 process.on("unhandledRejection", (e) => log("unhandledRejection:", errMsg(e)));
