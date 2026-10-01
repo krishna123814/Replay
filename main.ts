@@ -9,7 +9,7 @@
 //      HF_STORE_URL + HF_STORE_TOKEN (rules / trade journal / render_log HF Space ke /data me — app.py ke /api/render_store/*;
 //        HF_STORE_URL = https://<owner>-<space>.hf.space ; HF_STORE_TOKEN = app.py wale RENDER_STORE_TOKEN jaisa hi), [HF_ACCESS_TOKEN: sirf Space private ho to]
 //      SECURE_PASSPHRASE (browser se encrypted POST /secure ke liye; min 12 chars)
-//      render_log / trade_journal / rules: ab Supabase nahi — HF Space persistent storage (/data/app_state/render/)
+//      render_log / trade_journal / rules: HF Space persistent storage (/data/app_state/render/) par
 //
 // Contract:
 //   Auth: header X-Trade-Token == TRADE_TOKEN  (sirf /trade/* aur /rules/* par)
