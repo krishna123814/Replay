@@ -5,7 +5,7 @@
 // isliye `node --experimental-strip-types main.ts`, `tsx main.ts`, `bun main.ts` sab chalte hain.
 //
 // ENV: PORT, OPT_API_KEY, OPT_SECRET_KEY, TRADE_TOKEN, TRADING_ENABLED (true/false),
-//      TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, [MAX_ORDER_QTY], [MAX_ORDER_USDT],
+//      BREVO_API_KEY, ALERT_EMAIL_TO, [BREVO_SENDER_EMAIL], [MAX_ORDER_QTY], [MAX_ORDER_USDT],
 //      HF_STORE_URL + HF_STORE_TOKEN (rules / trade journal / render_log HF Space ke /data me — app.py ke /api/render_store/*;
 //        HF_STORE_URL = https://<owner>-<space>.hf.space ; HF_STORE_TOKEN = app.py wale RENDER_STORE_TOKEN jaisa hi), [HF_ACCESS_TOKEN: sirf Space private ho to]
 //      SECURE_PASSPHRASE (browser se encrypted POST /secure ke liye; min 12 chars)
@@ -41,8 +41,9 @@ const SECRET = env("OPT_SECRET_KEY");
 const TRADE_TOKEN = env("TRADE_TOKEN");
 const MAX_ORDER_QTY = Number(env("MAX_ORDER_QTY", "10")) || 10;
 const MAX_ORDER_USDT = Number(env("MAX_ORDER_USDT", "5000")) || 5000;
-const TG_TOKEN = env("TELEGRAM_BOT_TOKEN");
-const TG_CHAT = env("TELEGRAM_CHAT_ID");
+const BREVO_KEY = env("BREVO_API_KEY");
+const ALERT_TO = env("ALERT_EMAIL_TO");
+const ALERT_FROM = env("BREVO_SENDER_EMAIL") || ALERT_TO;
 const STORE_URL = env("HF_STORE_URL").replace(/\/+$/, "");
 const STORE_TOKEN = env("HF_STORE_TOKEN");
 const HF_ACCESS = env("HF_ACCESS_TOKEN");
@@ -321,20 +322,23 @@ async function loadPositions(): Promise<{ ok: boolean; map: Map<string, Pos>; er
   return { ok: true, map, err: "" };
 }
 
-// ───────────────────────── alerts (Telegram) ─────────────────────────
+// ───────────────────────── alerts (Brevo email) ─────────────────────────
 const lastAlert = new Map<string, number>();
-function alertNotify(subject: string, body: string, key = subject): void {
+function alertMail(subject: string, body: string, key = subject): void {
   log("ALERT:", subject, "|", body);
-  if (!TG_TOKEN || !TG_CHAT) return;
+  if (!BREVO_KEY || !ALERT_TO) return;
   const now = Date.now();
   if (now - (lastAlert.get(key) ?? 0) < 30_000) return;
   lastAlert.set(key, now);
-  fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+  fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: TG_CHAT, text: `[My-engine] ${subject}\n${body}`.slice(0, 4000) }),
+    headers: { "api-key": BREVO_KEY, "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      sender: { name: "My-engine", email: ALERT_FROM }, to: [{ email: ALERT_TO }],
+      subject: `[My-engine] ${subject}`, htmlContent: `<pre style="font-family:monospace">${body.replace(/[<>&]/g, "")}</pre>`,
+    }),
     signal: AbortSignal.timeout(10000),
-  }).catch((e) => log("telegram fail:", errMsg(e).split(TG_TOKEN).join("***")));
+  }).catch((e) => log("brevo fail:", errMsg(e)));
 }
 
 // ───────────────────────── rules store (memory + HF store + /tmp) ─────────────────────────
@@ -534,7 +538,7 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
   if (r.status === "triggered") {
     if (!p || p.qty <= 0) {
       r.status = "done"; r.note = "position band ho gayi (exit fill)"; r.error = null;
-      alertNotify(`Rule DONE ${r.symbol}`, `${r.trigger_reason}\nPosition band ho gayi.`, `done-${r.id}`);
+      alertMail(`Rule DONE ${r.symbol}`, `${r.trigger_reason}\nPosition band ho gayi.`, `done-${r.id}`);
       for (const o of rules) {
         if (o !== r && o.symbol === r.symbol && o.status === "active") { o.status = "done"; o.note = "position dusre rule se band hui"; }
       }
@@ -543,7 +547,7 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
     if (Date.now() - r.exit_at >= EXIT_RETRY_MS) {
       if (r.exit_tries >= EXIT_MAX_TRIES) {
         r.status = "error"; r.error = r.error || "exit 6 baar try kiya, position abhi bhi open — MANUAL close karo";
-        alertNotify(`Rule ERROR ${r.symbol}`, `${r.error}\nPosition abhi bhi open hai!`, `err-${r.id}`);
+        alertMail(`Rule ERROR ${r.symbol}`, `${r.error}\nPosition abhi bhi open hai!`, `err-${r.id}`);
         return;
       }
       await sendExit(r, p.qty);
@@ -578,7 +582,7 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
 
   r.status = "triggered"; r.trigger_reason = `${r.symbol}: ${reason}`; r.exit_tries = 0; r.exit_at = 0;
   exiting.add(r.symbol);
-  alertNotify(`Rule TRIGGERED ${r.symbol}`, r.trigger_reason, `trg-${r.id}`);
+  alertMail(`Rule TRIGGERED ${r.symbol}`, r.trigger_reason, `trg-${r.id}`);
   await sendExit(r, p.qty);
 }
 
@@ -598,7 +602,7 @@ async function engineTickInner(): Promise<void> {
       try { await handleRule(r, pos.map, exiting); }
       catch (e) {
         r.status = "error"; r.error = errMsg(e);
-        alertNotify(`Rule ERROR ${r.symbol}`, r.error, `err-${r.id}`);
+        alertMail(`Rule ERROR ${r.symbol}`, r.error, `err-${r.id}`);
       }
     }
     persistSoon();
@@ -633,7 +637,7 @@ async function doPanic(): Promise<Json> {
     } catch (e) { closes.push({ symbol: p.symbol, ok: false, msg: errMsg(e) }); }
   }
   const ok = cancelOk && pos.ok && closes.every((c) => c.ok);
-  alertNotify(`PANIC ${ok ? "OK" : "FAILED"}`, `cancel_ok=${cancelOk}\ncloses=${JSON.stringify(closes)}\nnotes=${notes.join("; ")}`, "panic");
+  alertMail(`PANIC ${ok ? "OK" : "FAILED"}`, `cancel_ok=${cancelOk}\ncloses=${JSON.stringify(closes)}\nnotes=${notes.join("; ")}`, "panic");
   return { ok, cancel_ok: cancelOk, closes, notes };
 }
 
