@@ -5,7 +5,7 @@
 // isliye `node --experimental-strip-types main.ts`, `tsx main.ts`, `bun main.ts` sab chalte hain.
 //
 // ENV: PORT, OPT_API_KEY, OPT_SECRET_KEY, TRADE_TOKEN, TRADING_ENABLED (true/false),
-//      BREVO_API_KEY, ALERT_EMAIL_TO, [BREVO_SENDER_EMAIL], [MAX_ORDER_QTY], [MAX_ORDER_USDT],
+//      BREVO_API_KEY, ALERT_EMAIL_TO, [BREVO_SENDER_EMAIL], [TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  (ya TELEGRAM_RELAY_URL + RELAY_SECRET)], [MAX_ORDER_QTY], [MAX_ORDER_USDT],
 //      HF_STORE_URL + HF_STORE_TOKEN (rules / trade journal / render_log HF Space ke /data me — app.py ke /api/render_store/*;
 //        HF_STORE_URL = https://<owner>-<space>.hf.space ; HF_STORE_TOKEN = app.py wale RENDER_STORE_TOKEN jaisa hi), [HF_ACCESS_TOKEN: sirf Space private ho to]
 //      SECURE_PASSPHRASE (browser se encrypted POST /secure ke liye; min 12 chars)
@@ -48,6 +48,12 @@ const STORE_URL = env("HF_STORE_URL").replace(/\/+$/, "");
 const STORE_TOKEN = env("HF_STORE_TOKEN");
 const HF_ACCESS = env("HF_ACCESS_TOKEN");
 const STORE_ON = !!(STORE_URL && STORE_TOKEN);
+// Telegram alerts (optional) — direct bot (TOKEN + CHAT_ID) ya app.py wala relay (RELAY_URL + RELAY_SECRET)
+const TG_TOKEN = env("TELEGRAM_BOT_TOKEN");
+const TG_CHAT = env("TELEGRAM_CHAT_ID");
+const TG_RELAY_URL = env("TELEGRAM_RELAY_URL").replace(/\/+$/, "");
+const TG_RELAY_SECRET = env("RELAY_SECRET");
+const TG_ON = !!((TG_RELAY_URL && TG_RELAY_SECRET) || (TG_TOKEN && TG_CHAT));
 
 const EAPI = "https://eapi.binance.com";
 const SPOT_HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"];
@@ -177,7 +183,12 @@ async function rlogFlush(reason: string): Promise<void> {
 // ───────────────────────── Binance client ─────────────────────────
 let timeOffset = 0;
 let banUntil = 0;
-const stats = { calls: 0, errors: 0, started: Date.now(), lastCallAt: 0 };
+type LastErr = { at: number; src: string; path: string; status: number; code: unknown; msg: string };
+const stats = { calls: 0, errors: 0, started: Date.now(), lastCallAt: 0, lastErr: null as LastErr | null };
+const noteErr = (src: string, path: string, status: number, code: unknown, msg: unknown): void => {
+  stats.lastErr = { at: Date.now(), src, path, status, code: code ?? null, msg: String(msg ?? "").slice(0, 300) };
+};
+const recentCmds: Json[] = [];   // /health me dikhne ke liye: last 10 order/cancel/close/rule events
 
 function qs(params: Params): string {
   const u = new URLSearchParams();
@@ -205,10 +216,12 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
   const src = srcOfPath(path);
   if (Date.now() < banUntil) {
     rlogCall(HOP_RB, src, path, 0, false, 429, "IP-ban active — request bheji nahi");
+    noteErr(src, path, 429, -1003, `Binance IP-ban active (~${Math.ceil((banUntil - Date.now()) / 1000)}s baaki)`);
     return { ok: false, status: 429, data: { code: -1003, msg: `Binance IP-ban active (~${Math.ceil((banUntil - Date.now()) / 1000)}s baaki) — request bheji nahi` } };
   }
   if (signed && (!API_KEY || !SECRET)) {
     rlogCall(HOP_RB, src, path, 0, false, 500, "OPT_API_KEY / OPT_SECRET_KEY env set nahi");
+    noteErr(src, path, 500, 0, "OPT_API_KEY / OPT_SECRET_KEY Render env mein set nahi hain");
     return { ok: false, status: 500, data: { code: 0, msg: "OPT_API_KEY / OPT_SECRET_KEY Render env mein set nahi hain" } };
   }
   let query = qs(params);
@@ -227,6 +240,7 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
     const ms = Date.now() - t0;
     if (!r.ok) {
       stats.errors++;
+      noteErr(src, path, r.status, data?.code, data?.msg ?? `HTTP ${r.status}`);
       log(`BINANCE ERR ${method} ${path} -> HTTP ${r.status} ${JSON.stringify(data).slice(0, 250)}`);
       rlogCall(HOP_RB, src, path, ms, false, r.status, `${data?.code ?? ""} ${data?.msg ?? "HTTP " + r.status}`.trim());
       const wasBanned = Date.now() < banUntil;
@@ -240,6 +254,7 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
     return { ok: r.ok, status: r.status, data };
   } catch (e) {
     stats.errors++;
+    noteErr(src, path, 504, 0, `Binance request fail: ${errMsg(e)}`);
     rlogCall(HOP_RB, src, path, Date.now() - t0, false, 504, errMsg(e));
     return { ok: false, status: 504, data: { code: 0, msg: `Binance request fail: ${errMsg(e)}` } };
   }
@@ -324,8 +339,42 @@ async function loadPositions(): Promise<{ ok: boolean; map: Map<string, Pos>; er
 
 // ───────────────────────── alerts (Brevo email) ─────────────────────────
 const lastAlert = new Map<string, number>();
+const lastTg = new Map<string, number>();
+const tgMask = (t: string): string => (TG_TOKEN ? t.split(TG_TOKEN).join("***") : t);
+async function tgSend(text: string): Promise<void> {
+  if (!TG_ON) return;
+  const body = text.slice(0, 3900);
+  for (let i = 0; i < 2; i++) {   // ek retry (network blip / 429)
+    try {
+      const r = (TG_RELAY_URL && TG_RELAY_SECRET)
+        ? await fetch(`${TG_RELAY_URL}/send`, { method: "POST", headers: { "content-type": "application/json", "X-Relay-Secret": TG_RELAY_SECRET }, body: JSON.stringify({ text: body }), signal: AbortSignal.timeout(25000) })
+        : await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chat_id: TG_CHAT, text: body, disable_web_page_preview: true }), signal: AbortSignal.timeout(10000) });
+      if (r.ok) return;
+      log("telegram fail: HTTP", r.status, tgMask((await r.text().catch(() => "")).slice(0, 150)));
+      if (r.status >= 400 && r.status < 500 && r.status !== 429) return;   // token/chat galat — retry bekaar
+    } catch (e) { log("telegram error:", tgMask(errMsg(e))); }
+    await sleep(1500);
+  }
+}
+const istNow = (): string => new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: true });
+// har trade (order / cancel / close / rule add-remove) ka pass-fail Telegram par. Engine ke rule-exit ke alerts alertMail se jaate hain.
+const TG_TRADE_LABEL: Record<string, string> = { place_order: "ORDER", cancel_order: "CANCEL", cancel_all: "CANCEL ALL", close_position: "CLOSE", add_rule: "RULE ADD", remove_rule: "RULE REMOVE" };
+function tgTradeAlert(e: Json): void {
+  try {
+    const a = String(e?.action ?? "");
+    if (!TG_ON || e?.source === "engine" || !TG_TRADE_LABEL[a]) return;
+    const ok = e.ok === true;
+    const line2 = [e.side, e.qty != null ? `qty ${e.qty}` : "", e.price != null ? `@ ${e.price}` : "", e.reduce_only ? "(reduceOnly)" : ""].filter(Boolean).join(" ");
+    const msg = String(e.msg ?? "").trim();
+    void tgSend([`${ok ? "✅" : "❌"} ${TG_TRADE_LABEL[a]} ${ok ? "OK" : "FAILED"}`, e.symbol ? String(e.symbol) : "", line2, msg ? (ok ? msg : `Wajah: ${msg}`) : "", `🕐 ${istNow()} IST`].filter(Boolean).join("\n"));
+  } catch (err) { log("tgTradeAlert error:", errMsg(err)); }
+}
 function alertMail(subject: string, body: string, key = subject): void {
   log("ALERT:", subject, "|", body);
+  if (TG_ON) {   // Telegram: har key par 60s me ek (error repeat par spam na ho)
+    const tn = Date.now();
+    if (tn - (lastTg.get(key) ?? 0) >= 60_000) { lastTg.set(key, tn); void tgSend(`🔔 ${subject}\n${body}\n🕐 ${istNow()} IST`); }
+  }
   if (!BREVO_KEY || !ALERT_TO) return;
   const now = Date.now();
   if (now - (lastAlert.get(key) ?? 0) < 30_000) return;
@@ -467,6 +516,10 @@ async function journalFlush(): Promise<void> {
 function journal(entry: Json): void {
   try {
     const row = { ts: new Date().toISOString(), ...entry };
+    tgTradeAlert(entry);
+    recentCmds.push({ at: Date.now(), source: entry?.source ?? null, action: entry?.action ?? null, ok: entry?.ok === true, msg: String(entry?.msg ?? "").slice(0, 300),
+      symbol: entry?.symbol ?? null, side: entry?.side ?? null, qty: entry?.qty ?? null, price: entry?.price ?? null });
+    if (recentCmds.length > 10) recentCmds.splice(0, recentCmds.length - 10);
     rlogRow("order", entry?.source === "engine" ? "render" : HOP_BR, String(entry?.action ?? "order"), entry?.symbol ?? null, entry?.ok === true,
       `${entry?.side ?? ""} ${entry?.qty ?? ""}${entry?.price != null ? " @ " + entry.price : ""} ${entry?.msg ?? ""}`.trim(),
       { source: entry?.source ?? null, symbol: entry?.symbol ?? null, side: entry?.side ?? null, qty: entry?.qty ?? null, price: entry?.price ?? null, client_order_id: entry?.client_order_id ?? null });
@@ -669,12 +722,14 @@ function readBody(req: IncomingMessage): Promise<Json> {
     req.on("error", reject);
   });
 }
-function authOk(req: IncomingMessage): boolean {
-  if (!TRADE_TOKEN) return false;
-  const got = String(req.headers["x-trade-token"] ?? "");
+function tokenOk(got: string): boolean {
+  if (!TRADE_TOKEN || !got) return false;
   const a = createHash("sha256").update(got).digest();
   const b = createHash("sha256").update(TRADE_TOKEN).digest();
   return timingSafeEqual(a, b);
+}
+function authOk(req: IncomingMessage): boolean {
+  return tokenOk(String(req.headers["x-trade-token"] ?? ""));
 }
 const posNum = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
 
@@ -1082,8 +1137,14 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (path === "/" || path === "/health" || path === "/ping") {
     return send(res, 200, {
       ok: true, service: "my-engine-render", uptime_s: Math.round((Date.now() - stats.started) / 1000),
-      trading_enabled: tradingEnabled(), rules_live: rules.filter((r) => r.status === "active" || r.status === "triggered").length,
+      trading_enabled: tradingEnabled(), telegram: TG_ON, rules_live: rules.filter((r) => r.status === "active" || r.status === "triggered").length,
       binance: { calls: stats.calls, errors: stats.errors, ban_s: Math.max(0, Math.ceil((banUntil - Date.now()) / 1000)) },
+      // Aakhri Binance error (kab, kaunsa endpoint, asli wajah) — bina symbol/qty/price ke, isliye public
+      last_error: stats.lastErr ? { ago_s: Math.round((Date.now() - stats.lastErr.at) / 1000), where: stats.lastErr.src, path: stats.lastErr.path, status: stats.lastErr.status, code: stats.lastErr.code, msg: stats.lastErr.msg } : null,
+      // Aakhri trade command ka pass/fail (sirf action + ok + message)
+      last_trade: (() => { const t = recentCmds[recentCmds.length - 1]; return t ? { ago_s: Math.round((Date.now() - t.at) / 1000), action: t.action, ok: t.ok, msg: t.msg } : null; })(),
+      // Poori detail (symbol/side/qty/price ke saath last 10) sirf /health?t=<TRADE_TOKEN> par
+      ...(tokenOk(url.searchParams.get("t") ?? "") ? { recent_trades: recentCmds.slice().reverse().map((t) => ({ ...t, ago_s: Math.round((Date.now() - t.at) / 1000), at: undefined })) } : {}),
       store: {
         persistence: STORE_ON ? "hf_data" : "memory+tmp", configured: STORE_ON, rules_synced: rulesSynced,
         last_ok_s_ago: storeState.lastOkAt ? Math.round((Date.now() - storeState.lastOkAt) / 1000) : null,
