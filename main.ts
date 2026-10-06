@@ -185,6 +185,12 @@ let timeOffset = 0;
 let banUntil = 0;
 type LastErr = { at: number; src: string; path: string; status: number; code: unknown; msg: string };
 const stats = { calls: 0, errors: 0, started: Date.now(), lastCallAt: 0, lastErr: null as LastErr | null };
+let posFailStreak = 0;     // engine ko lagatar kitni baar positions nahi mili
+let rulesFailStreak = 0;   // rules HF store me lagatar kitni baar save fail hue
+const envMissing = (): string[] => [
+  !TRADE_TOKEN && "TRADE_TOKEN", !API_KEY && "OPT_API_KEY", !SECRET && "OPT_SECRET_KEY",
+  !secureKey && "SECURE_PASSPHRASE", !STORE_ON && "HF_STORE_URL/HF_STORE_TOKEN",
+].filter(Boolean) as string[];
 const noteErr = (src: string, path: string, status: number, code: unknown, msg: unknown): void => {
   stats.lastErr = { at: Date.now(), src, path, status, code: code ?? null, msg: String(msg ?? "").slice(0, 300) };
 };
@@ -247,7 +253,10 @@ async function bn(method: string, path: string, params: Params = {}, signed = fa
       const m = /banned until (\d+)/.exec(String(data?.msg ?? ""));
       if (m) banUntil = Number(m[1]);
       else if (r.status === 418 || r.status === 429) banUntil = Date.now() + 60_000;
-      if (!wasBanned && Date.now() < banUntil) rlogRow("event", HOP_RB, "ban", path, false, `IP-ban shuru (HTTP ${r.status}) ~${Math.ceil((banUntil - Date.now()) / 1000)}s`, { until: banUntil });
+      if (!wasBanned && Date.now() < banUntil) {
+        rlogRow("event", HOP_RB, "ban", path, false, `IP-ban shuru (HTTP ${r.status}) ~${Math.ceil((banUntil - Date.now()) / 1000)}s`, { until: banUntil });
+        alertMail("Binance IP-BAN", `HTTP ${r.status} ${path}\nBan ~${Math.ceil((banUntil - Date.now()) / 1000)}s. Is dauran SL/Target exit orders bhi nahi ja payenge — open positions dekho!`, "binance-ban");
+      }
     } else {
       rlogCall(HOP_RB, src, path, ms, true, r.status);
     }
@@ -362,23 +371,26 @@ const TG_TRADE_LABEL: Record<string, string> = { place_order: "ORDER", cancel_or
 function tgTradeAlert(e: Json): void {
   try {
     const a = String(e?.action ?? "");
-    if (!TG_ON || e?.source === "engine" || !TG_TRADE_LABEL[a]) return;
+    if (e?.source === "engine" || !TG_TRADE_LABEL[a]) return;
+    if (!TG_ON && !(BREVO_KEY && ALERT_TO)) return;   // koi channel configured nahi
     const ok = e.ok === true;
     const line2 = [e.side, e.qty != null ? `qty ${e.qty}` : "", e.price != null ? `@ ${e.price}` : "", e.reduce_only ? "(reduceOnly)" : ""].filter(Boolean).join(" ");
     const msg = String(e.msg ?? "").trim();
-    void tgSend([`${ok ? "✅" : "❌"} ${TG_TRADE_LABEL[a]} ${ok ? "OK" : "FAILED"}`, e.symbol ? String(e.symbol) : "", line2, msg ? (ok ? msg : `Wajah: ${msg}`) : "", `🕐 ${istNow()} IST`].filter(Boolean).join("\n"));
+    const head = `${ok ? "✅" : "❌"} ${TG_TRADE_LABEL[a]} ${ok ? "OK" : "FAILED"}`;
+    const lines = [head, e.symbol ? String(e.symbol) : "", line2, msg ? (ok ? msg : `Wajah: ${msg}`) : "", `🕐 ${istNow()} IST`].filter(Boolean);
+    if (TG_ON) void tgSend(lines.join("\n"));
+    emailSend(`${head}${e.symbol ? " " + String(e.symbol) : ""}`, lines.join("\n"));   // trade result par rate-limit nahi, har result ki email
   } catch (err) { log("tgTradeAlert error:", errMsg(err)); }
 }
-function alertMail(subject: string, body: string, key = subject): void {
-  log("ALERT:", subject, "|", body);
-  if (TG_ON) {   // Telegram: har key par 60s me ek (error repeat par spam na ho)
-    const tn = Date.now();
-    if (tn - (lastTg.get(key) ?? 0) >= 60_000) { lastTg.set(key, tn); void tgSend(`🔔 ${subject}\n${body}\n🕐 ${istNow()} IST`); }
-  }
+const ALERT_GAP_MS = 60_000;   // Telegram aur email dono: ek key par 60s me ek (spam na ho)
+// Email (Brevo). key diya to usi key par ALERT_GAP_MS ke andar dobara nahi jaata; key nahi to har baar jaata hai (trade result).
+function emailSend(subject: string, body: string, key?: string): void {
   if (!BREVO_KEY || !ALERT_TO) return;
-  const now = Date.now();
-  if (now - (lastAlert.get(key) ?? 0) < 30_000) return;
-  lastAlert.set(key, now);
+  if (key) {
+    const now = Date.now();
+    if (now - (lastAlert.get(key) ?? 0) < ALERT_GAP_MS) return;
+    lastAlert.set(key, now);
+  }
   fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
     headers: { "api-key": BREVO_KEY, "content-type": "application/json", accept: "application/json" },
@@ -388,6 +400,14 @@ function alertMail(subject: string, body: string, key = subject): void {
     }),
     signal: AbortSignal.timeout(10000),
   }).catch((e) => log("brevo fail:", errMsg(e)));
+}
+function alertMail(subject: string, body: string, key = subject): void {
+  log("ALERT:", subject, "|", body);
+  if (TG_ON) {   // Telegram: har key par 60s me ek (error repeat par spam na ho)
+    const tn = Date.now();
+    if (tn - (lastTg.get(key) ?? 0) >= ALERT_GAP_MS) { lastTg.set(key, tn); void tgSend(`🔔 ${subject}\n${body}\n🕐 ${istNow()} IST`); }
+  }
+  emailSend(subject, body, key);
 }
 
 // ───────────────────────── rules store (memory + HF store + /tmp) ─────────────────────────
@@ -443,11 +463,22 @@ async function saveRulesNow(force = false): Promise<void> {
       rulesInflightSig = snapFull;
       try {
         const r = await storeCall("POST", "rules", { data: rules });
-        if (!r.ok) { rulesDirty = true; log("store rules save fail:", r.status, JSON.stringify(r.data ?? "").slice(0, 200)); break; }
+        if (!r.ok) { rulesDirty = true; log("store rules save fail:", r.status, JSON.stringify(r.data ?? "").slice(0, 200)); rulesSaveFailed(`HTTP ${r.status} ${JSON.stringify(r.data ?? "").slice(0, 120)}`); break; }
         rulesSavedFull = snapFull; rulesSavedNoHigh = snapNo; rulesSavedAt = Date.now();
-      } catch (e) { rulesDirty = true; log("store rules save error:", errMsg(e)); break; }
+        rulesSaveOk();
+      } catch (e) { rulesDirty = true; log("store rules save error:", errMsg(e)); rulesSaveFailed(errMsg(e)); break; }
     }
   } finally { rulesSaving = false; rulesInflightSig = ""; }
+}
+function rulesSaveFailed(why: string): void {
+  rulesFailStreak++;
+  if (rulesFailStreak === 3 || rulesFailStreak % 60 === 0) {
+    alertMail("Rules SAVE FAIL (HF store)", `${rulesFailStreak} baar lagatar save fail: ${why}\nRender restart hua to SL/Target rules chale jayenge!`, "rules-save");
+  }
+}
+function rulesSaveOk(): void {
+  if (rulesFailStreak >= 3) alertMail("Rules save wapas theek", `${rulesFailStreak} fail ke baad HF store me save ho gaye.`, "rules-save-ok");
+  rulesFailStreak = 0;
 }
 function persistSoon(): void {
   if (saveTimer) return;
@@ -569,7 +600,7 @@ async function sendExit(r: Rule, qty: number): Promise<void> {
   const tick = (await tickOf(r.symbol)) ?? 5;
   const q = await quoteOf(r.symbol);
   const price = closePrice("SELL", q, tick);
-  if (price <= 0) { r.error = "bid/mark price nahi mila — exit retry hoga"; return; }
+  if (price <= 0) { r.error = "bid/mark price nahi mila — exit retry hoga"; alertMail(`Exit price nahi mila ${r.symbol}`, `try ${r.exit_tries}: bid/mark price nahi mila, exit order nahi gaya.\nPosition open hai!`, `exitfail-${r.id}`); return; }
   const cid = "rx" + createHash("sha1").update(`${r.id}|${Date.now()}`).digest("hex").slice(0, 20);
   const res = await placeLimit(r.symbol, "SELL", qty, price, true, cid);
   journal({ source: "engine", action: "rule_exit", symbol: r.symbol, side: "SELL", qty, price, reduce_only: true, ok: res.ok,
@@ -581,6 +612,7 @@ async function sendExit(r: Rule, qty: number): Promise<void> {
     r.note = `exit bheja: SELL ${fmt(qty)} @ ${fmt(price)} (try ${r.exit_tries})`;
   } else {
     r.error = `exit order fail: ${String(res.data?.msg ?? JSON.stringify(res.data)).slice(0, 200)}`;
+    alertMail(`Exit order REJECT ${r.symbol}`, `try ${r.exit_tries}/${EXIT_MAX_TRIES}: ${r.error}\nPosition abhi open hai!`, `exitfail-${r.id}`);
   }
   log(`[rule ${r.id}] ${r.note || r.error}`);
 }
@@ -649,7 +681,16 @@ async function engineTickInner(): Promise<void> {
   engineBusy = true;
   try {
     const pos = await loadPositions();
-    if (!pos.ok) { log("engine: positions nahi mili, is tick skip:", pos.err); return; }
+    if (!pos.ok) {
+      log("engine: positions nahi mili, is tick skip:", pos.err);
+      posFailStreak++;
+      if (posFailStreak === 3 || (posFailStreak > 3 && posFailStreak % 24 === 0)) {
+        alertMail("Engine: positions nahi mil rahi", `${posFailStreak} baar lagatar fail (${live.length} live rule): ${String(pos.err).slice(0, 150)}\nSL/Target abhi kaam nahi kar rahe!`, "pos-fail");
+      }
+      return;
+    }
+    if (posFailStreak >= 3) alertMail("Engine positions wapas aa gayi", `${posFailStreak} fail ke baad theek. SL/Target phir se chalu.`, "pos-ok");
+    posFailStreak = 0;
     const exiting = new Set(live.filter((r) => r.status === "triggered").map((r) => r.symbol));
     for (const r of live) {
       try { await handleRule(r, pos.map, exiting); }
@@ -1096,6 +1137,7 @@ async function secureHandler(req: IncomingMessage, res: ServerResponse): Promise
   } catch {
     const cur = f && f.reset > now ? f : { n: 0, reset: now + 60_000 };
     cur.n++; authFails.set(ip, cur);
+    if (cur.n === 5) alertMail("/secure galat attempts", `ip=${ip}: 1 min me ${cur.n} decrypt fail (galat passphrase ya koi guess kar raha hai). 10 par IP block ho jayega.`, "secure-brute");
     log(`SECURE FAIL ip=${ip} n=${cur.n}`);
     rlogCall(HOP_BR, "auth", "/secure", 0, false, 401, "decrypt fail (galat passphrase / kharab body)");
     return send(res, 401, { ok: false, msg: "decrypt fail" }, true);
@@ -1137,6 +1179,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (path === "/" || path === "/health" || path === "/ping") {
     return send(res, 200, {
       ok: true, service: "my-engine-render", uptime_s: Math.round((Date.now() - stats.started) / 1000),
+      commit: env("RENDER_GIT_COMMIT").slice(0, 7), env_missing: envMissing(), engine: { pos_fail_streak: posFailStreak, rules_save_fail_streak: rulesFailStreak },
       trading_enabled: tradingEnabled(), telegram: TG_ON, rules_live: rules.filter((r) => r.status === "active" || r.status === "triggered").length,
       binance: { calls: stats.calls, errors: stats.errors, ban_s: Math.max(0, Math.ceil((banUntil - Date.now()) / 1000)) },
       // Aakhri Binance error (kab, kaunsa endpoint, asli wajah) — bina symbol/qty/price ke, isliye public
@@ -1266,6 +1309,7 @@ const server = createServer((req, res) => {
 async function main(): Promise<void> {
   if (!TRADE_TOKEN) log("WARNING: TRADE_TOKEN set nahi — /trade/* aur /rules/* sab 401 denge");
   if (!API_KEY || !SECRET) log("WARNING: OPT_API_KEY / OPT_SECRET_KEY set nahi");
+  { const miss = envMissing(); if (miss.length) alertMail("Render env missing", `Ye env vars set nahi hain: ${miss.join(", ")}\nIn ke bina trading/rules/secure kaam adhoora rahega.`, "env-missing"); }
   await loadRules();
   await syncTime();
   setInterval(() => { void syncTime(); }, 5 * 60_000);
@@ -1283,6 +1327,6 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
     void Promise.race([Promise.all([rlogFlush("shutdown"), journalFlush(), saveRulesNow(true)]), sleep(4000)]).finally(() => process.exit(0));
   });
 }
-process.on("unhandledRejection", (e) => log("unhandledRejection:", errMsg(e)));
-process.on("uncaughtException", (e) => log("uncaughtException:", errMsg(e)));
+process.on("unhandledRejection", (e) => { log("unhandledRejection:", errMsg(e)); try { alertMail("Render unhandledRejection", errMsg(e).slice(0, 400), "unhandled-rej"); } catch { /* ignore */ } });
+process.on("uncaughtException", (e) => { log("uncaughtException:", errMsg(e)); try { alertMail("Render uncaughtException", errMsg(e).slice(0, 400), "uncaught-exc"); } catch { /* ignore */ } });
 void main();
