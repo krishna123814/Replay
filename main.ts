@@ -113,7 +113,7 @@ const minuteIso = (t = Date.now()): string => new Date(Math.floor(t / 60_000) * 
 function srcOfPath(path: string): string {
   const s = srcStore.getStore();
   if (s) return s;
-  if (path.endsWith("/account")) return "balance";
+  if (/\/(account|marginAccount)$/.test(path)) return "balance";
   if (path.endsWith("/position")) return "positions";
   if (path.endsWith("/openOrders")) return "orders";
   if (/\/(userTrades|historyOrders|bill|exerciseRecord)$/.test(path)) return "history";
@@ -839,10 +839,11 @@ async function secTradeData(tab: string, prm: Json = {}): Promise<Json> {
   if (tab === "balance") {
     const m = await refreshed(cMeta, 20_000, async () => {
       const t0 = Date.now();
-      const r = await bn("GET", "/eapi/v1/account", {}, true);
+      const r = await bn("GET", "/eapi/v1/marginAccount", {}, true);
       const meta: Json = { usdt_balance: null, ts: Date.now() / 1000, _lat: { render_ms: Date.now() - t0 }, _ts: Date.now() / 1000, source: "options" };
       if (r.ok && r.data) {
         const a = (r.data.asset || []).find((x: Json) => x.asset === "USDT");
+        if (!a) meta.error = `Binance ne USDT entry nahi bheji (asset list: ${JSON.stringify((r.data.asset || []).map((x: Json) => x.asset))}; keys: ${Object.keys(r.data).join(",")}) — Options wallet me USDT transfer kiya hai?`;
         if (a) {
           const f = (k: string): number | null => { const n = Number(a[k]); return Number.isFinite(n) ? n : null; };
           Object.assign(meta, {
@@ -1114,7 +1115,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           limits: { maxOrderQty: MAX_ORDER_QTY, maxOrderUsdt: MAX_ORDER_USDT },
           persistence: STORE_ON ? "hf_data" : "memory+tmp", rulesSynced, timeOffsetMs: timeOffset,
         });
-      case "/trade/account": return sendB(res, await bn("GET", "/eapi/v1/account", {}, true));
+      case "/trade/account": return sendB(res, await bn("GET", "/eapi/v1/marginAccount", {}, true));
       case "/trade/positions": return sendB(res, await bn("GET", "/eapi/v1/position", sym ? { symbol: sym } : {}, true));
       case "/trade/orders/open": return sendB(res, await bn("GET", "/eapi/v1/openOrders", sym ? { symbol: sym } : {}, true));
       case "/trade/ticksize": {
