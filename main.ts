@@ -4,6 +4,10 @@
 // koi npm dependency nahi. TypeScript-only runtime features (enum etc.) use nahi kiye,
 // isliye `node --experimental-strip-types main.ts`, `tsx main.ts`, `bun main.ts` sab chalte hain.
 //
+// (2026-10-06) SL/Target/Trailing hardening: bid=0 par mark fallback, trailing high fill se, level validation (order se pehle),
+//   2-tick confirmation, exit kabhi give-up nahi (escalating price), unprotected-position alert, engine-gap alert, self keep-alive,
+//   MAX_ORDER_* sirf BUY par, SELL ke saath rule nahi. Naye env (optional): RENDER_EXTERNAL_URL/SELF_URL, UNPROTECTED_ALERT.
+//
 // ENV: PORT, OPT_API_KEY, OPT_SECRET_KEY, TRADE_TOKEN, TRADING_ENABLED (true/false),
 //      BREVO_API_KEY, ALERT_EMAIL_TO, [BREVO_SENDER_EMAIL], [TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID  (ya TELEGRAM_RELAY_URL + RELAY_SECRET)], [MAX_ORDER_QTY], [MAX_ORDER_USDT],
 //      HF_STORE_URL + HF_STORE_TOKEN (rules / trade journal / render_log HF Space ke /data me — app.py ke /api/render_store/*;
@@ -11,6 +15,8 @@
 //      SECURE_PASSPHRASE (browser se encrypted POST /secure ke liye; min 12 chars)
 //      render_log / trade_journal / rules: HF Space persistent storage (/data/app_state/render/) par
 //
+// LOG: is service ka render_log HF par "log" store me jaata hai (render_log.jsonl). Har row me service:"replay".
+//      Dusri service (telegram-aib3, telegram_relay.js) ka log ALAG hai ("log_telegram"). Guide: RENDER_LOG_GUIDE.md
 // Contract:
 //   Auth: header X-Trade-Token == TRADE_TOKEN  (sirf /trade/* aur /rules/* par)
 //   GET  /trade/status /trade/account /trade/positions /trade/orders/open[?symbol]
@@ -104,7 +110,7 @@ const batchId = (rows: Json[]): string => createHash("sha1").update(JSON.stringi
 // Kabhi throw nahi karta, kisi request ko block nahi karta. API key / signature / passphrase kabhi log nahi hote.
 const HOP_RB = "render>binance";
 const HOP_BR = "browser>render";
-const RLOG_FLUSH_MS = 60 * 60_000;
+const RLOG_FLUSH_MS = 2 * 60_000;   // har 2 minute me HF store par (pehle 60 min)
 const RLOG_KEEP_DAYS = 30;
 const RLOG_FILE = "/tmp/render_log.jsonl";
 type RAgg = { ts: string; kind: string; hop: string; src: string; endpoint: string | null; calls: number; fails: number; ms_sum: number; ms_max: number; status: number | null; msg: string | null };
@@ -150,18 +156,20 @@ function rlogRow(kind: "order" | "event", hop: string, src: string, endpoint: st
     if (rlogRows.length > 2000) rlogRows.splice(0, rlogRows.length - 2000);
   } catch { /* ignore */ }
 }
-function rlogFinalize(): Json[] {
+function rlogFinalize(all = true): Json[] {
   const rows: Json[] = [];
-  for (const a of rlogAgg.values()) {
-    rows.push({ ts: a.ts, kind: a.kind, hop: a.hop, src: a.src, endpoint: a.endpoint, calls: a.calls, fails: a.fails,
+  const cur = minuteIso();   // chalu minute ki rows tab tak rokte hain jab tak minute poora na ho (ek minute ki 2 rows na banein)
+  for (const [k, a] of rlogAgg) {
+    if (!all && a.ts >= cur) continue;
+    rows.push({ service: "replay", ts: a.ts, kind: a.kind, hop: a.hop, src: a.src, endpoint: a.endpoint, calls: a.calls, fails: a.fails,
       avg_ms: a.calls ? Math.round(a.ms_sum / a.calls) : null, max_ms: Math.round(a.ms_max), status: a.status, msg: a.msg, extra: null });
+    rlogAgg.delete(k);
   }
-  rlogAgg.clear();
-  rows.push(...rlogRows.splice(0));
+  for (const r of rlogRows.splice(0)) rows.push({ service: "replay", ...r });
   return rows;
 }
 async function rlogFlush(reason: string): Promise<void> {
-  const fresh = rlogFinalize();
+  const fresh = rlogFinalize(reason === "shutdown");
   if (fresh.length) {
     try { appendFileSync(RLOG_FILE, fresh.map((r) => JSON.stringify(r)).join("\n") + "\n"); } catch { /* ephemeral disk */ }
     rlogPending.push(...fresh);
@@ -311,9 +319,12 @@ async function quoteOf(symbol: string): Promise<Quote> {
 }
 
 // Position band karne ka aggressive limit price (Binance ke price-limit band ke andar)
-function closePrice(side: "SELL" | "BUY", q: Quote, tick: number): number {
+function closePrice(side: "SELL" | "BUY", q: Quote, tick: number, tries = 0): number {
   if (side === "SELL") {
-    const base = q.bid > 0 ? q.bid * 0.97 : q.mark > 0 ? q.mark * 0.7 : 0;
+    // tries 1-2: bid-3% | 3-5: bid-10% | 6+: Binance ka allowed sabse neeche price (kisi bhi bid par fill)
+    if (tries >= 6 && q.low > 0) return Math.max(ceilTick(q.low, tick), tick);
+    const f = tries >= 3 ? 0.90 : 0.97;
+    const base = q.bid > 0 ? q.bid * f : q.mark > 0 ? q.mark * (tries >= 3 ? 0.5 : 0.7) : 0;
     if (base <= 0) return 0;
     let p = floorTick(base, tick);
     if (q.low > 0 && p < q.low) p = ceilTick(q.low, tick);
@@ -417,6 +428,10 @@ type Rule = {
   sl: number | null; tp: number | null; trail: number | null;
   status: RuleStatus; created_at: number; high: number; note: string; error: string | null;
   exit_order_id: string | null; exit_at: number; exit_tries: number; trigger_reason: string | null;
+  hi_set?: boolean;   // trailing `high` fill ke baad ke asli bid se set ho chuka? (false = abhi set karna hai)
+  hs?: number;        // `high` ki last saved value — bada move ho to turant save (restart par stale high na rahe)
+  breach?: number;    // SL/trailing lagatar kitni baar touch hua (confirmation)
+  nq?: number;        // lagatar kitni baar bid+mark dono nahi mile
 };
 let rules: Rule[] = [];
 const LOCAL_FILE = "/tmp/opt_rules.json";
@@ -582,8 +597,37 @@ const ruleView = (r: Rule): Json => ({ ...r, sl_price: r.sl, target_price: r.tp,
 // Har 5s: positions ek baar + active rules ke symbols ka bid. Data na mile to KABHI trigger nahi.
 // Exit = reduceOnly aggressive SELL limit; 20s mein position band na ho to cancel + naya price, max 6 try.
 const EXIT_RETRY_MS = 20_000;
-const EXIT_MAX_TRIES = 6;
+const EXIT_MAX_TRIES = 6;          // itne try ke baad alert + aur aggressive price, par rule band NAHI hota
+const SLOW_RETRY_MS = 60_000;      // EXIT_MAX_TRIES ke baad har 60s me retry
+const EXIT_HARD_MAX = 60;          // ~1 ghanta lagatar fail ho tab hi rule 'error' (manual close)
+const BREACH_CONFIRM = 2;          // SL/Trailing ko itne lagatar tick (5s) touch hona chahiye (blip se bachne ke liye)
 let engineBusy = false;
+let lastTickAt = 0;
+let busySince = 0;
+let lastUnprotCheck = 0;
+const lastUnprot = new Map<string, number>();
+const excCount = new Map<string, number>();
+const UNPROT_ALERT = !["false", "0", "no", "off"].includes(env("UNPROTECTED_ALERT", "true").toLowerCase());
+const UNPROT_GAP_MS = 30 * 60_000;
+const CONF_NOTE = "SL/Trailing touch hua — confirm ke liye 1 tick wait";
+const getQuote = (qc: Map<string, Promise<Quote>>, symbol: string): Promise<Quote> => {
+  let pr = qc.get(symbol);
+  if (!pr) { pr = quoteOf(symbol); qc.set(symbol, pr); }   // ek tick me ek symbol ka quote ek hi baar (API weight bachat)
+  return pr;
+};
+
+// Long position hai par koi live rule nahi — (restart / rule save fail / rule 'error') — alert
+function checkUnprotected(pos: Map<string, Pos>, live: Rule[]): void {
+  if (!UNPROT_ALERT) return;
+  const now = Date.now();
+  for (const p of pos.values()) {
+    if (p.short) continue;
+    if (live.some((r) => r.symbol === p.symbol)) continue;
+    if (now - (lastUnprot.get(p.symbol) ?? 0) < UNPROT_GAP_MS) continue;
+    lastUnprot.set(p.symbol, now);
+    alertMail(`Position BINA SL ${p.symbol}`, `qty ${fmt(p.qty)} open hai par koi live SL/Target/Trailing rule nahi hai.\n(Render restart ya rule save fail / rule error ho sakta hai.) Rule dobara lagao ya position close karo.\n(Ye alert band karna ho to env UNPROTECTED_ALERT=false)`, `unprot-${p.symbol}`);
+  }
+}
 
 async function cancelSymbolOrders(symbol: string): Promise<void> {
   const oo = await bn("GET", "/eapi/v1/openOrders", { symbol }, true);
@@ -597,9 +641,15 @@ async function sendExit(r: Rule, qty: number): Promise<void> {
   r.exit_tries++;
   r.exit_at = Date.now();
   await cancelSymbolOrders(r.symbol);
+  const fresh = await loadPositions();   // cancel ke baad taza qty — partial fill hua ho to reduceOnly reject na ho
+  if (fresh.ok) {
+    const cur = fresh.map.get(r.symbol);
+    if (!cur || cur.qty <= 0) { r.note = "exit se pehle position band mili"; return; }
+    qty = Math.min(qty, cur.qty);
+  }
   const tick = (await tickOf(r.symbol)) ?? 5;
   const q = await quoteOf(r.symbol);
-  const price = closePrice("SELL", q, tick);
+  const price = closePrice("SELL", q, tick, r.exit_tries);
   if (price <= 0) { r.error = "bid/mark price nahi mila — exit retry hoga"; alertMail(`Exit price nahi mila ${r.symbol}`, `try ${r.exit_tries}: bid/mark price nahi mila, exit order nahi gaya.\nPosition open hai!`, `exitfail-${r.id}`); return; }
   const cid = "rx" + createHash("sha1").update(`${r.id}|${Date.now()}`).digest("hex").slice(0, 20);
   const res = await placeLimit(r.symbol, "SELL", qty, price, true, cid);
@@ -617,7 +667,7 @@ async function sendExit(r: Rule, qty: number): Promise<void> {
   log(`[rule ${r.id}] ${r.note || r.error}`);
 }
 
-async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>): Promise<void> {
+async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>, qc: Map<string, Promise<Quote>>): Promise<void> {
   const p = pos.get(r.symbol);
 
   if (r.status === "triggered") {
@@ -629,11 +679,14 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
       }
       return;
     }
-    if (Date.now() - r.exit_at >= EXIT_RETRY_MS) {
-      if (r.exit_tries >= EXIT_MAX_TRIES) {
-        r.status = "error"; r.error = r.error || "exit 6 baar try kiya, position abhi bhi open — MANUAL close karo";
+    if (Date.now() - r.exit_at >= (r.exit_tries >= EXIT_MAX_TRIES ? SLOW_RETRY_MS : EXIT_RETRY_MS)) {
+      if (r.exit_tries >= EXIT_HARD_MAX) {
+        r.status = "error"; r.error = r.error || `exit ${EXIT_HARD_MAX} baar try kiya, position abhi bhi open — MANUAL close karo`;
         alertMail(`Rule ERROR ${r.symbol}`, `${r.error}\nPosition abhi bhi open hai!`, `err-${r.id}`);
         return;
+      }
+      if (r.exit_tries === EXIT_MAX_TRIES) {
+        alertMail(`Exit ${EXIT_MAX_TRIES} try me fill nahi ${r.symbol}`, `Position abhi open hai. Bot haar nahi maanega: ab har 60s me sabse aggressive price par retry karega. Chaho to khud bhi CLOSE/PANIC karo.`, `giveup-${r.id}`);
       }
       await sendExit(r, p.qty);
     }
@@ -653,16 +706,38 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
   }
   if (p.short) { r.status = "error"; r.error = "SHORT position — rule sirf LONG ke liye hai"; return; }
 
-  const q = await quoteOf(r.symbol);
-  if (q.bid <= 0) return;
-  if (r.trail) r.high = Math.max(r.high, q.bid);
+  const q = await getQuote(qc, r.symbol);
+  const px = q.bid > 0 ? q.bid : q.mark;   // bid na ho (0DTE / expiry ke paas) to mark se SL check — pehle yahan return ho jata tha
+  if (!(px > 0)) {
+    r.nq = (r.nq ?? 0) + 1;
+    if (r.nq === 3 || r.nq % 24 === 0) alertMail(`Quote nahi mil raha ${r.symbol}`, `${r.nq} tick se bid aur mark dono nahi mile — SL/Target abhi kaam nahi kar rahe! Position dekho.`, `noq-${r.id}`);
+    return;
+  }
+  if ((r.nq ?? 0) >= 3) alertMail(`Quote wapas aa gaya ${r.symbol}`, `${r.nq} tick ke baad bid/mark mil gaye, SL/Target phir se chalu.`, `noq-ok-${r.id}`);
+  r.nq = 0;
+  if (r.trail) {
+    if (r.hi_set === false) { r.high = px; r.hs = px; r.hi_set = true; }   // high fill ke baad ke asli price se shuru (limit price se nahi)
+    else {
+      const cand = q.mark > 0 ? Math.min(px, q.mark * 1.15) : px;   // mark se 15%+ upar ka bid = blip, high ko utha nahi sakta
+      if (cand > r.high) r.high = cand;
+      if (r.high - (r.hs ?? 0) >= r.trail / 2) r.hs = r.high;      // bada move: rules turant save (restart par stale high na rahe)
+    }
+  }
   const levels: number[] = [];
   if (r.sl) levels.push(r.sl);
   if (r.trail) levels.push(r.high - r.trail);
   const stop = levels.length ? Math.max(...levels) : null;
   let reason: string | null = null;
-  if (stop !== null && q.bid <= stop) reason = `SL/Trailing hit — bid ${fmt(q.bid)} <= ${fmt(stop)}`;
-  else if (r.tp && q.bid >= r.tp) reason = `Target hit — bid ${fmt(q.bid)} >= ${fmt(r.tp)}`;
+  if (stop !== null && px <= stop) {
+    const deep = px <= stop * 0.95;   // crash: confirmation ka wait nahi
+    r.breach = (r.breach ?? 0) + 1;
+    if (r.breach < BREACH_CONFIRM && !deep) { r.note = CONF_NOTE; return; }
+    reason = `SL/Trailing hit — ${q.bid > 0 ? "bid" : "mark(bid nahi)"} ${fmt(px)} <= ${fmt(stop)}`;
+  } else {
+    r.breach = 0;
+    if (r.note === CONF_NOTE) r.note = "";
+    if (r.tp && q.bid >= r.tp) reason = `Target hit — bid ${fmt(q.bid)} >= ${fmt(r.tp)}`;
+  }
   if (!reason) return;
 
   r.status = "triggered"; r.trigger_reason = `${r.symbol}: ${reason}`; r.exit_tries = 0; r.exit_at = 0;
@@ -672,13 +747,31 @@ async function handleRule(r: Rule, pos: Map<string, Pos>, exiting: Set<string>):
 }
 
 async function engineTick(): Promise<void> {
+  const now = Date.now();
+  const liveN = rules.filter((r) => r.status === "active" || r.status === "triggered").length;
+  if (liveN && lastTickAt && now - lastTickAt > 30_000) {
+    alertMail("Engine ruka tha", `~${Math.round((now - lastTickAt) / 1000)}s tak engine tick nahi chala (Render sleep/freeze?). Is dauran SL/Target nahi chale — positions dekho!`, "engine-gap");
+  }
+  lastTickAt = now;
+  if (engineBusy && busySince && now - busySince > 60_000) {
+    alertMail("Engine atka hua", `Ek tick ${Math.round((now - busySince) / 1000)}s se chal raha hai — SL/Target der se check ho rahe hain.`, "engine-stuck");
+  }
   return srcStore.run("engine", engineTickInner);
 }
 async function engineTickInner(): Promise<void> {
   if (engineBusy) return;
   const live = rules.filter((r) => r.status === "active" || r.status === "triggered");
-  if (!live.length) return;
-  engineBusy = true;
+  if (!live.length) {
+    // koi live rule nahi — har 5 min me ek baar dekho ki kahin bina-SL position to nahi (rules kho gaye ho sakte hain)
+    if (UNPROT_ALERT && Date.now() - lastUnprotCheck >= 5 * 60_000) {
+      lastUnprotCheck = Date.now();
+      engineBusy = true; busySince = Date.now();
+      try { const pos = await loadPositions(); if (pos.ok) checkUnprotected(pos.map, live); }
+      finally { engineBusy = false; }
+    }
+    return;
+  }
+  engineBusy = true; busySince = Date.now();
   try {
     const pos = await loadPositions();
     if (!pos.ok) {
@@ -691,12 +784,19 @@ async function engineTickInner(): Promise<void> {
     }
     if (posFailStreak >= 3) alertMail("Engine positions wapas aa gayi", `${posFailStreak} fail ke baad theek. SL/Target phir se chalu.`, "pos-ok");
     posFailStreak = 0;
+    checkUnprotected(pos.map, live);
     const exiting = new Set(live.filter((r) => r.status === "triggered").map((r) => r.symbol));
+    const qc = new Map<string, Promise<Quote>>();
     for (const r of live) {
-      try { await handleRule(r, pos.map, exiting); }
+      try { await handleRule(r, pos.map, exiting, qc); excCount.delete(r.id); }
       catch (e) {
-        r.status = "error"; r.error = errMsg(e);
-        alertMail(`Rule ERROR ${r.symbol}`, r.error, `err-${r.id}`);
+        // ek transient exception se rule hamesha ke liye band nahi — 5 lagatar par hi 'error'
+        const n = (excCount.get(r.id) ?? 0) + 1; excCount.set(r.id, n);
+        log(`rule ${r.id} exception ${n}/5: ${errMsg(e)}`);
+        if (n >= 5) {
+          r.status = "error"; r.error = errMsg(e);
+          alertMail(`Rule ERROR ${r.symbol}`, `${r.error}\nPosition ko manual dekho!`, `err-${r.id}`);
+        }
       }
     }
     persistSoon();
@@ -818,12 +918,37 @@ async function placeOrderChecked(symbol: string, sideRaw: string, qtyRaw: unknow
   if (!qty || !price) return { err: { status: 400, msg: "quantity/price sahi nahi" } };
   if (side === "SELL" && !reduceOnly) return { err: { status: 403, msg: "SELL sirf reduceOnly (position close) allowed hai" } };
   if (side === "BUY" && !tradingEnabled()) return { err: { status: 403, msg: "TRADING_ENABLED=false — naye BUY orders band hain" } };
-  if (qty > MAX_ORDER_QTY) return { err: { status: 403, msg: `qty ${qty} > MAX_ORDER_QTY ${MAX_ORDER_QTY}` } };
-  if (qty * price > MAX_ORDER_USDT) return { err: { status: 403, msg: `order value ${(qty * price).toFixed(2)} > MAX_ORDER_USDT ${MAX_ORDER_USDT}` } };
+  // MAX_ORDER_* sirf naye BUY (exposure badhane wale) par — reduceOnly SELL (close) ko kabhi nahi rokte
+  if (side === "BUY" && qty > MAX_ORDER_QTY) return { err: { status: 403, msg: `qty ${qty} > MAX_ORDER_QTY ${MAX_ORDER_QTY}` } };
+  if (side === "BUY" && qty * price > MAX_ORDER_USDT) return { err: { status: 403, msg: `order value ${(qty * price).toFixed(2)} > MAX_ORDER_USDT ${MAX_ORDER_USDT}` } };
   const cid = typeof cidRaw === "string" && /^[\w-]{1,36}$/.test(cidRaw) ? cidRaw : undefined;
   const r = await placeLimit(symbol, side, qty, price, reduceOnly, cid);
   log(`order ${side} ${symbol} qty=${qty} px=${price} ro=${reduceOnly} -> ${r.ok ? "OK" : JSON.stringify(r.data)}`);
   return { r };
+}
+
+// SL/Target/Trailing ki sanity — galat levels se fill hote hi exit na ho. Order bhejne SE PEHLE chalta hai.
+async function checkRuleLevels(symbol: string, slRaw: unknown, tpRaw: unknown, trailRaw: unknown, entryPx: number | null): Promise<string | null> {
+  const given = (v: unknown): boolean => v !== null && v !== undefined && v !== "" && !(typeof v === "number" && Number.isNaN(v));
+  for (const [nm, v] of [["SL", slRaw], ["Target", tpRaw], ["Trailing", trailRaw]] as [string, unknown][]) {
+    if (given(v) && !posNum(v)) return `${nm} sahi positive number nahi hai`;
+  }
+  const sl = posNum(slRaw), tp = posNum(tpRaw), trail = posNum(trailRaw);
+  if (!sl && !tp && !trail) return null;
+  const q = await quoteOf(symbol);
+  const bid = q.bid > 0 ? q.bid : q.mark;
+  if (!(bid > 0)) return "bid/mark price abhi nahi mila, SL/Target check nahi ho sakta";
+  const lo = entryPx && entryPx > 0 ? Math.min(bid, entryPx) : bid;
+  const hi = entryPx && entryPx > 0 ? Math.max(bid, entryPx) : bid;
+  if (sl && sl >= lo) return `SL ${fmt(sl)} price (${fmt(lo)}) se neeche hona chahiye, warna fill hote hi exit ho jayega`;
+  if (tp && tp <= hi) return `Target ${fmt(tp)} price (${fmt(hi)}) se upar hona chahiye`;
+  if (sl && tp && sl >= tp) return "SL Target se neeche hona chahiye";
+  if (trail) {
+    const spread = q.ask > 0 && q.bid > 0 ? q.ask - q.bid : 0;
+    if (spread > 0 && trail <= spread) return `Trailing ${fmt(trail)} spread (${fmt(spread)}) se bada rakho, warna turant trigger ho jayega`;
+    if (trail >= lo) return `Trailing ${fmt(trail)} price (${fmt(lo)}) se chhota hona chahiye`;
+  }
+  return null;
 }
 
 function createRule(symbol: string, entryQtyRaw: unknown, entryPriceRaw: unknown, slRaw: unknown, tpRaw: unknown, trailRaw: unknown): { ok: boolean; status: number; msg?: string; rule?: Rule } {
@@ -836,6 +961,7 @@ function createRule(symbol: string, entryQtyRaw: unknown, entryPriceRaw: unknown
     id: "r" + Date.now().toString(36) + randomBytes(3).toString("hex"), symbol, side: "LONG",
     entry_qty: entryQty, entry_price: entryPrice, sl, tp, trail, status: "active", created_at: Date.now(),
     high: entryPrice, note: "", error: null, exit_order_id: null, exit_at: 0, exit_tries: 0, trigger_reason: null,
+    hi_set: false, hs: 0, breach: 0, nq: 0,
   };
   rules.push(rule);
   persistSoon();
@@ -999,12 +1125,18 @@ async function cmdExec(cmd: Json, cid: string): Promise<{ ok: boolean; msg: stri
   switch (action) {
     case "place_order": {
       const symbol = String(cmd.symbol ?? "");
+      // SL/TP/Trail sirf BUY (entry) par; SELL (close) ke saath bhare fields se rule nahi banta
+      const wantRule = String(cmd.side ?? "").toUpperCase() === "BUY" && !!(cmd.sl || cmd.tp || cmd.trail);
+      if (wantRule) {
+        const bad = await checkRuleLevels(symbol, cmd.sl, cmd.tp, cmd.trail, posNum(cmd.price));
+        if (bad) return { ok: false, msg: `${bad} — order NAHI bheja`, extra: {} };
+      }
       const c = await placeOrderChecked(symbol, String(cmd.side ?? ""), cmd.quantity, cmd.price, cmd.reduceOnly === true || cmd.reduceOnly === "true", cid);
       if (c.err) return { ok: false, msg: c.err.msg, extra: {} };
       const r = c.r as BResult;
       if (!r.ok) return { ok: false, msg: ackMsgOf(r), extra: { data: r.data } };
       let msg = "order sent";
-      if (cmd.sl || cmd.tp || cmd.trail) {
+      if (wantRule) {
         // entry_price = LIMIT order price; rule fail ho to ab msg mein bhi dikhta hai
         const rc = createRule(symbol, cmd.quantity, cmd.price, cmd.sl, cmd.tp, cmd.trail);
         if (!rc.ok) { msg += ` | ⚠️ SL/TP rule SAVE NAHI HUA: ${rc.msg}`; log(`rules_create FAILED (place_order): ${rc.msg}`); }
@@ -1037,6 +1169,8 @@ async function cmdExec(cmd: Json, cid: string): Promise<{ ok: boolean; msg: stri
       const q = await quoteOf(symbol);
       const entry = q.bid > 0 ? q.bid : q.mark;
       if (!(entry > 0)) return { ok: false, msg: "Current price nahi mila — rule save nahi hua", extra: {} };
+      const bad = await checkRuleLevels(symbol, cmd.sl, cmd.tp, cmd.trail, null);
+      if (bad) return { ok: false, msg: `${bad} — rule save nahi hua`, extra: {} };
       const rc = createRule(symbol, cmd.quantity, entry, cmd.sl, cmd.tp, cmd.trail);
       return { ok: rc.ok, msg: rc.ok ? "rule saved" : String(rc.msg), extra: rc.ok ? { data: { ok: true, id: rc.rule?.id, rule: rc.rule ? ruleView(rc.rule) : null } } : {} };
     }
@@ -1283,6 +1417,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return send(res, 200, pk);
       }
       case "/rules/create": {
+        const bad = await checkRuleLevels(String(body.symbol ?? ""), body.sl_price, body.target_price, body.trailing_points, posNum(body.entry_price));
+        if (bad) return send(res, 400, { ok: false, msg: bad });
         const c = createRule(String(body.symbol ?? ""), body.entry_qty, body.entry_price, body.sl_price, body.target_price, body.trailing_points);
         if (!c.ok) return send(res, c.status, { ok: false, msg: c.msg });
         return send(res, 200, { ok: true, id: (c.rule as Rule).id, rule: ruleView(c.rule as Rule) });
@@ -1311,10 +1447,15 @@ async function main(): Promise<void> {
   if (!API_KEY || !SECRET) log("WARNING: OPT_API_KEY / OPT_SECRET_KEY set nahi");
   { const miss = envMissing(); if (miss.length) alertMail("Render env missing", `Ye env vars set nahi hain: ${miss.join(", ")}\nIn ke bina trading/rules/secure kaam adhoora rahega.`, "env-missing"); }
   await loadRules();
+  { const liveBoot = rules.filter((r) => r.status === "active" || r.status === "triggered").length;
+    if (liveBoot) alertMail("Render restart hua", `${liveBoot} live rule wapas load hue. Restart ke dauran SL/Target nahi chale the — positions check karo.`, "boot-live"); }
+  // Render free tier 15 min bina inbound traffic ke so jata hai — apne public URL ko har 4 min ping (best-effort; paid plan sabse safe)
+  { const selfUrl = (env("RENDER_EXTERNAL_URL") || env("SELF_URL")).replace(/\/+$/, "");
+    if (selfUrl) setInterval(() => { fetch(`${selfUrl}/ping`, { signal: AbortSignal.timeout(10000) }).catch(() => { /* ignore */ }); }, 4 * 60_000).unref(); }
   await syncTime();
   setInterval(() => { void syncTime(); }, 5 * 60_000);
   setInterval(() => { void engineTick(); }, 5000);
-  setInterval(() => { void rlogFlush("hourly"); }, RLOG_FLUSH_MS);
+  setInterval(() => { void rlogFlush("periodic"); }, RLOG_FLUSH_MS);
   rlogRow("event", "render", "boot", null, true, `Render start | trading_enabled=${tradingEnabled()} | rules=${rules.length}`, { rules: rules.length });
   server.listen(PORT, "0.0.0.0", () => log(`my-engine server up on :${PORT} | trading_enabled=${tradingEnabled()} | rules=${rules.length}`));
 }
