@@ -6,15 +6,20 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.Message
 import android.provider.Settings
 import android.text.InputType
@@ -25,6 +30,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -41,13 +47,16 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
 import kotlin.math.abs
 
 /**
- * Floating browser: kisi bhi app ke upar tairti window.
- * - drag (✥), resize (◢ corner), maximize (⛶), minimize -> bubble (—)
- * - bubble ko neeche ❌ zone me kheench kar band karo
- * - ⚙ settings: URL, menu left/right, size, opacity, distance
+ * Lion floating browser: kisi bhi app ke upar tairta golden dot.
+ * - dot tap -> chhota pill menu (back, refresh, maximize, window show/hide, settings, close)
+ * - dot ko kahin bhi drag karo; neeche ❌ zone me chhodo to band
+ * - browser window: upar ke handle se drag, ◢ se resize, ⛶ maximize
+ * - ⚙ settings: URL, icon size, opacity, dot size
+ * - text select -> Lion Copy bar (Copy / Select all / Paste)
  * - <input type=file> ke liye file picker, JS prompt, fullscreen video
  */
 class FloatingService : Service() {
@@ -108,7 +117,7 @@ class FloatingService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL_ID, "Floating Browser", NotificationManager.IMPORTANCE_LOW)
+            val ch = NotificationChannel(CHANNEL_ID, "Lion", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
     }
@@ -123,8 +132,8 @@ class FloatingService : Service() {
             this, 1, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("Floating Browser chal raha hai")
+            .setSmallIcon(R.drawable.ic_notif_lion)
+            .setContentTitle("Lion chal raha hai")
             .setContentText("Band karne ke liye \"Band karo\" dabao")
             .setContentIntent(openPi)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Band karo", stopPi)
@@ -147,48 +156,67 @@ class FloatingService : Service() {
         private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         private val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         private val density = ctx.resources.displayMetrics.density
+        private val handler = Handler(Looper.getMainLooper())
 
+        // ── Window B: browser ─────────────────────────────────────────────
         private lateinit var root: FrameLayout
         private lateinit var layoutFull: FrameLayout
         private lateinit var content: LinearLayout
-        private lateinit var leftPanel: LinearLayout
+        private lateinit var dragHandle: FrameLayout
         private lateinit var webView: WebView
-        private lateinit var layoutBubble: FrameLayout
         private lateinit var layoutSettings: ScrollView
-        private lateinit var closeZone: FrameLayout
+        private lateinit var resizeCorner: TextView
+        private lateinit var copyBar: LinearLayout
         private lateinit var params: WindowManager.LayoutParams
+
+        // ── Window A: dot + pill ──────────────────────────────────────────
+        private lateinit var dotRoot: LinearLayout
+        private lateinit var dotWrapper: FrameLayout
+        private lateinit var dotView: View
+        private lateinit var pill: LinearLayout
+        private lateinit var dotParams: WindowManager.LayoutParams
+
+        // ── close zone (dot drag ke waqt) ─────────────────────────────────
+        private lateinit var closeZone: FrameLayout
         private lateinit var closeParams: WindowManager.LayoutParams
 
-        private lateinit var btnDrag: TextView
         private lateinit var btnBack: TextView
         private lateinit var btnRefresh: TextView
         private lateinit var btnMaximize: TextView
-        private lateinit var btnMinimize: TextView
+        private lateinit var btnWindow: TextView
         private lateinit var btnSettings: TextView
         private lateinit var btnClose: TextView
-        private lateinit var resizeCorner: TextView
 
         private lateinit var inputUrl: EditText
         private lateinit var sbSize: SeekBar
         private lateinit var sbOpacity: SeekBar
-        private lateinit var sbDistance: SeekBar
+        private lateinit var sbDotSize: SeekBar
 
         private val menuButtons = ArrayList<TextView>()
 
         private var isMaximized = false
-        private var wasMaximizedBeforeMinimize = false
+        private var isBrowserShown = false
+        private var isPillOpen = false
+        private var pillOnLeft = false
         private var isCloseZoneVisible = false
 
         private var customView: View? = null
         private var customViewCallback: WebChromeClient.CustomViewCallback? = null
         private var wasMaximizedByJS = false
 
+        // Copy bar state
+        private var lastSelection = ""
+        private var editFocused = false
+
+        // dot ka center (screen pixels)
+        private var dotCX = 0
+        private var dotCY = 0
         private var lastWindowX = 0
         private var lastWindowY = 0
-        private var lastBubbleX = 0
-        private var lastBubbleY = 0
         private var normalW = 0
         private var normalH = 0
+
+        private val collapseRunnable = Runnable { closePill() }
 
         private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
 
@@ -204,24 +232,32 @@ class FloatingService : Service() {
             val m = ctx.resources.displayMetrics
             lastWindowX = dp(8)
             lastWindowY = dp(60)
-            lastBubbleX = m.widthPixels - dp(70)
-            lastBubbleY = m.heightPixels / 4
+            // default: right edge, screen height ka 1/4
+            dotCX = prefs.getInt("dot_x", m.widthPixels - dp(24))
+            dotCY = prefs.getInt("dot_y", m.heightPixels / 4)
+            dotCX = dotCX.coerceIn(0, m.widthPixels)
+            dotCY = dotCY.coerceIn(0, m.heightPixels)
 
             buildUi()
             setupWindowParams()
             setupControls()
             setupWebView()
-            wm.addView(root, params)
             loadSavedSettings()
+
+            // pehle browser window (hidden), phir dot -> dot hamesha upar rahe
+            wm.addView(root, params)
+            wm.addView(dotRoot, dotParams)
             webView.loadUrl(url)
         }
 
         fun destroy() {
+            handler.removeCallbacksAndMessages(null)
             try { CookieManager.getInstance().flush() } catch (e: Exception) { }
             if (isCloseZoneVisible) {
                 try { wm.removeView(closeZone) } catch (e: Exception) { }
                 isCloseZoneVisible = false
             }
+            try { wm.removeView(dotRoot) } catch (e: Exception) { }
             try { wm.removeView(root) } catch (e: Exception) { }
             try { webView.destroy() } catch (e: Exception) { }
         }
@@ -233,38 +269,37 @@ class FloatingService : Service() {
             t.setTextColor(Color.WHITE)
             t.gravity = Gravity.CENTER
             t.textSize = 14f
-            t.layoutParams = LinearLayout.LayoutParams(dp(36), dp(34))
+            t.layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
             menuButtons.add(t)
             return t
         }
 
         private fun buildUi() {
+            // ---------- Window B: browser ----------
             root = FrameLayout(ctx)
+            root.visibility = View.GONE
 
             layoutFull = FrameLayout(ctx)
             layoutFull.setBackgroundColor(Color.parseColor("#131722"))
 
             content = LinearLayout(ctx)
-            content.orientation = LinearLayout.HORIZONTAL
+            content.orientation = LinearLayout.VERTICAL
 
-            leftPanel = LinearLayout(ctx)
-            leftPanel.orientation = LinearLayout.VERTICAL
-            leftPanel.gravity = Gravity.CENTER_HORIZONTAL
-            leftPanel.setBackgroundColor(Color.parseColor("#1e222d"))
-
-            btnDrag = mkBtn("✥")
-            btnBack = mkBtn("◀")
-            btnRefresh = mkBtn("⟳")
-            btnMaximize = mkBtn("⛶")
-            btnMinimize = mkBtn("—")
-            btnSettings = mkBtn("⚙")
-            btnClose = mkBtn("✕")
-            for (b in menuButtons) leftPanel.addView(b)
+            // upar patla drag handle (horizontal, vertical side patti nahi)
+            dragHandle = FrameLayout(ctx)
+            dragHandle.setBackgroundColor(Color.parseColor("#1e222d"))
+            val grip = View(ctx)
+            val gripShape = GradientDrawable()
+            gripShape.shape = GradientDrawable.RECTANGLE
+            gripShape.cornerRadius = dp(2).toFloat()
+            gripShape.setColor(Color.parseColor("#88FFFFFF"))
+            grip.background = gripShape
+            dragHandle.addView(grip, FrameLayout.LayoutParams(dp(36), dp(4), Gravity.CENTER))
 
             webView = WebView(ctx)
 
-            content.addView(leftPanel, LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.MATCH_PARENT))
-            content.addView(webView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            content.addView(dragHandle, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18)))
+            content.addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             layoutFull.addView(
                 content,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -281,6 +316,15 @@ class FloatingService : Service() {
                 FrameLayout.LayoutParams(dp(28), dp(28), Gravity.BOTTOM or Gravity.END)
             )
 
+            buildCopyBar()
+            layoutFull.addView(
+                copyBar,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                ).also { it.bottomMargin = dp(32) }
+            )
+
             buildSettings()
             layoutFull.addView(
                 layoutSettings,
@@ -292,25 +336,41 @@ class FloatingService : Service() {
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             )
 
-            // bubble
-            layoutBubble = FrameLayout(ctx)
-            layoutBubble.visibility = View.GONE
-            layoutBubble.alpha = 0.6f
-            val bubble = TextView(ctx)
-            bubble.text = "🌐"
-            bubble.textSize = 24f
-            bubble.gravity = Gravity.CENTER
-            val shape = GradientDrawable()
-            shape.shape = GradientDrawable.OVAL
-            shape.setColor(Color.BLACK)
-            bubble.background = shape
-            layoutBubble.addView(bubble, FrameLayout.LayoutParams(dp(56), dp(56)))
-            root.addView(
-                layoutBubble,
-                FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            )
+            // ---------- Window A: dot + pill ----------
+            dotRoot = LinearLayout(ctx)
+            dotRoot.orientation = LinearLayout.HORIZONTAL
+            dotRoot.gravity = Gravity.CENTER_VERTICAL
 
-            // close zone (alag overlay window, bubble drag ke waqt dikhta hai)
+            dotWrapper = FrameLayout(ctx)
+            dotView = View(ctx)
+            val dotShape = GradientDrawable()
+            dotShape.shape = GradientDrawable.OVAL
+            dotShape.setColor(Color.parseColor("#F5A623"))
+            dotShape.setStroke(maxOf(1, (1.5f * density).toInt()), Color.parseColor("#B3FFFFFF"))
+            dotView.background = dotShape
+            dotWrapper.addView(dotView, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+            dotRoot.addView(dotWrapper, LinearLayout.LayoutParams(dp(40), dp(40)))
+
+            // pill: dark rounded row, dot ke paas khulta hai
+            pill = LinearLayout(ctx)
+            pill.orientation = LinearLayout.HORIZONTAL
+            pill.gravity = Gravity.CENTER
+            pill.setPadding(dp(4), dp(4), dp(4), dp(4))
+            val pillShape = GradientDrawable()
+            pillShape.shape = GradientDrawable.RECTANGLE
+            pillShape.cornerRadius = dp(20).toFloat()
+            pillShape.setColor(Color.parseColor("#F21e222d")) // ~0.95 alpha
+            pill.background = pillShape
+
+            btnBack = mkBtn("◀")
+            btnRefresh = mkBtn("⟳")
+            btnMaximize = mkBtn("⛶")
+            btnWindow = mkBtn("🪟")
+            btnSettings = mkBtn("⚙")
+            btnClose = mkBtn("✕")
+            for (b in menuButtons) pill.addView(b)
+
+            // close zone (alag overlay window, dot drag ke waqt dikhta hai)
             closeZone = FrameLayout(ctx)
             val cross = TextView(ctx)
             cross.text = "❌"
@@ -328,6 +388,130 @@ class FloatingService : Service() {
             closeParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
             closeParams.y = dp(40)
         }
+
+        // ── Copy bar (Copy / Select all / Paste) ──────────────────────────
+        private fun copyBtn(text: String, onTap: () -> Unit): TextView {
+            val t = TextView(ctx)
+            t.text = text
+            t.setTextColor(Color.WHITE)
+            t.textSize = 13f
+            t.gravity = Gravity.CENTER
+            t.setPadding(dp(14), dp(8), dp(14), dp(8))
+            t.setOnClickListener { onTap() }
+            return t
+        }
+
+        private fun buildCopyBar() {
+            copyBar = LinearLayout(ctx)
+            copyBar.orientation = LinearLayout.HORIZONTAL
+            copyBar.gravity = Gravity.CENTER
+            copyBar.isClickable = true
+            copyBar.visibility = View.GONE
+            val shape = GradientDrawable()
+            shape.shape = GradientDrawable.RECTANGLE
+            shape.cornerRadius = dp(20).toFloat()
+            shape.setColor(Color.parseColor("#F21e222d"))
+            shape.setStroke(dp(1), Color.parseColor("#55FFFFFF"))
+            copyBar.background = shape
+            copyBar.addView(copyBtn("Copy") { doCopy() })
+            copyBar.addView(copyBtn("Select all") { doSelectAll() })
+            copyBar.addView(copyBtn("Paste") { doPaste() })
+        }
+
+        private fun updateCopyBar() {
+            copyBar.visibility =
+                if (lastSelection.isNotBlank() || editFocused) View.VISIBLE else View.GONE
+        }
+
+        private fun doCopy() {
+            if (lastSelection.isBlank()) {
+                Toast.makeText(ctx, "Pehle text select karo", Toast.LENGTH_SHORT).show()
+                return
+            }
+            try {
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("Lion", lastSelection))
+                Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Copy nahi ho paya", Toast.LENGTH_SHORT).show()
+                return
+            }
+            webView.evaluateJavascript(
+                "(function(){var a=document.activeElement;" +
+                    "if(a&&(a.tagName==='TEXTAREA'||a.tagName==='INPUT')&&typeof a.selectionStart==='number'){a.selectionEnd=a.selectionStart;}" +
+                    "window.getSelection().removeAllRanges();})()",
+                null
+            )
+            lastSelection = ""
+            updateCopyBar()
+        }
+
+        private fun doSelectAll() {
+            webView.requestFocus()
+            webView.evaluateJavascript("document.execCommand('selectAll')", null)
+        }
+
+        private fun doPaste() {
+            val text: String? = try {
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = cm.primaryClip
+                if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(ctx)?.toString() else null
+            } catch (e: Exception) {
+                null
+            }
+            if (text.isNullOrEmpty()) {
+                Toast.makeText(ctx, "Clipboard khali/blocked", Toast.LENGTH_SHORT).show()
+                return
+            }
+            webView.requestFocus()
+            webView.evaluateJavascript(
+                "document.execCommand('insertText', false, " + JSONObject.quote(text) + ")",
+                null
+            )
+        }
+
+        // JS -> Kotlin: selection / input focus ki khabar
+        inner class Bridge {
+            @JavascriptInterface
+            fun onState(text: String?, editable: Boolean) {
+                handler.post {
+                    lastSelection = text ?: ""
+                    editFocused = editable
+                    updateCopyBar()
+                }
+            }
+        }
+
+        private val selectionJs = """
+            (function () {
+              if (window.__lionSel) return;
+              window.__lionSel = true;
+              function isEd(el) {
+                if (!el) return false;
+                var t = el.tagName;
+                return t === 'TEXTAREA' || t === 'INPUT' || el.isContentEditable === true;
+              }
+              function sel() {
+                var t = '';
+                var a = document.activeElement;
+                try {
+                  if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT') && typeof a.selectionStart === 'number') {
+                    t = String(a.value).substring(a.selectionStart, a.selectionEnd);
+                  }
+                } catch (e) {}
+                if (!t) t = String(window.getSelection());
+                return t;
+              }
+              function push() {
+                try { LionBridge.onState(sel(), isEd(document.activeElement)); } catch (e) {}
+              }
+              document.addEventListener('selectionchange', push);
+              document.addEventListener('focusin', push);
+              document.addEventListener('focusout', function () { setTimeout(push, 50); });
+              document.addEventListener('keyup', push);
+              document.addEventListener('touchend', function () { setTimeout(push, 50); });
+            })();
+        """.trimIndent()
 
         private fun label(text: String): TextView {
             val t = TextView(ctx)
@@ -380,29 +564,20 @@ class FloatingService : Service() {
             }
             col.addView(saveBtn, lp)
 
-            val shiftBtn = blueButton("↔ Menu Left / Right")
-            shiftBtn.setOnClickListener {
-                val newShift = !prefs.getBoolean("menu_shift_right", false)
-                prefs.edit().putBoolean("menu_shift_right", newShift).apply()
-                applyMenuShift(newShift)
-                Toast.makeText(ctx, "Menu position badli", Toast.LENGTH_SHORT).show()
-            }
-            col.addView(shiftBtn, lp)
-
             col.addView(label("Icon size"), lp)
             sbSize = SeekBar(ctx)
             sbSize.max = 10
             col.addView(sbSize, lp)
 
-            col.addView(label("Bubble opacity"), lp)
+            col.addView(label("Dot opacity"), lp)
             sbOpacity = SeekBar(ctx)
             sbOpacity.max = 100
             col.addView(sbOpacity, lp)
 
-            col.addView(label("Menu ke upar/neeche ki doori"), lp)
-            sbDistance = SeekBar(ctx)
-            sbDistance.max = 60
-            col.addView(sbDistance, lp)
+            col.addView(label("Dot size (10–28dp)"), lp)
+            sbDotSize = SeekBar(ctx)
+            sbDotSize.max = 18 // progress 0..18 -> 10..28dp
+            col.addView(sbDotSize, lp)
 
             val closeBtn = blueButton("Settings band karo")
             closeBtn.setOnClickListener { layoutSettings.visibility = View.GONE }
@@ -416,40 +591,99 @@ class FloatingService : Service() {
             val m = ctx.resources.displayMetrics
             normalW = minOf(dp(360), m.widthPixels - dp(16))
             normalH = minOf(dp(500), m.heightPixels - dp(80))
+
+            // Window B (browser): shuru me hidden
             params = WindowManager.LayoutParams(
-                normalW, normalH, overlayType(),
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                1, 1, overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             )
+            if (Build.VERSION.SDK_INT >= 28) {
+                params.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+            params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
             params.gravity = Gravity.TOP or Gravity.START
-            params.x = lastWindowX
-            params.y = lastWindowY
+            params.x = 0
+            params.y = 0
+
+            // Window A (dot + pill): kabhi focus nahi leta
+            dotParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+            if (Build.VERSION.SDK_INT >= 28) {
+                dotParams.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+            dotParams.gravity = Gravity.TOP or Gravity.START
+            dotParams.x = dotCX - dp(20)
+            dotParams.y = dotCY - dp(20)
         }
 
-        private fun updateLayout() {
+        private fun updateBrowserLayout() {
             try { wm.updateViewLayout(root, params) } catch (e: Exception) { }
         }
 
-        // full window me keyboard chahiye (focusable), bubble me nahi
-        private fun updateWindowFocusable(isFull: Boolean) {
-            params.flags = if (isFull) {
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-            } else {
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-            }
-            updateLayout()
+        private fun updateDotLayout() {
+            try { wm.updateViewLayout(dotRoot, dotParams) } catch (e: Exception) { }
         }
 
-        private fun applyMenuShift(shiftRight: Boolean) {
-            content.removeView(leftPanel)
-            val lp = LinearLayout.LayoutParams(dp(36), ViewGroup.LayoutParams.MATCH_PARENT)
-            if (shiftRight) content.addView(leftPanel, lp) else content.addView(leftPanel, 0, lp)
+        // browser window ka size/flags: hidden ya visible, normal ya maximized
+        private fun applyBrowserParams() {
+            if (!isBrowserShown) {
+                params.x = 0
+                params.y = 0
+                params.width = 1
+                params.height = 1
+                params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            } else {
+                if (isMaximized) {
+                    params.x = 0
+                    params.y = 0
+                    params.width = WindowManager.LayoutParams.MATCH_PARENT
+                    params.height = WindowManager.LayoutParams.MATCH_PARENT
+                } else {
+                    params.x = lastWindowX
+                    params.y = lastWindowY
+                    params.width = normalW
+                    params.height = normalH
+                }
+                // focusable (no NOT_FOCUSABLE): keyboard / text input ke liye
+                var f = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                // maximize: status bar + navigation bar ke peeche tak poori screen
+                if (isMaximized) f = f or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                params.flags = f
+            }
+            updateBrowserLayout()
         }
 
         private fun applyTextSize(size: Float) {
             for (b in menuButtons) b.textSize = size
+        }
+
+        private fun applyOpacity(progress: Int) {
+            dotView.alpha = maxOf(progress, 25) / 100f
+        }
+
+        private fun applyDotSize(sizeDp: Int) {
+            val s = dp(sizeDp.coerceIn(10, 28))
+            val lp = dotView.layoutParams as FrameLayout.LayoutParams
+            lp.width = s
+            lp.height = s
+            dotView.layoutParams = lp
         }
 
         private fun loadSavedSettings() {
@@ -457,30 +691,173 @@ class FloatingService : Service() {
             applyTextSize(12f + size)
             sbSize.progress = size
 
-            val opacity = prefs.getInt("theme_opacity", 60)
-            layoutBubble.alpha = maxOf(opacity, 10) / 100f
+            val opacity = prefs.getInt("theme_opacity", 75)
+            applyOpacity(opacity)
             sbOpacity.progress = opacity
 
-            val dist = prefs.getInt("theme_distance", 0)
-            leftPanel.setPadding(0, dp(dist), 0, dp(dist))
-            sbDistance.progress = dist
+            val ds = prefs.getInt("dot_size", 16).coerceIn(10, 28)
+            applyDotSize(ds)
+            sbDotSize.progress = ds - 10
 
-            applyMenuShift(prefs.getBoolean("menu_shift_right", false))
             inputUrl.setText(prefs.getString("custom_url", AppConfig.DEFAULT_URL))
+        }
+
+        // ── dot + pill ────────────────────────────────────────────────────
+        private fun pillW(): Int = dp(32) * menuButtons.size + dp(8)
+
+        // dot ke center ke hisaab se Window A ki jagah set karo
+        private fun placeDotWindow() {
+            var x = dotCX - dp(20)
+            if (isPillOpen) {
+                if (pillOnLeft) x -= pillW()
+                val sw = ctx.resources.displayMetrics.widthPixels
+                val totalW = dp(40) + pillW()
+                x = x.coerceIn(0, maxOf(0, sw - totalW)) // screen se bahar na jaye
+            }
+            dotParams.x = x
+            dotParams.y = dotCY - dp(20)
+            updateDotLayout()
+        }
+
+        private fun scheduleAutoCollapse() {
+            handler.removeCallbacks(collapseRunnable)
+            handler.postDelayed(collapseRunnable, 4000L)
+        }
+
+        private fun openPill() {
+            if (isPillOpen) return
+            val sw = ctx.resources.displayMetrics.widthPixels
+            val pw = pillW()
+            val fitsLeft = dotCX - dp(20) - pw >= 0
+            val fitsRight = dotCX + dp(20) + pw <= sw
+            val preferLeft = dotCX > sw / 2 // right half me ho to pill left me
+            pillOnLeft = when {
+                preferLeft && fitsLeft -> true
+                !preferLeft && fitsRight -> false
+                fitsLeft -> true
+                fitsRight -> false
+                else -> preferLeft
+            }
+            val plp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            if (pillOnLeft) dotRoot.addView(pill, 0, plp) else dotRoot.addView(pill, plp)
+            isPillOpen = true
+            placeDotWindow()
+            scheduleAutoCollapse()
+        }
+
+        private fun closePill() {
+            handler.removeCallbacks(collapseRunnable)
+            if (!isPillOpen) return
+            dotRoot.removeView(pill)
+            isPillOpen = false
+            placeDotWindow()
+        }
+
+        private fun togglePill() {
+            if (isPillOpen) closePill() else openPill()
+        }
+
+        // ── browser show / hide ───────────────────────────────────────────
+        private fun showBrowser() {
+            if (isBrowserShown) return
+            isBrowserShown = true
+            root.visibility = View.VISIBLE
+            btnWindow.text = "—"
+            applyBrowserParams()
+        }
+
+        private fun hideBrowser() {
+            if (!isBrowserShown) return
+            layoutSettings.visibility = View.GONE
+            isBrowserShown = false
+            root.visibility = View.GONE
+            btnWindow.text = "🪟"
+            applyBrowserParams()
+        }
+
+        private fun toggleBrowser() {
+            if (isBrowserShown) hideBrowser() else showBrowser()
         }
 
         // ── controls ──────────────────────────────────────────────────────
         private fun setupControls() {
-            btnRefresh.setOnClickListener { webView.reload() }
-            btnBack.setOnClickListener { if (webView.canGoBack()) webView.goBack() }
+            btnRefresh.setOnClickListener {
+                scheduleAutoCollapse()
+                showBrowser()
+                webView.reload()
+            }
+            btnBack.setOnClickListener {
+                scheduleAutoCollapse()
+                showBrowser()
+                if (webView.canGoBack()) webView.goBack()
+            }
+            btnMaximize.setOnClickListener {
+                scheduleAutoCollapse()
+                showBrowser()
+                toggleMaximize()
+            }
+            btnWindow.setOnClickListener {
+                scheduleAutoCollapse()
+                toggleBrowser()
+            }
+            btnSettings.setOnClickListener {
+                scheduleAutoCollapse()
+                showBrowser()
+                layoutSettings.visibility = View.VISIBLE
+            }
             btnClose.setOnClickListener { this@FloatingService.stopSelf() }
-            btnMaximize.setOnClickListener { toggleMaximize() }
-            btnMinimize.setOnClickListener { minimizeToBubble() }
-            btnSettings.setOnClickListener { layoutSettings.visibility = View.VISIBLE }
 
-            // window drag (✥)
+            // dot: tap = pill toggle, drag = move, ❌ zone me chhodo = band
+            var sX = 0; var sY = 0; var sTX = 0f; var sTY = 0f; var dragging = false
+            dotWrapper.setOnTouchListener { _, e ->
+                val m = ctx.resources.displayMetrics
+                when (e.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        sX = dotCX; sY = dotCY; sTX = e.rawX; sTY = e.rawY; dragging = false
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (abs(e.rawX - sTX) > 10 || abs(e.rawY - sTY) > 10) {
+                            if (!dragging) {
+                                dragging = true
+                                if (isPillOpen) closePill()
+                                showCloseZone()
+                            }
+                            dotCX = (sX + (e.rawX - sTX).toInt()).coerceIn(0, m.widthPixels)
+                            dotCY = (sY + (e.rawY - sTY).toInt()).coerceIn(0, m.heightPixels)
+                            placeDotWindow()
+                            val over = isOverCloseZone(e.rawX, e.rawY, m.widthPixels, m.heightPixels)
+                            closeZone.scaleX = if (over) 1.3f else 1.0f
+                            closeZone.scaleY = if (over) 1.3f else 1.0f
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (dragging) {
+                            hideCloseZone()
+                            if (isOverCloseZone(e.rawX, e.rawY, m.widthPixels, m.heightPixels)) {
+                                this@FloatingService.stopSelf()
+                            } else {
+                                prefs.edit().putInt("dot_x", dotCX).putInt("dot_y", dotCY).apply()
+                            }
+                        } else {
+                            togglePill()
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        if (dragging) hideCloseZone()
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            // browser window drag (upar ka patla handle)
             var dX = 0; var dY = 0; var dTX = 0f; var dTY = 0f
-            btnDrag.setOnTouchListener { _, e ->
+            dragHandle.setOnTouchListener { _, e ->
                 if (isMaximized) {
                     false
                 } else when (e.action) {
@@ -493,7 +870,7 @@ class FloatingService : Service() {
                         params.y = dY + (e.rawY - dTY).toInt()
                         lastWindowX = params.x
                         lastWindowY = params.y
-                        updateLayout()
+                        updateBrowserLayout()
                         true
                     }
                     else -> false
@@ -515,48 +892,7 @@ class FloatingService : Service() {
                         params.height = maxOf(dp(260), rH + (e.rawY - rTY).toInt())
                         normalW = params.width
                         normalH = params.height
-                        updateLayout()
-                        true
-                    }
-                    else -> false
-                }
-            }
-
-            // bubble drag + ❌ zone + tap=restore
-            var bX = 0; var bY = 0; var bTX = 0f; var bTY = 0f; var bDragging = false
-            layoutBubble.setOnTouchListener { _, e ->
-                val m = ctx.resources.displayMetrics
-                when (e.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        bX = params.x; bY = params.y; bTX = e.rawX; bTY = e.rawY; bDragging = false
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        if (abs(e.rawX - bTX) > 10 || abs(e.rawY - bTY) > 10) {
-                            if (!bDragging) {
-                                bDragging = true
-                                showCloseZone()
-                            }
-                            params.x = bX + (e.rawX - bTX).toInt()
-                            params.y = bY + (e.rawY - bTY).toInt()
-                            lastBubbleX = params.x
-                            lastBubbleY = params.y
-                            updateLayout()
-                            val over = isOverCloseZone(e.rawX, e.rawY, m.widthPixels, m.heightPixels)
-                            closeZone.scaleX = if (over) 1.3f else 1.0f
-                            closeZone.scaleY = if (over) 1.3f else 1.0f
-                        }
-                        true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        if (bDragging) {
-                            hideCloseZone()
-                            if (isOverCloseZone(e.rawX, e.rawY, m.widthPixels, m.heightPixels)) {
-                                this@FloatingService.stopSelf()
-                            }
-                        } else {
-                            restoreFromBubble()
-                        }
+                        updateBrowserLayout()
                         true
                     }
                     else -> false
@@ -575,15 +911,16 @@ class FloatingService : Service() {
             sbOpacity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) prefs.edit().putInt("theme_opacity", progress).apply()
-                    layoutBubble.alpha = maxOf(progress, 10) / 100f
+                    applyOpacity(progress)
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
-            sbDistance.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            sbDotSize.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser) prefs.edit().putInt("theme_distance", progress).apply()
-                    leftPanel.setPadding(0, dp(progress), 0, dp(progress))
+                    val s = progress + 10
+                    if (fromUser) prefs.edit().putInt("dot_size", s).apply()
+                    applyDotSize(s)
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -607,67 +944,11 @@ class FloatingService : Service() {
         private fun isOverCloseZone(x: Float, y: Float, screenW: Int, screenH: Int): Boolean =
             y > screenH - dp(140) && x > screenW / 3 && x < (screenW * 2) / 3
 
-        // ── maximize / minimize ───────────────────────────────────────────
+        // ── maximize ──────────────────────────────────────────────────────
         private fun toggleMaximize() {
-            val m = ctx.resources.displayMetrics
-            if (!isMaximized) {
-                lastWindowX = params.x
-                lastWindowY = params.y
-                normalW = params.width
-                normalH = params.height
-                params.x = 0
-                params.y = 0
-                params.width = m.widthPixels
-                params.height = m.heightPixels
-                isMaximized = true
-            } else {
-                params.x = lastWindowX
-                params.y = lastWindowY
-                params.width = normalW
-                params.height = normalH
-                isMaximized = false
-            }
-            updateWindowFocusable(true)
-        }
-
-        private fun minimizeToBubble() {
-            wasMaximizedBeforeMinimize = isMaximized
-            if (!isMaximized) {
-                lastWindowX = params.x
-                lastWindowY = params.y
-                normalW = params.width
-                normalH = params.height
-            }
-            isMaximized = false
-            layoutSettings.visibility = View.GONE
-            layoutFull.visibility = View.GONE
-            layoutBubble.visibility = View.VISIBLE
-            params.width = WindowManager.LayoutParams.WRAP_CONTENT
-            params.height = WindowManager.LayoutParams.WRAP_CONTENT
-            params.x = lastBubbleX
-            params.y = lastBubbleY
-            updateWindowFocusable(false)
-        }
-
-        private fun restoreFromBubble() {
-            layoutBubble.visibility = View.GONE
-            layoutFull.visibility = View.VISIBLE
-            lastBubbleX = params.x
-            lastBubbleY = params.y
-            if (wasMaximizedBeforeMinimize) {
-                val m = ctx.resources.displayMetrics
-                params.x = 0
-                params.y = 0
-                params.width = m.widthPixels
-                params.height = m.heightPixels
-                isMaximized = true
-            } else {
-                params.x = lastWindowX
-                params.y = lastWindowY
-                params.width = normalW
-                params.height = normalH
-            }
-            updateWindowFocusable(true)
+            isMaximized = !isMaximized
+            dragHandle.visibility = if (isMaximized) View.GONE else View.VISIBLE
+            applyBrowserParams()
         }
 
         // ── WebView ───────────────────────────────────────────────────────
@@ -677,6 +958,7 @@ class FloatingService : Service() {
             s.javaScriptEnabled = true
             s.domStorageEnabled = true
             s.allowContentAccess = true
+            s.allowFileAccess = true
             s.setSupportMultipleWindows(true)
             s.javaScriptCanOpenWindowsAutomatically = true
             s.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -691,9 +973,21 @@ class FloatingService : Service() {
             webView.isFocusable = true
             webView.isFocusableInTouchMode = true
 
+            // system long-press selection chalne do + apna Copy bar
+            webView.isLongClickable = true
+            webView.setOnLongClickListener { false }
+            webView.addJavascriptInterface(Bridge(), "LionBridge")
+
             webView.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                    lastSelection = ""
+                    editFocused = false
+                    updateCopyBar()
+                }
+
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     CookieManager.getInstance().flush()
+                    view?.evaluateJavascript(selectionJs, null)
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {

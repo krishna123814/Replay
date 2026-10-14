@@ -10,6 +10,8 @@
     <!-- usesCleartextTraffic=true: http:// (jaise IP:port) sites bhi khul sakein -->
     <application
         android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">

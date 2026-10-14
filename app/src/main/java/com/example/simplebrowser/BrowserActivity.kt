@@ -3,11 +3,15 @@ package com.example.simplebrowser
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.view.WindowManager
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -17,7 +21,12 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 class BrowserActivity : AppCompatActivity() {
 
@@ -28,10 +37,42 @@ class BrowserActivity : AppCompatActivity() {
     private lateinit var btnBack: Button
     private lateinit var btnForward: Button
 
+    // <input type=file> ka callback
+    private var uploadCallback: ValueCallback<Array<Uri>>? = null
+    private val filePicker =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+            uploadCallback?.onReceiveValue(
+                WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data)
+            )
+            uploadCallback = null
+        }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Full-screen: status bar bhi cover, notch ke neeche bhi draw
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 28) {
+            val lp = window.attributes
+            lp.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = lp
+        }
+
         setContentView(R.layout.activity_browser)
+
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.browserRoot)) { v, insets ->
+            val i = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime()
+            )
+            v.setPadding(i.left, i.top, i.right, i.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
+        hideStatusBar()
 
         web = findViewById(R.id.web)
         urlBar = findViewById(R.id.urlBar)
@@ -47,6 +88,8 @@ class BrowserActivity : AppCompatActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            allowFileAccess = true
+            allowContentAccess = true
         }
 
         web.webViewClient = object : WebViewClient() {
@@ -79,6 +122,23 @@ class BrowserActivity : AppCompatActivity() {
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 progress.progress = newProgress
             }
+
+            override fun onShowFileChooser(
+                webView: WebView?,
+                callback: ValueCallback<Array<Uri>>?,
+                params: WebChromeClient.FileChooserParams?
+            ): Boolean {
+                if (callback == null || params == null) return false
+                uploadCallback?.onReceiveValue(null)
+                uploadCallback = callback
+                return try {
+                    filePicker.launch(Intent.createChooser(params.createIntent(), "File chuniye"))
+                    true
+                } catch (e: Exception) {
+                    uploadCallback = null
+                    false
+                }
+            }
         }
 
         btnBack.setOnClickListener { if (web.canGoBack()) web.goBack() }
@@ -110,6 +170,17 @@ class BrowserActivity : AppCompatActivity() {
             web.restoreState(savedInstanceState)
         }
         updateNavButtons()
+    }
+
+    private fun hideStatusBar() {
+        val c = WindowInsetsControllerCompat(window, window.decorView)
+        c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        c.hide(WindowInsetsCompat.Type.statusBars())
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideStatusBar()
     }
 
     private fun goToInput() {
