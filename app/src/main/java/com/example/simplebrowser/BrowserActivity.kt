@@ -88,7 +88,7 @@ class BrowserActivity : AppCompatActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            allowFileAccess = true
+            allowFileAccess = false
             allowContentAccess = true
         }
 

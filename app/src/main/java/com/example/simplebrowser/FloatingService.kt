@@ -25,8 +25,10 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.ContextThemeWrapper
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -34,6 +36,8 @@ import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -52,7 +56,7 @@ import kotlin.math.abs
 
 /**
  * Lion floating browser: kisi bhi app ke upar tairta golden dot.
- * - dot tap -> chhota pill menu (back, refresh, maximize, window show/hide, settings, close)
+ * - dot tap -> browser window show/hide; dot long-press -> chhota pill menu (back, refresh, maximize, window show/hide, settings, close); drag -> move
  * - dot ko kahin bhi drag karo; neeche ❌ zone me chhodo to band
  * - browser window: upar ke handle se drag, ◢ se resize, ⛶ maximize
  * - ⚙ settings: URL, icon size, opacity, dot size
@@ -63,6 +67,7 @@ class FloatingService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.example.simplebrowser.STOP_FLOATING"
+        const val ACTION_UPDATE = "com.example.simplebrowser.UPDATE_NOW"
         const val CHANNEL_ID = "floating_browser"
         const val NOTIF_ID = 1101
         const val PREFS = "FloatingAppPrefs"
@@ -73,6 +78,9 @@ class FloatingService : Service() {
     }
 
     private var floatWindow: FloatWindow? = null
+
+    // update download progress (0..99), -1 = download nahi chal raha
+    private var downloadPercent = -1
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -86,6 +94,11 @@ class FloatingService : Service() {
             return
         }
         createWindowIfNeeded()
+
+        // 6 ghante me max ek baar naya version dekho
+        if (UpdateChecker.shouldAutoCheck(this)) {
+            UpdateChecker.check(this) { info -> if (info != null) onUpdateFound(info) }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -95,6 +108,21 @@ class FloatingService : Service() {
         }
         goForeground()
         createWindowIfNeeded()
+        if (intent?.action == ACTION_UPDATE) {
+            val p = UpdateChecker.pending
+            if (p != null) {
+                startUpdate(p)
+            } else {
+                UpdateChecker.check(this) { info ->
+                    if (info != null) {
+                        UpdateChecker.pending = info
+                        startUpdate(info)
+                    } else {
+                        Toast.makeText(this, "Lion up to date", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
         return START_STICKY
     }
 
@@ -104,6 +132,12 @@ class FloatingService : Service() {
         instance = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+
+    fun restartWindow() {
+        floatWindow?.destroy()
+        floatWindow = null
+        createWindowIfNeeded()
     }
 
     private fun createWindowIfNeeded() {
@@ -131,14 +165,78 @@ class FloatingService : Service() {
         val openPi = PendingIntent.getActivity(
             this, 1, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val installIntent = UpdateChecker.readyInstallIntent
+        val hasPending = UpdateChecker.pending != null
+        val text = when {
+            downloadPercent in 0..99 -> "Update download ho raha hai: $downloadPercent%"
+            installIntent != null -> "Update download ho gaya – \"Install karo\" dabao"
+            hasPending -> "Naya version available"
+            else -> "Band karne ke liye \"Band karo\" dabao"
+        }
+        val b = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notif_lion)
             .setContentTitle("Lion chal raha hai")
-            .setContentText("Band karne ke liye \"Band karo\" dabao")
+            .setContentText(text)
             .setContentIntent(openPi)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Band karo", stopPi)
             .setOngoing(true)
-            .build()
+        if (installIntent != null) {
+            val installPi = PendingIntent.getActivity(
+                this, 3, installIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            b.addAction(android.R.drawable.stat_sys_download_done, "Install karo", installPi)
+        } else if (hasPending && downloadPercent < 0) {
+            val upd = Intent(this, FloatingService::class.java).setAction(ACTION_UPDATE)
+            val updPi = PendingIntent.getService(
+                this, 2, upd, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            b.addAction(android.R.drawable.stat_sys_download, "Update karo", updPi)
+        }
+        return b.build()
+    }
+
+    private fun refreshNotification() {
+        try {
+            getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification())
+        } catch (e: Exception) {
+        }
+    }
+
+    // ── in-app update ─────────────────────────────────────────────────────
+    private fun onUpdateFound(info: UpdateChecker.Info) {
+        if (instance == null) return
+        UpdateChecker.pending = info
+        Toast.makeText(this, "Lion update available (tap notification)", Toast.LENGTH_LONG).show()
+        refreshNotification()
+    }
+
+    private fun startUpdate(info: UpdateChecker.Info) {
+        if (!UpdateChecker.ensureInstallPermission(this)) return
+        Toast.makeText(this, "Download ho raha hai…", Toast.LENGTH_SHORT).show()
+        downloadPercent = 0
+        refreshNotification()
+        UpdateChecker.downloadAndInstall(
+            this, info,
+            onProgress = { pct ->
+                if (pct >= 100) {
+                    downloadPercent = -1
+                    refreshNotification()
+                } else if (pct % 5 == 0 && pct != downloadPercent) {
+                    downloadPercent = pct
+                    refreshNotification()
+                }
+            },
+            onError = { msg ->
+                downloadPercent = -1
+                refreshNotification()
+                Toast.makeText(this, "Update nahi ho paya: $msg", Toast.LENGTH_LONG).show()
+            },
+            onInstallFailed = {
+                // install screen seedha nahi khuli -> notification me "Install karo" action
+                refreshNotification()
+                Toast.makeText(this, "Notification me \"Install karo\" dabao", Toast.LENGTH_LONG).show()
+            }
+        )
     }
 
     private fun goForeground() {
@@ -217,6 +315,14 @@ class FloatingService : Service() {
         private var normalH = 0
 
         private val collapseRunnable = Runnable { closePill() }
+
+        // dot long-press: pill menu kholo (haptic ke saath)
+        private var longPressed = false
+        private val longPressRunnable = Runnable {
+            longPressed = true
+            dotWrapper.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            if (isPillOpen) scheduleAutoCollapse() else openPill()
+        }
 
         private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
 
@@ -579,11 +685,44 @@ class FloatingService : Service() {
             sbDotSize.max = 18 // progress 0..18 -> 10..28dp
             col.addView(sbDotSize, lp)
 
+            val updateBtn = blueButton("Update check karo (v${BuildConfig.VERSION_NAME})")
+            updateBtn.setOnClickListener { manualCheckUpdate(updateBtn) }
+            col.addView(updateBtn, lp)
+
             val closeBtn = blueButton("Settings band karo")
             closeBtn.setOnClickListener { layoutSettings.visibility = View.GONE }
             col.addView(closeBtn, lp)
 
             layoutSettings.addView(col)
+        }
+
+        private fun manualCheckUpdate(btn: Button) {
+            val oldText = btn.text
+            btn.isEnabled = false
+            btn.text = "Check ho raha hai…"
+            UpdateChecker.check(ctx) { info ->
+                btn.isEnabled = true
+                btn.text = oldText
+                if (info == null) {
+                    Toast.makeText(ctx, "Lion up to date", Toast.LENGTH_SHORT).show()
+                } else {
+                    UpdateChecker.pending = info
+                    refreshNotification()
+                    try {
+                        val themed = ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        val dialog = AlertDialog.Builder(themed)
+                            .setTitle("Update available")
+                            .setMessage("Lion ka naya version mila. Abhi update karein?")
+                            .setPositiveButton("Update karo") { _, _ -> startUpdate(info) }
+                            .setNegativeButton("Baad me", null)
+                            .create()
+                        dialog.window?.setType(overlayType())
+                        dialog.show()
+                    } catch (e: Exception) {
+                        startUpdate(info)
+                    }
+                }
+            }
         }
 
         // ── window params ─────────────────────────────────────────────────
@@ -809,19 +948,28 @@ class FloatingService : Service() {
             }
             btnClose.setOnClickListener { this@FloatingService.stopSelf() }
 
-            // dot: tap = pill toggle, drag = move, ❌ zone me chhodo = band
+            // dot: tap = browser show/hide, long-press = pill menu, drag = move, ❌ zone me chhodo = band
             var sX = 0; var sY = 0; var sTX = 0f; var sTY = 0f; var dragging = false
             dotWrapper.setOnTouchListener { _, e ->
                 val m = ctx.resources.displayMetrics
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
-                        sX = dotCX; sY = dotCY; sTX = e.rawX; sTY = e.rawY; dragging = false
+                        sX = dotCX; sY = dotCY; sTX = e.rawX; sTY = e.rawY
+                        dragging = false
+                        longPressed = false
+                        handler.removeCallbacks(longPressRunnable)
+                        handler.postDelayed(
+                            longPressRunnable,
+                            ViewConfiguration.getLongPressTimeout().toLong()
+                        )
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        if (abs(e.rawX - sTX) > 10 || abs(e.rawY - sTY) > 10) {
+                        val slop = if (longPressed) 30 else 10
+                        if (dragging || abs(e.rawX - sTX) > slop || abs(e.rawY - sTY) > slop) {
                             if (!dragging) {
                                 dragging = true
+                                handler.removeCallbacks(longPressRunnable)
                                 if (isPillOpen) closePill()
                                 showCloseZone()
                             }
@@ -835,6 +983,7 @@ class FloatingService : Service() {
                         true
                     }
                     MotionEvent.ACTION_UP -> {
+                        handler.removeCallbacks(longPressRunnable)
                         if (dragging) {
                             hideCloseZone()
                             if (isOverCloseZone(e.rawX, e.rawY, m.widthPixels, m.heightPixels)) {
@@ -842,12 +991,16 @@ class FloatingService : Service() {
                             } else {
                                 prefs.edit().putInt("dot_x", dotCX).putInt("dot_y", dotCY).apply()
                             }
+                        } else if (longPressed) {
+                            // menu khul chuka hai, ungli uthane par kuch nahi
                         } else {
-                            togglePill()
+                            // simple tap
+                            if (isPillOpen) closePill() else toggleBrowser()
                         }
                         true
                     }
                     MotionEvent.ACTION_CANCEL -> {
+                        handler.removeCallbacks(longPressRunnable)
                         if (dragging) hideCloseZone()
                         true
                     }
@@ -958,10 +1111,10 @@ class FloatingService : Service() {
             s.javaScriptEnabled = true
             s.domStorageEnabled = true
             s.allowContentAccess = true
-            s.allowFileAccess = true
+            s.allowFileAccess = false
             s.setSupportMultipleWindows(true)
             s.javaScriptCanOpenWindowsAutomatically = true
-            s.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
             // Streamlit image/canvas OOM fix: hardware layer nahi
             webView.setLayerType(View.LAYER_TYPE_NONE, null)
@@ -995,7 +1148,8 @@ class FloatingService : Service() {
                     val scheme = target.scheme ?: return false
                     val full = target.toString()
                     val homeHost = Uri.parse(url).host
-                    val isAuth = full.contains("fyers.in") || full.contains("oauth2") || full.contains("google.com")
+                    val host = target.host ?: ""
+                    val isAuth = host.endsWith("fyers.in") || host.endsWith("google.com") || full.contains("oauth2")
                     val isExternalHost = (scheme == "http" || scheme == "https") && target.host != homeHost
                     val isOtherScheme = scheme != "http" && scheme != "https"
                     if (isAuth || isExternalHost || isOtherScheme) {
@@ -1006,6 +1160,37 @@ class FloatingService : Service() {
                         return true
                     }
                     return false
+                }
+
+                // offline / site na mile: sirf main page par chhota error page (loop na bane)
+                override fun onReceivedError(
+                    view: WebView?, request: WebResourceRequest?, error: WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    val req = request ?: return
+                    if (!req.isForMainFrame) return
+                    val failed = req.url.toString()
+                    val jsUrl = failed
+                        .replace("\\", "\\\\")
+                        .replace("'", "\\'")
+                        .replace("\n", "")
+                        .replace("\r", "")
+                        .replace("<", "%3C")
+                    val html = "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>" +
+                        "<body style='background:#1e222d;color:#d1d4dc;font-family:sans-serif;text-align:center;padding:40px 16px'>" +
+                        "<h3>Internet / site nahi mil rahi</h3>" +
+                        "<p>Connection check karke dobara try karo.</p>" +
+                        "<button style='background:#2962ff;color:#fff;border:0;padding:12px 22px;font-size:16px;border-radius:6px' " +
+                        "onclick=\"location.replace('" + jsUrl + "')\">Dobara try karo</button>" +
+                        "</body></html>"
+                    view?.loadDataWithBaseURL(failed, html, "text/html", "UTF-8", null)
+                }
+
+                // Streamlit/chart OOM me renderer mare to window dobara banao
+                @android.annotation.TargetApi(26)
+                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                    handler.post { this@FloatingService.restartWindow() }
+                    return true
                 }
             }
 

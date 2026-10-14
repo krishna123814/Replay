@@ -6,7 +6,7 @@ Ek app, do mode:
 
 ## Floating dot + pill menu
 - Startup par sirf chhota golden dot dikhta hai (default 16dp, settings me 10–28dp).
-- Dot tap -> chhota pill menu: ◀ back, ⟳ refresh, ⛶ maximize, 🪟 window show/hide, ⚙ settings, ✕ close.
+- Dot tap -> browser window minimize/open (toggle). Dot long-press (dabaye rakho) -> pill menu: ◀ back, ⟳ refresh, ⛶ maximize, 🪟 window show/hide, ⚙ settings, ✕ close. Dot ko drag karke move/❌ zone me band.
   4 sec koi action na ho to pill apne aap band.
 - Dot ko kahin bhi drag karo (position yaad rehti hai). Drag karte waqt neeche ❌ zone me chhodo to band.
 - Browser window: upar ke patle handle se drag, ◢ corner se resize, ⛶ se maximize (status bar tak poori screen).
@@ -27,6 +27,13 @@ Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 `app/src/main/java/com/example/simplebrowser/AppConfig.kt`
 (ya floating window ke ⚙ settings se)
 
+## Update bina uninstall ke (auto-update)
+Build ke baad APK GitHub Release me `Lion.apk` naam se aati hai. App start par (aur ⚙ settings -> "Update check karo" se)
+naya version dekhti hai; "Update karo" dabane par download karke install screen khulti hai, purani app ke upar update ho jati hai.
+Ye isliye chalta hai kyunki har build ek hi permanent key (GitHub Secrets) se sign hoti hai aur versionCode har build par badhta hai.
+Key (LION_SECRETS.txt / lion-release.jks) kabhi delete/badli mat karo, warna ek baar fir uninstall karna padega.
+
 ## Build (GitHub Actions)
-Repo me `SimpleBrowser.zip` upload karo -> Actions me "Unzip and Build APK" chalegi ->
-Artifacts se `SimpleBrowser-debug-apk` download karo.
+Repo me `SimpleBrowser.zip` upload karo -> Actions me "Unzip and Build APK" chalegi -> repo ke **Releases** se `Lion.apk` download karo.
+Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LION_STORE_PASSWORD`, `LION_KEY_ALIAS`, `LION_KEY_PASSWORD`.
+`.github/workflows/unzip.yml` ko haath se paste karna padta hai (GitHub me file kholo -> edit -> paste -> commit); zip ke andar wali workflow use nahi hoti.
