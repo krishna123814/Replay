@@ -1,16 +1,23 @@
 # Simple Browser (Android)
 
-Ek chhota WebView browser: URL bar, back/forward/reload, progress bar,
-search (Google) aur http/https dono links.
+Ek app, do mode:
+1. **Normal Browser** – full-screen WebView browser (URL bar, back/forward/reload, search).
+2. **Floating Window** – kisi bhi app ke upar tairti browser window:
+   - ✥ se drag, ◢ corner se resize, ⛶ maximize, — minimize (bubble)
+   - bubble ko neeche ❌ zone me kheench kar band karo
+   - ⚙ settings: URL, menu left/right, icon size, bubble opacity, menu doori
+   - file upload (input type=file), JS prompt, fullscreen video
+   - login/external links system browser me khulte hain
 
-## APK kaise banaye (bina Android Studio ke)
-1. GitHub par naya repo banao aur is poore folder ki files upload karo (`.github` folder ke saath).
-2. Repo ke **Actions** tab par jao. Build apne aap chalegi (ya "Build APK" > "Run workflow").
-3. Build poori hone par us run ke neeche **Artifacts** se `SimpleBrowser-debug-apk` download karo.
-4. Zip khol kar `app-debug.apk` phone me install karo (Settings me "Install unknown apps" allow karna padega).
+## Pehli baar floating chalane par
+- Notification permission (Android 13+) allow karo
+- "Display over other apps" permission allow karo
+- Notification me "Band karo" se floating band ho jata hai
 
-## Home page badalna
-`app/src/main/java/com/example/simplebrowser/MainActivity.kt` me `HOME_URL` badal do.
+## Default URL badalna
+`app/src/main/java/com/example/simplebrowser/AppConfig.kt`
+(ya floating window ke ⚙ settings se)
 
-## Android Studio se banana ho to
-Folder open karo, Gradle sync hone do, phir Build > Build APK(s).
+## Build (GitHub Actions)
+Repo me `SimpleBrowser.zip` upload karo -> Actions me "Unzip and Build APK" chalegi ->
+Artifacts se `SimpleBrowser-debug-apk` download karo.
