@@ -12,7 +12,7 @@ Ek app, do mode:
 - Browser window: upar ke patle handle se drag, ◢ corner se resize, ⛶ se maximize (status bar tak poori screen).
 - ⚙ settings: website URL, icon size, dot opacity, dot size.
 - File upload (input type=file), JS prompt, fullscreen video chalte hain.
-- Login/external links system browser me khulte hain.
+- Saare http/https links (google search, login, naye window/tab) isi floating window me khulte hain; sirf tel:/mailto: jaise links dusri app me jate hain.
 
 ## Text copy / paste
 Floating window me text select karne par neeche Lion **Copy bar** aata hai:

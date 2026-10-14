@@ -1145,21 +1145,18 @@ class FloatingService : Service() {
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val target = request?.url ?: return false
-                    val scheme = target.scheme ?: return false
-                    val full = target.toString()
-                    val homeHost = Uri.parse(url).host
-                    val host = target.host ?: ""
-                    val isAuth = host.endsWith("fyers.in") || host.endsWith("google.com") || full.contains("oauth2")
-                    val isExternalHost = (scheme == "http" || scheme == "https") && target.host != homeHost
-                    val isOtherScheme = scheme != "http" && scheme != "https"
-                    if (isAuth || isExternalHost || isOtherScheme) {
-                        // login/popup/external link: system browser me kholo
-                        val intent = Intent(Intent.ACTION_VIEW, target)
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        try { ctx.startActivity(intent) } catch (e: Exception) { }
-                        return true
-                    }
-                    return false
+                    val scheme = (target.scheme ?: return false).lowercase()
+                    // http/https (google search, login, kuch bhi) hamesha isi window me khule
+                    if (scheme == "http" || scheme == "https") return false
+                    // page ke apne internal schemes bhi yahin
+                    if (scheme == "about" || scheme == "data" || scheme == "blob" ||
+                        scheme == "javascript" || scheme == "file"
+                    ) return false
+                    // tel:, mailto:, intent:, upi: jaise links ko hi dusri app me kholo
+                    val intent = Intent(Intent.ACTION_VIEW, target)
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    try { ctx.startActivity(intent) } catch (e: Exception) { }
+                    return true
                 }
 
                 // offline / site na mile: sirf main page par chhota error page (loop na bane)
@@ -1199,13 +1196,21 @@ class FloatingService : Service() {
                 override fun onCreateWindow(
                     view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?
                 ): Boolean {
-                    val data = view?.hitTestResult?.extra
-                    if (data != null) {
-                        val i = Intent(Intent.ACTION_VIEW, Uri.parse(data))
-                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        try { ctx.startActivity(i) } catch (e: Exception) { }
+                    // target=_blank / window.open: naya window nahi, isi window me load karo
+                    val msg = resultMsg ?: return false
+                    val transport = msg.obj as? WebView.WebViewTransport ?: return false
+                    val temp = WebView(ctx)
+                    temp.webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean {
+                            val u = r?.url?.toString()
+                            if (u != null) handler.post { webView.loadUrl(u) }
+                            handler.post { try { temp.destroy() } catch (e: Exception) { } }
+                            return true
+                        }
                     }
-                    return false
+                    transport.webView = temp
+                    msg.sendToTarget()
+                    return true
                 }
 
                 override fun onJsPrompt(

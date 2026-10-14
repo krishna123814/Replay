@@ -16,7 +16,9 @@ android {
         versionCode = vcProp ?: (System.currentTimeMillis() / 60000L).toInt()
         versionName = "3.0"
 
-        val repoProp = (project.findProperty("githubRepo") as String?) ?: ""
+        // GitHub Actions -PgithubRepo=<owner/repo> deta hai; na mile (local build) to ye default repo
+        val repoProp = (project.findProperty("githubRepo") as String?)
+            ?.takeIf { it.isNotBlank() } ?: "krishna123814/Replay"
         buildConfigField("String", "UPDATE_REPO", "\"$repoProp\"")
     }
 
