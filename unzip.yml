@@ -1,0 +1,57 @@
+name: Unzip and Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "SimpleBrowser.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip ko extract karo
+        run: |
+          test -f SimpleBrowser.zip || { echo "SimpleBrowser.zip repo ke root me nahi mili"; exit 1; }
+          rm -rf _project && mkdir _project
+          unzip -q SimpleBrowser.zip -d _project
+          # agar zip ke andar ek extra folder ho to usse bahar nikalo
+          if [ ! -d _project/app ]; then
+            inner=$(find _project -maxdepth 2 -type d -name app | head -1 | xargs dirname)
+            test -n "$inner" || { echo "zip me app/ folder nahi mila"; exit 1; }
+            mv "$inner" _project_inner && rm -rf _project && mv _project_inner _project
+          fi
+          # GITHUB_TOKEN .github/workflows ko push nahi kar sakta, isliye use chhod do
+          rm -rf _project/.github
+          cp -r _project/. .
+          rm -rf _project
+
+      - name: Extract ki hui files repo me commit karo
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Extract SimpleBrowser project" || echo "kuch naya nahi mila"
+          git push || echo "push nahi hua, build phir bhi chalega"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Debug APK banao
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SimpleBrowser-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
