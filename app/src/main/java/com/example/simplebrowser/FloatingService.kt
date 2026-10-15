@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -29,6 +30,7 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.WindowInsets
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -51,13 +53,15 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 
 /**
  * Lion floating browser: kisi bhi app ke upar tairta golden dot.
  * - dot tap -> browser window show/hide; dot long-press -> chhota pill menu (back, refresh, maximize, window show/hide, settings, close); drag -> move
- * - dot ko kahin bhi drag karo; neeche ❌ zone me chhodo to band
+ * - dot ko kahin bhi drag karo; neeche ❌ zone me chhodo to us window ko band kar do
+ * - pill me ➕: nayi independent floating window (alag URL, alag dot, max 3); ✕ sirf usi window ko band karta hai
  * - browser window: upar ke handle se drag, ◢ se resize, ⛶ maximize
  * - ⚙ settings: URL, icon size, opacity, dot size
  * - text select -> Lion Copy bar (Copy / Select all / Paste)
@@ -71,13 +75,16 @@ class FloatingService : Service() {
         const val CHANNEL_ID = "floating_browser"
         const val NOTIF_ID = 1101
         const val PREFS = "FloatingAppPrefs"
+        const val MAX_WINDOWS = 3
 
         // File picker (input type=file) ka result yahan hold hota hai
         var filePathCallback: ValueCallback<Array<Uri>>? = null
         var instance: FloatingService? = null
     }
 
-    private var floatWindow: FloatWindow? = null
+    // ek se zyada independent floating windows (har ek ka apna slot id 0..MAX_WINDOWS-1)
+    private val windows = ArrayList<FloatWindow>()
+    private val handler = Handler(Looper.getMainLooper())
 
     // update download progress (0..99), -1 = download nahi chal raha
     private var downloadPercent = -1
@@ -103,6 +110,8 @@ class FloatingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // notification se "Band karo": sab band, agli baar fresh start
+            getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("open_slots").apply()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -127,26 +136,235 @@ class FloatingService : Service() {
     }
 
     override fun onDestroy() {
-        floatWindow?.destroy()
-        floatWindow = null
+        for (w in windows) w.destroy()
+        windows.clear()
         instance = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
-    fun restartWindow() {
-        floatWindow?.destroy()
-        floatWindow = null
-        createWindowIfNeeded()
+    // ── multi window ──────────────────────────────────────────────────────
+    private fun urlKey(id: Int): String = if (id == 0) "custom_url" else "w${id}_custom_url"
+
+    private fun normalizeUrl(raw: String): String {
+        var u = raw.trim()
+        if (u.isEmpty()) return ""
+        if (!u.startsWith("http://") && !u.startsWith("https://")) {
+            val ipPort = Regex("^\\d{1,3}(\\.\\d{1,3}){3}(:\\d+)?(/.*)?$")
+            u = if (ipPort.matches(u)) "http://$u" else "https://$u"
+        }
+        return u
+    }
+
+    // ── bookmarks (sab windows ke liye shared) ────────────────────────────
+    fun loadBookmarks(): MutableList<Bookmark> {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString("bookmarks", null)
+        val list = ArrayList<Bookmark>()
+        if (raw == null) {
+            // pehli baar: default site pehle se bookmark
+            list.add(Bookmark("Lion default", AppConfig.DEFAULT_URL))
+            saveBookmarks(list)
+            return list
+        }
+        try {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val u = o.optString("url")
+                if (u.isNotEmpty()) list.add(Bookmark(o.optString("title", u), u))
+            }
+        } catch (e: Exception) {
+        }
+        return list
+    }
+
+    private fun saveBookmarks(list: List<Bookmark>) {
+        val arr = JSONArray()
+        for (b in list) arr.put(JSONObject().put("title", b.title).put("url", b.url))
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("bookmarks", arr.toString()).apply()
+    }
+
+    /** 0 = add hua, 1 = pehle se hai, 2 = list full, 3 = valid URL nahi */
+    fun addBookmark(title: String, rawUrl: String): Int {
+        val u = rawUrl.trim()
+        if (!u.startsWith("http://") && !u.startsWith("https://")) return 3
+        val list = loadBookmarks()
+        if (list.any { it.url == u }) return 1
+        if (list.size >= BOOKMARK_MAX) return 2
+        val t = title.trim().ifEmpty { Uri.parse(u).host ?: u }.take(40)
+        list.add(Bookmark(t, u))
+        saveBookmarks(list)
+        return 0
+    }
+
+    fun removeBookmark(rawUrl: String) {
+        val list = loadBookmarks()
+        list.removeAll { it.url == rawUrl }
+        saveBookmarks(list)
+    }
+
+    private fun saveOpenSlots() {
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("open_slots", windows.joinToString(",") { it.id.toString() })
+            .apply()
     }
 
     private fun createWindowIfNeeded() {
-        if (floatWindow != null) return
+        if (windows.isNotEmpty()) return
+        if (!Settings.canDrawOverlays(this)) return
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val url = prefs.getString("custom_url", AppConfig.DEFAULT_URL) ?: AppConfig.DEFAULT_URL
-        val w = FloatWindow(this, url)
-        floatWindow = w
+        var ids = (prefs.getString("open_slots", "") ?: "")
+            .split(",").mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 0 until MAX_WINDOWS }.distinct()
+        if (ids.isEmpty()) ids = listOf(0)
+        for (id in ids) {
+            val url = prefs.getString(urlKey(id), null)
+                ?: prefs.getString(urlKey(0), AppConfig.DEFAULT_URL) ?: AppConfig.DEFAULT_URL
+            val w = FloatWindow(this, id, url)
+            windows.add(w)
+            w.show()
+        }
+        saveOpenSlots()
+        refreshBadges()
+        refreshNotification()
+    }
+
+    /** Nayi independent window (naya URL). Max MAX_WINDOWS. */
+    fun openNewWindow(rawUrl: String) {
+        val url = normalizeUrl(rawUrl)
+        if (url.isEmpty()) return
+        if (windows.size >= MAX_WINDOWS) {
+            Toast.makeText(this, "Max $MAX_WINDOWS windows khul sakti hain", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val used = windows.map { it.id }.toSet()
+        val id = (0 until MAX_WINDOWS).firstOrNull { it !in used } ?: return
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(urlKey(id), url).apply()
+        val w = FloatWindow(this, id, url)
+        windows.add(w)
         w.show()
+        w.openBrowser()
+        saveOpenSlots()
+        refreshBadges()
+        refreshNotification()
+        if (layoutMode != 0) {
+            applyLayout()
+            handler.post { bringDotsToFront() }
+        }
+    }
+
+    /** Sirf ek window band karo; aakhri band hone par service bhi band. */
+    fun closeWindow(w: FloatWindow) {
+        if (!windows.remove(w)) return
+        w.destroy()
+        saveOpenSlots()
+        if (windows.isEmpty()) {
+            stopSelf()
+        } else {
+            refreshBadges()
+            refreshNotification()
+            if (windows.size < 2) {
+                layoutMode = 0
+                applyLayout()
+            } else if (layoutMode != 0) {
+                applyLayout()
+            }
+        }
+    }
+
+    /** Renderer mara to usi slot me window dobara banao. */
+    fun restartWindow(w: FloatWindow) {
+        val idx = windows.indexOf(w)
+        if (idx < 0) return
+        val id = w.id
+        val u = w.homeUrl()
+        w.destroy()
+        val nw = FloatWindow(this, id, u)
+        windows[idx] = nw
+        nw.show()
+        refreshBadges()
+    }
+
+    // ── windows layout: sab windows ek saath, barabar hisse me ─────────────
+    // 0 = normal, 1 = upar-neeche barabar, 2 = side-by-side barabar
+    private var layoutMode = 0
+
+    private fun statusBarHeight(): Int {
+        val rid = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (rid > 0) resources.getDimensionPixelSize(rid) else 0
+    }
+
+    /** [x, y, width, height] : system bars chhodkar jitni jagah milti hai. */
+    private fun usableArea(): IntArray {
+        val m = resources.displayMetrics
+        var left = 0
+        var top = statusBarHeight()
+        var w = m.widthPixels
+        var h = m.heightPixels - top
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                val metrics = wm.currentWindowMetrics
+                val ins = metrics.windowInsets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+                )
+                val b = metrics.bounds
+                left = ins.left
+                top = ins.top
+                w = b.width() - ins.left - ins.right
+                h = b.height() - ins.top - ins.bottom
+            } catch (e: Exception) {
+            }
+        }
+        return intArrayOf(left, top, maxOf(w, 1), maxOf(h, 1))
+    }
+
+    private fun applyLayout() {
+        val list = windows.sortedBy { it.id }
+        val n = list.size
+        if (n < 2 || layoutMode == 0) {
+            for (w in list) w.restoreGeometry()
+            return
+        }
+        val a = usableArea()
+        for ((i, w) in list.withIndex()) {
+            if (layoutMode == 1) {
+                val h = a[3] / n
+                w.tileTo(a[0], a[1] + i * h, a[2], if (i == n - 1) a[3] - h * (n - 1) else h)
+            } else {
+                val wd = a[2] / n
+                w.tileTo(a[0] + i * wd, a[1], if (i == n - 1) a[2] - wd * (n - 1) else wd, a[3])
+            }
+        }
+    }
+
+    /** Pill ka ▤ button: normal -> upar-neeche -> side-by-side -> normal */
+    fun cycleLayout() {
+        if (windows.size < 2) {
+            Toast.makeText(this, "Layout ke liye kam se kam 2 windows chahiye", Toast.LENGTH_SHORT).show()
+            return
+        }
+        layoutMode = (layoutMode + 1) % 3
+        applyLayout()
+        val msg = when (layoutMode) {
+            1 -> "Layout: ${windows.size} windows upar-neeche barabar"
+            2 -> "Layout: ${windows.size} windows side-by-side barabar"
+            else -> "Layout: pehle jaisa"
+        }
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        handler.post { bringDotsToFront() }
+    }
+
+    private fun refreshBadges() {
+        val multi = windows.size > 1
+        for (w in windows) w.setBadge(multi)
+    }
+
+    /** Sab dots ko browser windows ke upar rakho taaki hamesha dikhen. */
+    fun bringDotsToFront() {
+        for (w in windows) w.reAddDot()
     }
 
     private fun createChannel() {
@@ -171,6 +389,7 @@ class FloatingService : Service() {
             downloadPercent in 0..99 -> "Update download ho raha hai: $downloadPercent%"
             installIntent != null -> "Update download ho gaya – \"Install karo\" dabao"
             hasPending -> "Naya version available"
+            windows.size > 1 -> "${windows.size} windows khuli hain – \"Band karo\" se sab band"
             else -> "Band karne ke liye \"Band karo\" dabao"
         }
         val b = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -249,7 +468,7 @@ class FloatingService : Service() {
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    inner class FloatWindow(private val ctx: Context, private var url: String) {
+    inner class FloatWindow(private val ctx: Context, val id: Int, private var url: String) {
 
         private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         private val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -271,6 +490,7 @@ class FloatingService : Service() {
         private lateinit var dotRoot: LinearLayout
         private lateinit var dotWrapper: FrameLayout
         private lateinit var dotView: View
+        private lateinit var badge: TextView
         private lateinit var pill: LinearLayout
         private lateinit var dotParams: WindowManager.LayoutParams
 
@@ -282,10 +502,13 @@ class FloatingService : Service() {
         private lateinit var btnRefresh: TextView
         private lateinit var btnMaximize: TextView
         private lateinit var btnWindow: TextView
+        private lateinit var btnNew: TextView
+        private lateinit var btnLayout: TextView
         private lateinit var btnSettings: TextView
         private lateinit var btnClose: TextView
 
         private lateinit var inputUrl: EditText
+        private lateinit var bookmarkBox: LinearLayout
         private lateinit var sbSize: SeekBar
         private lateinit var sbOpacity: SeekBar
         private lateinit var sbDotSize: SeekBar
@@ -326,6 +549,188 @@ class FloatingService : Service() {
 
         private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
 
+        // slot 0 purane keys use karta hai (purani saved position/URL na jaye)
+        private fun dotKey(axis: String): String = if (id == 0) "dot_$axis" else "w${id}_dot_$axis"
+
+        fun homeUrl(): String = url
+
+        /** Layout: is window ko diye gaye hisse me rakho aur dikhao. */
+        fun tileTo(x: Int, y: Int, w: Int, h: Int) {
+            if (isMaximized) toggleMaximize()
+            lastWindowX = x
+            lastWindowY = y
+            normalW = w
+            normalH = h
+            if (isBrowserShown) applyBrowserParams() else showBrowser()
+        }
+
+        /** Layout se pehle wali (saved) jagah/size wapas. */
+        fun restoreGeometry() {
+            val m = ctx.resources.displayMetrics
+            lastWindowX = prefs.getInt("w${id}_win_x", dp(8) + id * dp(24))
+                .coerceIn(-dp(40), maxOf(0, m.widthPixels - dp(60)))
+            lastWindowY = prefs.getInt("w${id}_win_y", dp(60) + id * dp(24))
+                .coerceIn(0, maxOf(0, m.heightPixels - dp(60)))
+            normalW = prefs.getInt("w${id}_win_w", minOf(dp(360), m.widthPixels - dp(16)))
+                .coerceIn(dp(200), m.widthPixels)
+            normalH = prefs.getInt("w${id}_win_h", minOf(dp(500), m.heightPixels - dp(80)))
+                .coerceIn(dp(260), m.heightPixels)
+            if (isBrowserShown) applyBrowserParams()
+        }
+
+        fun openBrowser() { showBrowser() }
+
+        fun setBadge(show: Boolean) {
+            if (!::badge.isInitialized) return
+            badge.visibility = if (show) View.VISIBLE else View.GONE
+        }
+
+        fun reAddDot() {
+            try {
+                wm.removeView(dotRoot)
+                wm.addView(dotRoot, dotParams)
+            } catch (e: Exception) { }
+        }
+
+        private fun dialogBuilder(): AlertDialog.Builder =
+            AlertDialog.Builder(
+                ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            )
+
+        private fun showOverlayDialog(b: AlertDialog.Builder) {
+            val d = b.create()
+            d.window?.setType(overlayType())
+            d.show()
+        }
+
+        // bookmark chun kar nayi window kholo
+        private fun pickBookmarkForNewWindow() {
+            val list = this@FloatingService.loadBookmarks()
+            if (list.isEmpty()) {
+                Toast.makeText(ctx, "Abhi koi bookmark nahi hai", Toast.LENGTH_SHORT).show()
+                return
+            }
+            try {
+                val names = Array(list.size) { list[it].title }
+                showOverlayDialog(
+                    dialogBuilder().setTitle("Bookmark se nayi window")
+                        .setItems(names) { _, which ->
+                            this@FloatingService.openNewWindow(list[which].url)
+                        }
+                        .setNegativeButton("Cancel", null)
+                )
+            } catch (e: Exception) { }
+        }
+
+        private fun refreshBookmarkList() {
+            bookmarkBox.removeAllViews()
+            val list = this@FloatingService.loadBookmarks()
+            if (list.isEmpty()) {
+                val t = TextView(ctx)
+                t.text = "Abhi koi bookmark nahi hai"
+                t.setTextColor(Color.parseColor("#8a8f9c"))
+                t.textSize = 12f
+                bookmarkBox.addView(t)
+                return
+            }
+            for (bm in list) {
+                val row = LinearLayout(ctx)
+                row.orientation = LinearLayout.HORIZONTAL
+                row.gravity = Gravity.CENTER_VERTICAL
+                row.setBackgroundColor(Color.parseColor("#2a2e39"))
+                row.setPadding(dp(10), dp(6), dp(4), dp(6))
+
+                val txt = TextView(ctx)
+                txt.text = bm.title + "\n" + bm.url
+                txt.setTextColor(Color.WHITE)
+                txt.textSize = 12f
+                txt.maxLines = 2
+                txt.ellipsize = android.text.TextUtils.TruncateAt.END
+                txt.setOnClickListener {
+                    // ek tap: is window ka URL badlo aur load karo
+                    prefs.edit().putString(urlKey(id), bm.url).apply()
+                    url = bm.url
+                    inputUrl.setText(url)
+                    webView.loadUrl(url)
+                    layoutSettings.visibility = View.GONE
+                }
+                row.addView(txt, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+                val del = TextView(ctx)
+                del.text = "✕"
+                del.setTextColor(Color.parseColor("#ff6b6b"))
+                del.textSize = 16f
+                del.gravity = Gravity.CENTER
+                del.setOnClickListener {
+                    try {
+                        showOverlayDialog(
+                            dialogBuilder().setTitle("Bookmark hataye?")
+                                .setMessage(bm.title)
+                                .setPositiveButton("Hatao") { _, _ ->
+                                    this@FloatingService.removeBookmark(bm.url)
+                                    refreshBookmarkList()
+                                }
+                                .setNegativeButton("Rehne do", null)
+                        )
+                    } catch (e: Exception) { }
+                }
+                row.addView(del, LinearLayout.LayoutParams(dp(40), dp(40)))
+
+                val rlp = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                rlp.topMargin = dp(4)
+                bookmarkBox.addView(row, rlp)
+            }
+        }
+
+        private fun saveCurrentAsBookmark() {
+            val u = webView.url ?: url
+            val t = webView.title ?: ""
+            when (this@FloatingService.addBookmark(t, u)) {
+                0 -> Toast.makeText(ctx, "Bookmark ho gaya", Toast.LENGTH_SHORT).show()
+                1 -> Toast.makeText(ctx, "Ye page pehle se bookmark hai", Toast.LENGTH_SHORT).show()
+                2 -> Toast.makeText(ctx, "Bookmark list full ($BOOKMARK_MAX)", Toast.LENGTH_SHORT).show()
+                else -> Toast.makeText(ctx, "Is page ko bookmark nahi kar sakte", Toast.LENGTH_SHORT).show()
+            }
+            refreshBookmarkList()
+        }
+
+        private fun saveGeometry() {
+            prefs.edit()
+                .putInt("w${id}_win_x", lastWindowX).putInt("w${id}_win_y", lastWindowY)
+                .putInt("w${id}_win_w", normalW).putInt("w${id}_win_h", normalH)
+                .apply()
+        }
+
+        private fun promptNewWindow() {
+            if (windows.size >= MAX_WINDOWS) {
+                Toast.makeText(ctx, "Max $MAX_WINDOWS windows khul sakti hain", Toast.LENGTH_SHORT).show()
+                return
+            }
+            try {
+                val themed = ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                val input = EditText(themed)
+                input.setSingleLine(true)
+                input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                input.setText(url)
+                input.selectAll()
+                val dialog = AlertDialog.Builder(themed)
+                    .setTitle("Nayi window – URL daalo")
+                    .setView(input)
+                    .setPositiveButton("Kholo") { _, _ ->
+                        this@FloatingService.openNewWindow(input.text.toString())
+                    }
+                    .setNeutralButton("Bookmarks") { _, _ -> pickBookmarkForNewWindow() }
+                    .setNegativeButton("Cancel", null)
+                    .create()
+                dialog.window?.setType(overlayType())
+                dialog.show()
+            } catch (e: Exception) {
+                this@FloatingService.openNewWindow(url)
+            }
+        }
+
         @Suppress("DEPRECATION")
         private fun overlayType(): Int =
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
@@ -336,11 +741,14 @@ class FloatingService : Service() {
         // ── entry ─────────────────────────────────────────────────────────
         fun show() {
             val m = ctx.resources.displayMetrics
-            lastWindowX = dp(8)
-            lastWindowY = dp(60)
-            // default: right edge, screen height ka 1/4
-            dotCX = prefs.getInt("dot_x", m.widthPixels - dp(24))
-            dotCY = prefs.getInt("dot_y", m.heightPixels / 4)
+            // har window ka apna saved position/size (slot id ke hisaab se)
+            lastWindowX = prefs.getInt("w${id}_win_x", dp(8) + id * dp(24))
+                .coerceIn(-dp(40), maxOf(0, m.widthPixels - dp(60)))
+            lastWindowY = prefs.getInt("w${id}_win_y", dp(60) + id * dp(24))
+                .coerceIn(0, maxOf(0, m.heightPixels - dp(60)))
+            // default: right edge, screen height ka 1/4 (har nayi window thodi neeche)
+            dotCX = prefs.getInt(dotKey("x"), m.widthPixels - dp(24))
+            dotCY = prefs.getInt(dotKey("y"), m.heightPixels / 4 + id * dp(64))
             dotCX = dotCX.coerceIn(0, m.widthPixels)
             dotCY = dotCY.coerceIn(0, m.heightPixels)
 
@@ -451,10 +859,25 @@ class FloatingService : Service() {
             dotView = View(ctx)
             val dotShape = GradientDrawable()
             dotShape.shape = GradientDrawable.OVAL
-            dotShape.setColor(Color.parseColor("#F5A623"))
+            val dotColors = arrayOf("#F5A623", "#29B6F6", "#66BB6A")
+            dotShape.setColor(Color.parseColor(dotColors[id % dotColors.size]))
             dotShape.setStroke(maxOf(1, (1.5f * density).toInt()), Color.parseColor("#B3FFFFFF"))
             dotView.background = dotShape
             dotWrapper.addView(dotView, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+            // window number (sirf tab dikhta hai jab 2+ windows ho)
+            badge = TextView(ctx)
+            badge.text = (id + 1).toString()
+            badge.gravity = Gravity.CENTER
+            badge.setTextColor(Color.parseColor("#1A1A1A"))
+            badge.setTypeface(null, Typeface.BOLD)
+            badge.textSize = 9f
+            badge.visibility = View.GONE
+            dotWrapper.addView(
+                badge,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
             dotRoot.addView(dotWrapper, LinearLayout.LayoutParams(dp(40), dp(40)))
 
             // pill: dark rounded row, dot ke paas khulta hai
@@ -472,6 +895,8 @@ class FloatingService : Service() {
             btnRefresh = mkBtn("⟳")
             btnMaximize = mkBtn("⛶")
             btnWindow = mkBtn("🪟")
+            btnNew = mkBtn("➕")
+            btnLayout = mkBtn("▤")
             btnSettings = mkBtn("⚙")
             btnClose = mkBtn("✕")
             for (b in menuButtons) pill.addView(b)
@@ -656,19 +1081,23 @@ class FloatingService : Service() {
 
             val saveBtn = blueButton("Save URL aur load karo")
             saveBtn.setOnClickListener {
-                var newUrl = inputUrl.text.toString().trim()
+                val newUrl = normalizeUrl(inputUrl.text.toString())
                 if (newUrl.isNotEmpty()) {
-                    if (!newUrl.startsWith("http://") && !newUrl.startsWith("https://")) {
-                        val ipPort = Regex("^\\d{1,3}(\\.\\d{1,3}){3}(:\\d+)?(/.*)?$")
-                        newUrl = if (ipPort.matches(newUrl)) "http://$newUrl" else "https://$newUrl"
-                    }
-                    prefs.edit().putString("custom_url", newUrl).apply()
+                    prefs.edit().putString(urlKey(id), newUrl).apply()
                     url = newUrl
                     webView.loadUrl(url)
                     layoutSettings.visibility = View.GONE
                 }
             }
             col.addView(saveBtn, lp)
+
+            col.addView(label("Bookmarks"), lp)
+            val bmSaveBtn = blueButton("⭐ Current page bookmark karo")
+            bmSaveBtn.setOnClickListener { saveCurrentAsBookmark() }
+            col.addView(bmSaveBtn, lp)
+            bookmarkBox = LinearLayout(ctx)
+            bookmarkBox.orientation = LinearLayout.VERTICAL
+            col.addView(bookmarkBox, lp)
 
             col.addView(label("Icon size"), lp)
             sbSize = SeekBar(ctx)
@@ -684,6 +1113,10 @@ class FloatingService : Service() {
             sbDotSize = SeekBar(ctx)
             sbDotSize.max = 18 // progress 0..18 -> 10..28dp
             col.addView(sbDotSize, lp)
+
+            val dlBtn = blueButton("⬇ Downloads / Schedule")
+            dlBtn.setOnClickListener { Downloader.manager(ctx, true) }
+            col.addView(dlBtn, lp)
 
             val updateBtn = blueButton("Update check karo (v${BuildConfig.VERSION_NAME})")
             updateBtn.setOnClickListener { manualCheckUpdate(updateBtn) }
@@ -728,8 +1161,10 @@ class FloatingService : Service() {
         // ── window params ─────────────────────────────────────────────────
         private fun setupWindowParams() {
             val m = ctx.resources.displayMetrics
-            normalW = minOf(dp(360), m.widthPixels - dp(16))
-            normalH = minOf(dp(500), m.heightPixels - dp(80))
+            normalW = prefs.getInt("w${id}_win_w", minOf(dp(360), m.widthPixels - dp(16)))
+                .coerceIn(dp(200), m.widthPixels)
+            normalH = prefs.getInt("w${id}_win_h", minOf(dp(500), m.heightPixels - dp(80)))
+                .coerceIn(dp(260), m.heightPixels)
 
             // Window B (browser): shuru me hidden
             params = WindowManager.LayoutParams(
@@ -823,22 +1258,30 @@ class FloatingService : Service() {
             lp.width = s
             lp.height = s
             dotView.layoutParams = lp
+            if (::badge.isInitialized) {
+                badge.textSize = (sizeDp.coerceIn(10, 28) * 0.55f).coerceIn(7f, 15f)
+            }
+        }
+
+        // theme (icon size / opacity / dot size) sab windows ke liye shared hai
+        fun applyThemeFromPrefs() {
+            applyTextSize(12f + prefs.getInt("theme_size", 2))
+            applyOpacity(prefs.getInt("theme_opacity", 75))
+            applyDotSize(prefs.getInt("dot_size", 16))
         }
 
         private fun loadSavedSettings() {
             val size = prefs.getInt("theme_size", 2)
-            applyTextSize(12f + size)
             sbSize.progress = size
+            sbOpacity.progress = prefs.getInt("theme_opacity", 75)
+            sbDotSize.progress = prefs.getInt("dot_size", 16).coerceIn(10, 28) - 10
+            applyThemeFromPrefs()
 
-            val opacity = prefs.getInt("theme_opacity", 75)
-            applyOpacity(opacity)
-            sbOpacity.progress = opacity
+            inputUrl.setText(prefs.getString(urlKey(id), url))
+        }
 
-            val ds = prefs.getInt("dot_size", 16).coerceIn(10, 28)
-            applyDotSize(ds)
-            sbDotSize.progress = ds - 10
-
-            inputUrl.setText(prefs.getString("custom_url", AppConfig.DEFAULT_URL))
+        private fun syncOtherWindowsTheme() {
+            for (w in windows) if (w !== this) w.applyThemeFromPrefs()
         }
 
         // ── dot + pill ────────────────────────────────────────────────────
@@ -902,9 +1345,16 @@ class FloatingService : Service() {
         private fun showBrowser() {
             if (isBrowserShown) return
             isBrowserShown = true
+            // is window ko baaki windows ke upar lao (abhi hidden hai, isliye safe)
+            try {
+                wm.removeView(root)
+                wm.addView(root, params)
+            } catch (e: Exception) { }
             root.visibility = View.VISIBLE
             btnWindow.text = "—"
             applyBrowserParams()
+            // dots hamesha browser windows ke upar rahen
+            handler.post { this@FloatingService.bringDotsToFront() }
         }
 
         private fun hideBrowser() {
@@ -944,9 +1394,18 @@ class FloatingService : Service() {
             btnSettings.setOnClickListener {
                 scheduleAutoCollapse()
                 showBrowser()
+                refreshBookmarkList()
                 layoutSettings.visibility = View.VISIBLE
             }
-            btnClose.setOnClickListener { this@FloatingService.stopSelf() }
+            btnNew.setOnClickListener {
+                scheduleAutoCollapse()
+                promptNewWindow()
+            }
+            btnLayout.setOnClickListener {
+                scheduleAutoCollapse()
+                this@FloatingService.cycleLayout()
+            }
+            btnClose.setOnClickListener { this@FloatingService.closeWindow(this) }
 
             // dot: tap = browser show/hide, long-press = pill menu, drag = move, ❌ zone me chhodo = band
             var sX = 0; var sY = 0; var sTX = 0f; var sTY = 0f; var dragging = false
@@ -987,9 +1446,9 @@ class FloatingService : Service() {
                         if (dragging) {
                             hideCloseZone()
                             if (isOverCloseZone(e.rawX, e.rawY, m.widthPixels, m.heightPixels)) {
-                                this@FloatingService.stopSelf()
+                                this@FloatingService.closeWindow(this)
                             } else {
-                                prefs.edit().putInt("dot_x", dotCX).putInt("dot_y", dotCY).apply()
+                                prefs.edit().putInt(dotKey("x"), dotCX).putInt(dotKey("y"), dotCY).apply()
                             }
                         } else if (longPressed) {
                             // menu khul chuka hai, ungli uthane par kuch nahi
@@ -1026,6 +1485,10 @@ class FloatingService : Service() {
                         updateBrowserLayout()
                         true
                     }
+                    MotionEvent.ACTION_UP -> {
+                        saveGeometry()
+                        true
+                    }
                     else -> false
                 }
             }
@@ -1048,6 +1511,10 @@ class FloatingService : Service() {
                         updateBrowserLayout()
                         true
                     }
+                    MotionEvent.ACTION_UP -> {
+                        saveGeometry()
+                        true
+                    }
                     else -> false
                 }
             }
@@ -1057,6 +1524,7 @@ class FloatingService : Service() {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) prefs.edit().putInt("theme_size", progress).apply()
                     applyTextSize(12f + progress)
+                    if (fromUser) syncOtherWindowsTheme()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -1065,6 +1533,7 @@ class FloatingService : Service() {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                     if (fromUser) prefs.edit().putInt("theme_opacity", progress).apply()
                     applyOpacity(progress)
+                    if (fromUser) syncOtherWindowsTheme()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -1074,6 +1543,7 @@ class FloatingService : Service() {
                     val s = progress + 10
                     if (fromUser) prefs.edit().putInt("dot_size", s).apply()
                     applyDotSize(s)
+                    if (fromUser) syncOtherWindowsTheme()
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -1131,6 +1601,11 @@ class FloatingService : Service() {
             webView.setOnLongClickListener { false }
             webView.addJavascriptInterface(Bridge(), "LionBridge")
 
+            // file download: Abhi / Schedule dialog (overlay)
+            webView.setDownloadListener { dlUrl, ua, cd, mime, len ->
+                Downloader.offer(ctx, true, dlUrl, ua, cd, mime, len, webView.url)
+            }
+
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                     lastSelection = ""
@@ -1186,7 +1661,7 @@ class FloatingService : Service() {
                 // Streamlit/chart OOM me renderer mare to window dobara banao
                 @android.annotation.TargetApi(26)
                 override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                    handler.post { this@FloatingService.restartWindow() }
+                    handler.post { this@FloatingService.restartWindow(this@FloatWindow) }
                     return true
                 }
             }
@@ -1295,3 +1770,7 @@ class FloatingService : Service() {
         }
     }
 }
+
+const val BOOKMARK_MAX = 40
+
+data class Bookmark(val title: String, val url: String)

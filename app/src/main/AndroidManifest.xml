@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- usesCleartextTraffic=true: http:// (jaise IP:port) sites bhi khul sakein -->
     <application
@@ -46,6 +47,19 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="floating_browser_overlay" />
         </service>
+
+        <!-- Scheduled downloads: alarm bajne par + reboot/app-update ke baad dobara set -->
+        <receiver
+            android:name=".DownloadAlarmReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".DownloadBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- In-app update: download ki hui APK install screen ko dene ke liye -->
         <provider

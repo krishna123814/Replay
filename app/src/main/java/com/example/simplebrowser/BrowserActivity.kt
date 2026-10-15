@@ -92,6 +92,11 @@ class BrowserActivity : AppCompatActivity() {
             allowContentAccess = true
         }
 
+        // file download: Abhi / Schedule dialog
+        web.setDownloadListener { dlUrl, ua, cd, mime, len ->
+            Downloader.offer(this, false, dlUrl, ua, cd, mime, len, web.url)
+        }
+
         web.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (!urlBar.hasFocus()) urlBar.setText(url)

@@ -14,6 +14,27 @@ Ek app, do mode:
 - File upload (input type=file), JS prompt, fullscreen video chalte hain.
 - Saare http/https links (google search, login, naye window/tab) isi floating window me khulte hain; sirf tel:/mailto: jaise links dusri app me jate hain.
 
+## Multiple independent floating windows
+- Pill menu me **➕**: URL poochta hai (pehle se bhara hua), phir bilkul nayi independent floating window khulti hai (apna dot, apna browser, apna size/position).
+- Max 3 windows. Dot ka rang alag (sone-jaisa, neela, hara); 2+ windows hone par dot par number (1, 2, 3) dikhta hai.
+- Har window ka apna URL, dot position aur browser size/position yaad rehta hai; app dobara chalne par wahi windows wapas aati hain.
+- **✕** ya dot ko ❌ zone me chhodna sirf usi window ko band karta hai; aakhri window band hote hi service band. Notification ka "Band karo" sab band karta hai.
+- **▤ Layout button** (pill me): 2+ windows hon to dabane par sab windows ek saath screen par barabar hisson me aa jati hain. 1st tap = upar-neeche (2 ya 3 barabar patti), 2nd tap = side-by-side, 3rd tap = pehle jaisa size/position. Layout chalu ho aur window ➕ ya ✕ ho to baaki apne aap dobara barabar ho jati hain.
+- Cookies/login sab windows me shared; icon size, opacity aur dot size ki settings bhi sab windows ke liye same.
+
+## Bookmarks
+- ⚙ settings me "Bookmarks": **⭐ Current page bookmark karo** se page save hota hai (title ke saath, max 40). List me kisi bookmark par tap -> usi window me khulta hai (aur us window ka URL ban jata hai). Row ke **✕** se hatao (confirm poochta hai).
+- ➕ nayi window ke dialog me **Bookmarks** button: list se chuno to us bookmark ki nayi independent window khulti hai.
+- Bookmarks sab windows me shared hain. Pehli baar default site pehle se bookmark hoti hai.
+
+## Downloader (abhi + schedule)
+- Kisi bhi page par file download link dabao (floating window ya normal browser): dialog aata hai -> **Abhi** (turant download), **Schedule…** ya Cancel. "Sirf Wi-Fi par" checkbox bhi hai.
+- Schedule options: 15 minute / 1 ghante / 3 ghante baad, "Raat 2:00 baje", ya apna time chuno (waqt nikal chuka ho to agle din ka).
+- ⚙ settings -> **⬇ Downloads / Schedule**: scheduled downloads ki list (tap karke hatao), **Naya URL** (link paste karke download/schedule), **Downloads dekho** (system downloads list: pause/resume/open).
+- Download Android ke DownloadManager se hota hai (notification, resume). File `Downloads/Lion/` me aati hai (Android 9 ya kam par app ke apne Downloads folder me). Login wali site ke liye cookie aur referer saath jate hain.
+- Schedule exact-minute nahi hota: phone Doze me ho to kuch minute upar-neeche ho sakta hai. Reboot ya app update ke baad schedule wapas set ho jata hai.
+- blob:/data: wale downloads abhi support nahi.
+
 ## Text copy / paste
 Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 **Copy** (clipboard me), **Select all**, **Paste** (input box me). System long-press menu bhi allowed hai.
