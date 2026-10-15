@@ -33,7 +33,22 @@ Ek app, do mode:
 - ⚙ settings -> **⬇ Downloads / Schedule**: scheduled downloads ki list (tap karke hatao), **Naya URL** (link paste karke download/schedule), **Downloads dekho** (system downloads list: pause/resume/open).
 - Download Android ke DownloadManager se hota hai (notification, resume). File `Downloads/Lion/` me aati hai (Android 9 ya kam par app ke apne Downloads folder me). Login wali site ke liye cookie aur referer saath jate hain.
 - Schedule exact-minute nahi hota: phone Doze me ho to kuch minute upar-neeche ho sakta hai. Reboot ya app update ke baad schedule wapas set ho jata hai.
-- blob:/data: wale downloads abhi support nahi.
+
+## ⚡ Fast download engine (v3.1)
+Sab kuch ⚙ settings ke andar hai, main screen par kuch nahi badla.
+- **📥 Download queue (speed / ETA)**: live progress bar, speed, ETA, connections, retry count. Row par tap -> Pause / Resume / Cancel / Retry / Kholo / **File bhi delete**. Upar **⏯ Sab pause/resume** aur **🧹 Done saaf**. Notification me bhi total speed/ETA aur **Sab roko**.
+- **Multi-connection**: ek file 1–8 hisson me (Range requests) parallel download hoti hai, phir jod kar save. Server Range support na de to apne aap 1 connection.
+- **Batch queue**: **Naya URL** me kai links paste karo (har line me ek) -> **Sab queue me** ya sab ko ek saath **Schedule**. Ek saath kitni files chalein (1–4), baaki queue me wait karti hain.
+- **Auto-retry**: net/server error par exponential backoff ke saath wahi se resume (max retry settings me). Internet ya Wi-Fi (agar "Sirf Wi-Fi") na ho to retry gine bina intezaar karta hai. App band ho jaye to Queue me **Resume**.
+- **File type folders**: `Downloads/Lion/Videos | Audio | Images | Documents | Archives | APKs | Others/` (settings me on/off).
+- **blob: / data: downloads**: jo sites JS se file banati hain (blob) unka download ab chalta hai; naam/extension blob type se banta hai. Blob link page me hi expire na hui ho tab chalta hai.
+- **⚡ Download settings**: Fast engine on/off (off = purana Android DownloadManager), connections, parallel files, retry on/off + max retry, folder-by-type.
+- Scheduled downloads bhi isi engine se chalte hain.
+
+## 📜 History
+- Floating window aur normal browser dono page visits save karte hain (max 300, SPA pages bhi).
+- Normal browser me **Reload button ko dabaye rakho** -> History / Download queue / Download settings (screen par koi naya button nahi).
+- ⚙ settings -> **📜 History**: search, tap = us window me kholo, long-press = ek entry hatao, **Sab saaf**, aur "History save karo" on/off.
 
 ## Text copy / paste
 Floating window me text select karne par neeche Lion **Copy bar** aata hai:

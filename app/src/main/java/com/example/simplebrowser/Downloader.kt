@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.URLUtil
 import android.webkit.WebSettings
+import android.webkit.WebView
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -97,8 +98,19 @@ object Downloader {
         return if (n.isEmpty()) "download" else n.take(120)
     }
 
-    /** DownloadManager me daalo. true = enqueue ho gaya. */
+    fun cleanName(raw: String): String = sanitizeName(raw)
+
+    /**
+     * Download shuru karo. Fast engine ON ho (default) to Lion ke apne engine/queue me,
+     * warna purane Android DownloadManager me. true = ho gaya.
+     */
     fun enqueueNow(ctx: Context, spec: DlSpec, wifiOnly: Boolean): Boolean {
+        if (DlSettings.engineOn(ctx)) return DlEngine.add(ctx, spec, wifiOnly)
+        return enqueueSystem(ctx, spec, wifiOnly)
+    }
+
+    /** Purana tareeka: DownloadManager me daalo. */
+    private fun enqueueSystem(ctx: Context, spec: DlSpec, wifiOnly: Boolean): Boolean {
         try {
             val u = Uri.parse(spec.url)
             val scheme = u.scheme?.lowercase()
@@ -239,21 +251,34 @@ object Downloader {
         return c.timeInMillis
     }
 
-    private fun doSchedule(ctx: Context, spec: DlSpec, at: Long, wifi: Boolean) {
-        val item = schedule(ctx, spec, at, wifi)
+    private fun doSchedule(ctx: Context, specs: List<DlSpec>, at: Long, wifi: Boolean) {
+        for (spec in specs) schedule(ctx, spec, at, wifi)
+        val label = if (specs.size == 1) specs[0].name else "${specs.size} files"
         Toast.makeText(
-            ctx, "Schedule ho gaya: ${item.spec.name}\n${fmtTime(item.at)}", Toast.LENGTH_LONG
+            ctx, "Schedule ho gaya: $label\n${fmtTime(at)}", Toast.LENGTH_LONG
         ).show()
     }
 
     // ── entry: WebView ka download listener yahan aata hai ────────────────
     fun offer(
         ctx: Context, overlay: Boolean, url: String, ua: String?, contentDisposition: String?,
-        mime: String?, length: Long, referer: String?
+        mime: String?, length: Long, referer: String?, web: WebView? = null
     ) {
         val scheme = Uri.parse(url).scheme?.lowercase()
+        if (scheme == "blob") {
+            if (web != null) {
+                BlobDl.startBlob(ctx, web, url, contentDisposition, mime)
+            } else {
+                Toast.makeText(ctx, "Blob download sirf page ke andar se chalta hai", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        if (scheme == "data") {
+            BlobDl.saveDataUrl(ctx, url, contentDisposition, mime)
+            return
+        }
         if (scheme != "http" && scheme != "https") {
-            Toast.makeText(ctx, "Is type ka download (blob/data) abhi support nahi", Toast.LENGTH_LONG).show()
+            Toast.makeText(ctx, "Is type ka download support nahi", Toast.LENGTH_LONG).show()
             return
         }
         val name = URLUtil.guessFileName(url, contentDisposition, mime)
@@ -262,11 +287,11 @@ object Downloader {
             cookie = CookieManager.getInstance().getCookie(url) ?: ""
         } catch (e: Exception) {
         }
-        chooser(ctx, overlay, DlSpec(url, cookie, ua ?: "", referer ?: "", name, mime ?: ""), length)
+        chooser(ctx, overlay, listOf(DlSpec(url, cookie, ua ?: "", referer ?: "", name, mime ?: "")), length)
     }
 
-    /** "Abhi download" / "Schedule" / "Cancel" */
-    private fun chooser(ctx: Context, overlay: Boolean, spec: DlSpec, length: Long) {
+    /** "Abhi (queue me)" / "Schedule" / "Cancel" – ek ya kai files ke liye. */
+    private fun chooser(ctx: Context, overlay: Boolean, specs: List<DlSpec>, length: Long) {
         try {
             val t = themed(ctx)
             val cb = CheckBox(t)
@@ -278,33 +303,46 @@ object Downloader {
             box.setPadding(pad, 0, pad, 0)
             box.addView(cb)
 
+            val msg = if (specs.size == 1) {
+                specs[0].name + "\n" + fmtSize(length)
+            } else {
+                val first = specs.take(4).joinToString("\n") { "• " + it.name }
+                "${specs.size} files:\n" + first + (if (specs.size > 4) "\n…" else "")
+            }
+
             show(
                 AlertDialog.Builder(t)
-                    .setTitle("Download")
-                    .setMessage(spec.name + "\n" + fmtSize(length))
+                    .setTitle(if (specs.size == 1) "Download" else "Batch download")
+                    .setMessage(msg)
                     .setView(box)
-                    .setPositiveButton("Abhi") { _, _ ->
+                    .setPositiveButton(if (specs.size == 1) "Abhi" else "Sab queue me") { _, _ ->
                         prefs(ctx).edit().putBoolean(PREF_WIFI, cb.isChecked).apply()
-                        val ok = enqueueNow(ctx, spec, cb.isChecked)
+                        var ok = 0
+                        for (sp in specs) if (enqueueNow(ctx, sp, cb.isChecked)) ok++
+                        val engine = DlSettings.engineOn(ctx)
                         Toast.makeText(
                             ctx,
-                            if (ok) "Download shuru – notification dekho" else "Download nahi ho paya",
+                            when {
+                                ok == 0 -> "Download nahi ho paya"
+                                engine -> "$ok download queue me – ⚙ Settings → 📥 Download queue me progress dekho"
+                                else -> "Download shuru – notification dekho"
+                            },
                             Toast.LENGTH_SHORT
                         ).show()
                     }
                     .setNeutralButton("Schedule…") { _, _ ->
                         prefs(ctx).edit().putBoolean(PREF_WIFI, cb.isChecked).apply()
-                        pickTime(ctx, overlay, spec, cb.isChecked)
+                        pickTime(ctx, overlay, specs, cb.isChecked)
                     }
                     .setNegativeButton("Cancel", null),
                 overlay
             )
         } catch (e: Exception) {
-            enqueueNow(ctx, spec, false)
+            for (sp in specs) enqueueNow(ctx, sp, false)
         }
     }
 
-    private fun pickTime(ctx: Context, overlay: Boolean, spec: DlSpec, wifi: Boolean) {
+    private fun pickTime(ctx: Context, overlay: Boolean, specs: List<DlSpec>, wifi: Boolean) {
         val items = arrayOf(
             "15 minute baad", "1 ghante baad", "3 ghante baad", "Raat 2:00 baje", "Time chuno…"
         )
@@ -315,15 +353,15 @@ object Downloader {
                     .setItems(items) { _, which ->
                         val now = System.currentTimeMillis()
                         when (which) {
-                            0 -> doSchedule(ctx, spec, now + 15 * 60_000L, wifi)
-                            1 -> doSchedule(ctx, spec, now + 60 * 60_000L, wifi)
-                            2 -> doSchedule(ctx, spec, now + 3 * 60 * 60_000L, wifi)
-                            3 -> doSchedule(ctx, spec, nextOccurrence(2, 0), wifi)
+                            0 -> doSchedule(ctx, specs, now + 15 * 60_000L, wifi)
+                            1 -> doSchedule(ctx, specs, now + 60 * 60_000L, wifi)
+                            2 -> doSchedule(ctx, specs, now + 3 * 60 * 60_000L, wifi)
+                            3 -> doSchedule(ctx, specs, nextOccurrence(2, 0), wifi)
                             else -> {
                                 val c = Calendar.getInstance()
                                 val d = TimePickerDialog(
                                     themed(ctx),
-                                    { _, h, m -> doSchedule(ctx, spec, nextOccurrence(h, m), wifi) },
+                                    { _, h, m -> doSchedule(ctx, specs, nextOccurrence(h, m), wifi) },
                                     c.get(Calendar.HOUR_OF_DAY), c.get(Calendar.MINUTE), false
                                 )
                                 if (overlay) d.window?.setType(overlayType())
@@ -352,8 +390,12 @@ object Downloader {
                 val names = Array(list.size) { fmtTime(list[it].at) + " · " + list[it].spec.name }
                 b.setItems(names) { _, which -> confirmCancel(ctx, overlay, list[which]) }
             }
-            b.setPositiveButton("Naya URL") { _, _ -> askUrl(ctx, overlay) }
-            b.setNeutralButton("Downloads dekho") { _, _ -> openSystemDownloads(ctx) }
+            b.setPositiveButton("Naya URL") { _, _ -> askUrls(ctx, overlay) }
+            if (DlSettings.engineOn(ctx)) {
+                b.setNeutralButton("Queue (speed/ETA)") { _, _ -> DlUi.queue(ctx, overlay) }
+            } else {
+                b.setNeutralButton("Downloads dekho") { _, _ -> openSystemDownloads(ctx) }
+            }
             b.setNegativeButton("Band", null)
             show(b, overlay)
         } catch (e: Exception) {
@@ -377,23 +419,33 @@ object Downloader {
         }
     }
 
-    private fun askUrl(ctx: Context, overlay: Boolean) {
+    /** Ek ya kai links (har line me ek) paste karo: 1 link -> normal dialog, zyada -> batch. */
+    fun askUrls(ctx: Context, overlay: Boolean) {
         try {
             val t = themed(ctx)
             val input = EditText(t)
-            input.setSingleLine(true)
-            input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            input.hint = "https://…/file.zip"
+            input.setSingleLine(false)
+            input.minLines = 3
+            input.maxLines = 8
+            input.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_VARIATION_URI
+            input.hint = "https://…/file.zip\n(kai links: har line me ek)"
             show(
                 AlertDialog.Builder(t)
-                    .setTitle("Download URL")
+                    .setTitle("Download URL(s)")
                     .setView(input)
                     .setPositiveButton("Aage") { _, _ ->
-                        var u = input.text.toString().trim()
-                        if (u.isNotEmpty()) {
+                        val ua = WebSettings.getDefaultUserAgent(ctx)
+                        val specs = ArrayList<DlSpec>()
+                        for (line in input.text.toString().split("\n", " ", "\t", ",")) {
+                            var u = line.trim()
+                            if (u.isEmpty()) continue
                             if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://$u"
-                            offer(ctx, overlay, u, WebSettings.getDefaultUserAgent(ctx), null, null, -1L, null)
+                            val name = URLUtil.guessFileName(u, null, null)
+                            specs.add(DlSpec(u, "", ua, "", name, ""))
                         }
+                        if (specs.isNotEmpty()) chooser(ctx, overlay, specs, -1L)
                     }
                     .setNegativeButton("Cancel", null),
                 overlay

@@ -1118,6 +1118,23 @@ class FloatingService : Service() {
             dlBtn.setOnClickListener { Downloader.manager(ctx, true) }
             col.addView(dlBtn, lp)
 
+            val dlQueueBtn = blueButton("📥 Download queue (speed / ETA)")
+            dlQueueBtn.setOnClickListener { DlUi.queue(ctx, true) }
+            col.addView(dlQueueBtn, lp)
+
+            val dlSetBtn = blueButton("⚡ Download settings (fast / retry / folders)")
+            dlSetBtn.setOnClickListener { DlUi.settings(ctx, true) }
+            col.addView(dlSetBtn, lp)
+
+            val histBtn = blueButton("📜 History")
+            histBtn.setOnClickListener {
+                History.show(ctx, true) { u ->
+                    webView.loadUrl(u)
+                    layoutSettings.visibility = View.GONE
+                }
+            }
+            col.addView(histBtn, lp)
+
             val updateBtn = blueButton("Update check karo (v${BuildConfig.VERSION_NAME})")
             updateBtn.setOnClickListener { manualCheckUpdate(updateBtn) }
             col.addView(updateBtn, lp)
@@ -1602,8 +1619,9 @@ class FloatingService : Service() {
             webView.addJavascriptInterface(Bridge(), "LionBridge")
 
             // file download: Abhi / Schedule dialog (overlay)
+            webView.addJavascriptInterface(BlobDl.Bridge(ctx.applicationContext), BlobDl.BRIDGE_NAME)
             webView.setDownloadListener { dlUrl, ua, cd, mime, len ->
-                Downloader.offer(ctx, true, dlUrl, ua, cd, mime, len, webView.url)
+                Downloader.offer(ctx, true, dlUrl, ua, cd, mime, len, webView.url, webView)
             }
 
             webView.webViewClient = object : WebViewClient() {
@@ -1616,6 +1634,13 @@ class FloatingService : Service() {
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     CookieManager.getInstance().flush()
                     view?.evaluateJavascript(selectionJs, null)
+                    History.touchTitle(ctx, pageUrl, view?.title)
+                }
+
+                // har navigation (SPA pushState bhi) history me
+                override fun doUpdateVisitedHistory(view: WebView?, visitedUrl: String?, isReload: Boolean) {
+                    super.doUpdateVisitedHistory(view, visitedUrl, isReload)
+                    History.record(ctx, visitedUrl, view?.title)
                 }
 
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -1667,6 +1692,11 @@ class FloatingService : Service() {
             }
 
             webView.webChromeClient = object : WebChromeClient() {
+
+                override fun onReceivedTitle(view: WebView?, title: String?) {
+                    super.onReceivedTitle(view, title)
+                    History.touchTitle(ctx, view?.url, title)
+                }
 
                 override fun onCreateWindow(
                     view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?

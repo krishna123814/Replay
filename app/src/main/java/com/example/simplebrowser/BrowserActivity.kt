@@ -93,8 +93,9 @@ class BrowserActivity : AppCompatActivity() {
         }
 
         // file download: Abhi / Schedule dialog
+        web.addJavascriptInterface(BlobDl.Bridge(applicationContext), BlobDl.BRIDGE_NAME)
         web.setDownloadListener { dlUrl, ua, cd, mime, len ->
-            Downloader.offer(this, false, dlUrl, ua, cd, mime, len, web.url)
+            Downloader.offer(this, false, dlUrl, ua, cd, mime, len, web.url, web)
         }
 
         web.webViewClient = object : WebViewClient() {
@@ -106,6 +107,12 @@ class BrowserActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView, url: String) {
                 progress.visibility = View.GONE
                 updateNavButtons()
+                History.touchTitle(applicationContext, url, view.title)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                History.record(applicationContext, url, view.title)
             }
 
             override fun shouldOverrideUrlLoading(
@@ -126,6 +133,11 @@ class BrowserActivity : AppCompatActivity() {
         web.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 progress.progress = newProgress
+            }
+
+            override fun onReceivedTitle(view: WebView, title: String?) {
+                super.onReceivedTitle(view, title)
+                History.touchTitle(applicationContext, view.url, title)
             }
 
             override fun onShowFileChooser(
@@ -149,6 +161,11 @@ class BrowserActivity : AppCompatActivity() {
         btnBack.setOnClickListener { if (web.canGoBack()) web.goBack() }
         btnForward.setOnClickListener { if (web.canGoForward()) web.goForward() }
         findViewById<Button>(R.id.btnReload).setOnClickListener { web.reload() }
+        // Reload button ko dabaye rakho: History / Download queue / Download settings (screen par kuch naya nahi)
+        findViewById<Button>(R.id.btnReload).setOnLongClickListener {
+            showMoreMenu()
+            true
+        }
         findViewById<Button>(R.id.btnGo).setOnClickListener { goToInput() }
         urlBar.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_GO) {
@@ -175,6 +192,20 @@ class BrowserActivity : AppCompatActivity() {
             web.restoreState(savedInstanceState)
         }
         updateNavButtons()
+    }
+
+    private fun showMoreMenu() {
+        val items = arrayOf("📜 History", "📥 Download queue (speed / ETA)", "⚡ Download settings")
+        android.app.AlertDialog.Builder(this)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> History.show(this, false) { u -> web.loadUrl(u) }
+                    1 -> DlUi.queue(this, false)
+                    2 -> DlUi.settings(this, false)
+                }
+            }
+            .setNegativeButton("Band", null)
+            .show()
     }
 
     private fun hideStatusBar() {
