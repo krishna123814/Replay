@@ -27,6 +27,9 @@ import android.text.InputType
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -49,6 +52,8 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.PopupMenu
+import android.widget.Switch
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -56,6 +61,7 @@ import androidx.core.app.NotificationCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 
 /**
  * Lion floating browser: kisi bhi app ke upar tairta golden dot.
@@ -67,6 +73,44 @@ import kotlin.math.abs
  * - text select -> Lion Copy bar (Copy / Select all / Paste)
  * - <input type=file> ke liye file picker, JS prompt, fullscreen video
  */
+/**
+ * Overlay window me system text-selection menu (ActionMode) nahi ban pata, aur WebView ko jab ActionMode
+ * nahi milta to wo selection khud clear kar deta hai. Isliye yaha ek khaali "dummy" ActionMode dete hain:
+ * WebView ko lagta hai menu khul gaya, selection tika rehta hai, aur dikhta sirf humara Copy bar hai.
+ */
+private class DummyActionMode(
+    private val ctx: Context,
+    private val anchor: View,
+    private val cb: ActionMode.Callback?
+) : ActionMode() {
+    private var finished = false
+    private val menuObj: Menu by lazy { PopupMenu(ctx, anchor).menu }
+    override fun setTitle(title: CharSequence?) {}
+    override fun setTitle(resId: Int) {}
+    override fun setSubtitle(subtitle: CharSequence?) {}
+    override fun setSubtitle(resId: Int) {}
+    override fun setCustomView(view: View?) {}
+    override fun invalidate() {}
+    override fun finish() {
+        if (finished) return
+        finished = true
+        try { cb?.onDestroyActionMode(this) } catch (e: Exception) { }
+    }
+    override fun getMenu(): Menu = menuObj
+    override fun getTitle(): CharSequence? = null
+    override fun getSubtitle(): CharSequence? = null
+    override fun getCustomView(): View? = null
+    override fun getMenuInflater(): MenuInflater = MenuInflater(ctx)
+}
+
+private class LionWebView(c: Context) : WebView(c) {
+    override fun startActionMode(callback: ActionMode.Callback?): ActionMode? =
+        DummyActionMode(context, this, callback)
+
+    override fun startActionMode(callback: ActionMode.Callback?, type: Int): ActionMode? =
+        DummyActionMode(context, this, callback)
+}
+
 class FloatingService : Service() {
 
     companion object {
@@ -499,6 +543,15 @@ class FloatingService : Service() {
         private lateinit var closeParams: WindowManager.LayoutParams
 
         private lateinit var btnBack: TextView
+
+        // gestures: edge swipe (back/forward) + pull-to-refresh
+        private lateinit var swipeRefresh: SwipeRefreshLayout
+        private lateinit var edgeLeft: View
+        private lateinit var edgeRight: View
+        private lateinit var swipeHint: TextView
+        private lateinit var swipeHintBg: GradientDrawable
+        private lateinit var gestureSwitch: Switch
+        @Volatile private var innerScrolled = false
         private lateinit var btnRefresh: TextView
         private lateinit var btnMaximize: TextView
         private lateinit var btnWindow: TextView
@@ -528,6 +581,11 @@ class FloatingService : Service() {
         // Copy bar state
         private var lastSelection = ""
         private var editFocused = false
+        // selection engine ne clear kar di ho tab bhi bar kuch second tika rahe (last text yaad rehta hai)
+        private val clearSelRunnable = Runnable {
+            lastSelection = ""
+            updateCopyBar()
+        }
 
         // dot ka center (screen pixels)
         private var dotCX = 0
@@ -810,10 +868,41 @@ class FloatingService : Service() {
             grip.background = gripShape
             dragHandle.addView(grip, FrameLayout.LayoutParams(dp(36), dp(4), Gravity.CENTER))
 
-            webView = WebView(ctx)
+            webView = LionWebView(ctx)
 
             content.addView(dragHandle, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18)))
-            content.addView(webView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            // webView -> SwipeRefreshLayout (pull-to-refresh) -> holder (+ invisible edge zones + hint arrow)
+            swipeRefresh = SwipeRefreshLayout(ctx)
+            swipeRefresh.addView(
+                webView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            val holder = FrameLayout(ctx)
+            holder.addView(
+                swipeRefresh, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            edgeLeft = View(ctx)
+            edgeRight = View(ctx)
+            holder.addView(
+                edgeLeft,
+                FrameLayout.LayoutParams(dp(18), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START)
+            )
+            holder.addView(
+                edgeRight,
+                FrameLayout.LayoutParams(dp(18), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END)
+            )
+            swipeHint = TextView(ctx)
+            swipeHint.gravity = Gravity.CENTER
+            swipeHint.setTextColor(Color.WHITE)
+            swipeHint.textSize = 16f
+            swipeHintBg = GradientDrawable()
+            swipeHintBg.shape = GradientDrawable.OVAL
+            swipeHintBg.setColor(Color.parseColor("#E61e222d"))
+            swipeHint.background = swipeHintBg
+            swipeHint.visibility = View.GONE
+            holder.addView(
+                swipeHint, FrameLayout.LayoutParams(dp(36), dp(36), Gravity.TOP or Gravity.START)
+            )
+            content.addView(holder, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             layoutFull.addView(
                 content,
                 FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -973,6 +1062,7 @@ class FloatingService : Service() {
                     "window.getSelection().removeAllRanges();})()",
                 null
             )
+            handler.removeCallbacks(clearSelRunnable)
             lastSelection = ""
             updateCopyBar()
         }
@@ -1003,15 +1093,60 @@ class FloatingService : Service() {
 
         // JS -> Kotlin: selection / input focus ki khabar
         inner class Bridge {
+            // page ke andar koi scrollable div scroll hua ho to pull-to-refresh na chale
+            @JavascriptInterface
+            fun onInnerScroll(scrolled: Boolean) {
+                innerScrolled = scrolled
+            }
+
             @JavascriptInterface
             fun onState(text: String?, editable: Boolean) {
                 handler.post {
-                    lastSelection = text ?: ""
+                    handler.removeCallbacks(clearSelRunnable)
+                    if (!text.isNullOrBlank()) {
+                        lastSelection = text
+                    } else {
+                        // khali aaya: turant mat hatao, 6 sec baad hatao
+                        handler.postDelayed(clearSelRunnable, 6000L)
+                    }
                     editFocused = editable
                     updateCopyBar()
                 }
             }
+
+            // page par naya touch aaya aur koi selection nahi: bar turant hata do
+            @JavascriptInterface
+            fun onTap() {
+                handler.post {
+                    handler.removeCallbacks(clearSelRunnable)
+                    lastSelection = ""
+                    updateCopyBar()
+                }
+            }
         }
+
+        private val scrollJs = """
+            (function () {
+              if (window.__lionScr) return;
+              window.__lionScr = true;
+              function chk(t) {
+                try {
+                  while (t && t !== document.documentElement) {
+                    if (t.scrollTop > 0) {
+                      var o = getComputedStyle(t).overflowY;
+                      if (o === 'auto' || o === 'scroll' || o === 'overlay') return true;
+                    }
+                    t = t.parentElement;
+                  }
+                } catch (e) {}
+                return false;
+              }
+              document.addEventListener('touchstart', function (e) {
+                try { LionBridge.onInnerScroll(chk(e.target)); } catch (x) {}
+                try { if (String(window.getSelection()) === '') LionBridge.onTap(); } catch (x) {}
+              }, { capture: true, passive: true });
+            })();
+        """.trimIndent()
 
         private val selectionJs = """
             (function () {
@@ -1113,6 +1248,14 @@ class FloatingService : Service() {
             sbDotSize = SeekBar(ctx)
             sbDotSize.max = 18 // progress 0..18 -> 10..28dp
             col.addView(sbDotSize, lp)
+
+            gestureSwitch = Switch(ctx)
+            gestureSwitch.text = "Swipe gestures (edge swipe back/forward, pull to refresh)"
+            gestureSwitch.setTextColor(Color.parseColor("#d1d4dc"))
+            gestureSwitch.textSize = 13f
+            gestureSwitch.setPadding(0, dp(12), 0, dp(4))
+            gestureSwitch.isChecked = prefs.getBoolean("gestures_on", true)
+            col.addView(gestureSwitch, lp)
 
             val dlBtn = blueButton("⬇ Downloads / Schedule")
             dlBtn.setOnClickListener { Downloader.manager(ctx, true) }
@@ -1285,6 +1428,22 @@ class FloatingService : Service() {
             applyTextSize(12f + prefs.getInt("theme_size", 2))
             applyOpacity(prefs.getInt("theme_opacity", 75))
             applyDotSize(prefs.getInt("dot_size", 16))
+            applyGesturePrefs()
+        }
+
+        // gestures on = edge zones + pull-to-refresh, pill me back button nahi; off = purana back button
+        private fun applyGesturePrefs() {
+            if (!::swipeRefresh.isInitialized) return
+            val on = prefs.getBoolean("gestures_on", true)
+            val edgeVis = if (on && customView == null) View.VISIBLE else View.GONE
+            edgeLeft.visibility = edgeVis
+            edgeRight.visibility = edgeVis
+            swipeRefresh.isEnabled = on
+            val backVis = if (on) View.GONE else View.VISIBLE
+            if (btnBack.visibility != backVis) {
+                btnBack.visibility = backVis
+                if (isPillOpen) placeDotWindow()
+            }
         }
 
         private fun loadSavedSettings() {
@@ -1302,7 +1461,7 @@ class FloatingService : Service() {
         }
 
         // ── dot + pill ────────────────────────────────────────────────────
-        private fun pillW(): Int = dp(32) * menuButtons.size + dp(8)
+        private fun pillW(): Int = dp(32) * menuButtons.count { it.visibility != View.GONE } + dp(8)
 
         // dot ke center ke hisaab se Window A ki jagah set karo
         private fun placeDotWindow() {
@@ -1388,7 +1547,87 @@ class FloatingService : Service() {
         }
 
         // ── controls ──────────────────────────────────────────────────────
+        // ── gestures ──────────────────────────────────────────────────────
+        private fun setupGestures() {
+            swipeRefresh.setColorSchemeColors(Color.parseColor("#2962ff"))
+            swipeRefresh.setProgressBackgroundColorSchemeColor(Color.parseColor("#1e222d"))
+            // page top par ho tabhi pull-to-refresh (inner scroll div bhi check hota hai)
+            swipeRefresh.setOnChildScrollUpCallback { _, _ -> webView.canScrollVertically(-1) || innerScrolled }
+            swipeRefresh.setOnRefreshListener {
+                swipeRefresh.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                webView.reload()
+                // agar page finish event na aaye to spinner atke nahi
+                handler.postDelayed({ swipeRefresh.isRefreshing = false }, 8000L)
+            }
+            edgeLeft.setOnTouchListener(edgeTouch(true))
+            edgeRight.setOnTouchListener(edgeTouch(false))
+            gestureSwitch.setOnCheckedChangeListener { _, on ->
+                if (prefs.getBoolean("gestures_on", true) == on) return@setOnCheckedChangeListener
+                prefs.edit().putBoolean("gestures_on", on).apply()
+                applyGesturePrefs()
+                syncOtherWindowsTheme()
+            }
+        }
+
+        // invisible edge zone: left se andar = Back, right se andar = Forward
+        private fun edgeTouch(isBack: Boolean): View.OnTouchListener {
+            val threshold = dp(80)
+            val startSlop = dp(8)
+            var sx = 0f
+            var sy = 0f
+            var reached = false
+            return View.OnTouchListener { v, e ->
+                val can = if (isBack) webView.canGoBack() else webView.canGoForward()
+                val dx = if (isBack) e.rawX - sx else sx - e.rawX
+                val dy = abs(e.rawY - sy)
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        sx = e.rawX
+                        sy = e.rawY
+                        reached = false
+                        v.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (can && dx > startSlop && dx > dy) {
+                            val p = (dx / threshold).coerceIn(0f, 1f)
+                            val size = dp(36)
+                            val lp = swipeHint.layoutParams as FrameLayout.LayoutParams
+                            lp.gravity = Gravity.TOP or (if (isBack) Gravity.START else Gravity.END)
+                            swipeHint.layoutParams = lp
+                            swipeHint.text = if (isBack) "◀" else "▶"
+                            val travel = p * (size + dp(12))
+                            swipeHint.translationX = if (isBack) -size + travel else size - travel
+                            swipeHint.translationY = e.y - size / 2f
+                            swipeHint.alpha = p
+                            swipeHint.visibility = View.VISIBLE
+                            val nowReached = dx >= threshold
+                            if (nowReached != reached) {
+                                reached = nowReached
+                                swipeHintBg.setColor(Color.parseColor(if (reached) "#2962ff" else "#E61e222d"))
+                                if (reached) v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            }
+                        } else {
+                            swipeHint.visibility = View.GONE
+                        }
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        swipeHint.visibility = View.GONE
+                        swipeHintBg.setColor(Color.parseColor("#E61e222d"))
+                        if (can && dx >= threshold && dx > dy * 1.5f) {
+                            if (isBack) webView.goBack() else webView.goForward()
+                        }
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        swipeHint.visibility = View.GONE
+                        swipeHintBg.setColor(Color.parseColor("#E61e222d"))
+                    }
+                }
+                true
+            }
+        }
+
         private fun setupControls() {
+            setupGestures()
             btnRefresh.setOnClickListener {
                 scheduleAutoCollapse()
                 showBrowser()
@@ -1412,6 +1651,7 @@ class FloatingService : Service() {
                 scheduleAutoCollapse()
                 showBrowser()
                 refreshBookmarkList()
+                gestureSwitch.isChecked = prefs.getBoolean("gestures_on", true)
                 layoutSettings.visibility = View.VISIBLE
             }
             btnNew.setOnClickListener {
@@ -1626,6 +1866,7 @@ class FloatingService : Service() {
 
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
+                    handler.removeCallbacks(clearSelRunnable)
                     lastSelection = ""
                     editFocused = false
                     updateCopyBar()
@@ -1634,6 +1875,8 @@ class FloatingService : Service() {
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     CookieManager.getInstance().flush()
                     view?.evaluateJavascript(selectionJs, null)
+                    view?.evaluateJavascript(scrollJs, null)
+                    swipeRefresh.isRefreshing = false
                     History.touchTitle(ctx, pageUrl, view?.title)
                 }
 
@@ -1751,11 +1994,12 @@ class FloatingService : Service() {
                     }
                     customView = view
                     customViewCallback = callback
-                    val parent = webView.parent as ViewGroup
-                    val index = parent.indexOfChild(webView)
+                    val parent = swipeRefresh.parent as ViewGroup
+                    val index = parent.indexOfChild(swipeRefresh)
                     view.setBackgroundColor(Color.BLACK)
-                    parent.addView(view, index, webView.layoutParams)
-                    webView.visibility = View.GONE
+                    parent.addView(view, index, swipeRefresh.layoutParams)
+                    swipeRefresh.visibility = View.GONE
+                    applyGesturePrefs()
                     if (!isMaximized) {
                         wasMaximizedByJS = true
                         toggleMaximize()
@@ -1765,12 +2009,13 @@ class FloatingService : Service() {
                 override fun onHideCustomView() {
                     val v = customView ?: return
                     (v.parent as? ViewGroup)?.removeView(v)
-                    webView.visibility = View.VISIBLE
+                    swipeRefresh.visibility = View.VISIBLE
                     if (wasMaximizedByJS) {
                         if (isMaximized) toggleMaximize()
                         wasMaximizedByJS = false
                     }
                     customView = null
+                    applyGesturePrefs()
                     customViewCallback?.onCustomViewHidden()
                     customViewCallback = null
                 }

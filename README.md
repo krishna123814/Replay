@@ -6,8 +6,9 @@ Ek app, do mode:
 
 ## Floating dot + pill menu
 - Startup par sirf chhota golden dot dikhta hai (default 16dp, settings me 10–28dp).
-- Dot tap -> browser window minimize/open (toggle). Dot long-press (dabaye rakho) -> pill menu: ◀ back, ⟳ refresh, ⛶ maximize, 🪟 window show/hide, ⚙ settings, ✕ close. Dot ko drag karke move/❌ zone me band.
+- Dot tap -> browser window minimize/open (toggle). Dot long-press (dabaye rakho) -> pill menu: ⟳ refresh, ⛶ maximize, 🪟 window show/hide, ⚙ settings, ✕ close. Dot ko drag karke move/❌ zone me band.
   4 sec koi action na ho to pill apne aap band.
+- **Gestures** (Settings me on/off toggle, default on): floating browser ke **left kinare (18dp, invisible zone) se andar swipe = Back**, **right kinare se andar swipe = Forward** (80dp se zyada khincho, haptic + arrow dikhta hai). Page ke top par hone par **neeche pull = Refresh**. Gestures off karoge to pill me ◀ back button wapas aa jata hai.
 - Dot ko kahin bhi drag karo (position yaad rehti hai). Drag karte waqt neeche ❌ zone me chhodo to band.
 - Browser window: upar ke patle handle se drag, ◢ corner se resize, ⛶ se maximize (status bar tak poori screen).
 - ⚙ settings: website URL, icon size, dot opacity, dot size.
