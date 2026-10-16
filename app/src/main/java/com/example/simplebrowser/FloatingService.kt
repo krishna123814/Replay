@@ -1250,7 +1250,7 @@ class FloatingService : Service() {
             col.addView(sbDotSize, lp)
 
             gestureSwitch = Switch(ctx)
-            gestureSwitch.text = "Swipe gestures (edge swipe back/forward, pull to refresh)"
+            gestureSwitch.text = "Swipe gestures (edge swipe back/forward)"
             gestureSwitch.setTextColor(Color.parseColor("#d1d4dc"))
             gestureSwitch.textSize = 13f
             gestureSwitch.setPadding(0, dp(12), 0, dp(4))
@@ -1431,14 +1431,14 @@ class FloatingService : Service() {
             applyGesturePrefs()
         }
 
-        // gestures on = edge zones + pull-to-refresh, pill me back button nahi; off = purana back button
+        // gestures on = edge zones (pull-to-refresh hamesha off), pill me back button nahi; off = purana back button
         private fun applyGesturePrefs() {
             if (!::swipeRefresh.isInitialized) return
             val on = prefs.getBoolean("gestures_on", true)
             val edgeVis = if (on && customView == null) View.VISIBLE else View.GONE
             edgeLeft.visibility = edgeVis
             edgeRight.visibility = edgeVis
-            swipeRefresh.isEnabled = on
+            swipeRefresh.isEnabled = false // pull-to-refresh permanently off (chart touch lag/accidental reload)
             val backVis = if (on) View.GONE else View.VISIBLE
             if (btnBack.visibility != backVis) {
                 btnBack.visibility = backVis
@@ -1551,14 +1551,9 @@ class FloatingService : Service() {
         private fun setupGestures() {
             swipeRefresh.setColorSchemeColors(Color.parseColor("#2962ff"))
             swipeRefresh.setProgressBackgroundColorSchemeColor(Color.parseColor("#1e222d"))
-            // page top par ho tabhi pull-to-refresh (inner scroll div bhi check hota hai)
-            swipeRefresh.setOnChildScrollUpCallback { _, _ -> webView.canScrollVertically(-1) || innerScrolled }
-            swipeRefresh.setOnRefreshListener {
-                swipeRefresh.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                webView.reload()
-                // agar page finish event na aaye to spinner atke nahi
-                handler.postDelayed({ swipeRefresh.isRefreshing = false }, 8000L)
-            }
+            // pull-to-refresh gesture band: disabled layout touch intercept hi nahi karta, chart touch seedha WebView ko jata h
+            swipeRefresh.isEnabled = false
+            swipeRefresh.setOnChildScrollUpCallback { _, _ -> true }
             edgeLeft.setOnTouchListener(edgeTouch(true))
             edgeRight.setOnTouchListener(edgeTouch(false))
             gestureSwitch.setOnCheckedChangeListener { _, on ->
