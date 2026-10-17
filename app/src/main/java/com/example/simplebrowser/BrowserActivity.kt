@@ -47,6 +47,15 @@ class BrowserActivity : AppCompatActivity() {
             uploadCallback = null
         }
 
+    private fun launchPicker(i: Intent) {
+        try {
+            filePicker.launch(i)
+        } catch (e: Exception) {
+            uploadCallback?.onReceiveValue(null)
+            uploadCallback = null
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -160,7 +169,13 @@ class BrowserActivity : AppCompatActivity() {
                 uploadCallback?.onReceiveValue(null)
                 uploadCallback = callback
                 return try {
-                    filePicker.launch(Intent.createChooser(params.createIntent(), "File chuniye"))
+                    val picker = params.createIntent()
+                    LionPicker.ask(
+                        this@BrowserActivity,
+                        onFiles = { launchPicker(LionPicker.filesIntent(this@BrowserActivity, picker)) },
+                        onSystem = { launchPicker(Intent.createChooser(picker, "File chuniye")) },
+                        onCancel = { uploadCallback?.onReceiveValue(null); uploadCallback = null }
+                    )
                     true
                 } catch (e: Exception) {
                     uploadCallback = null

@@ -30,6 +30,13 @@
         android:text="🪟  Floating Window" />
 
     <Button
+        android:id="@+id/btnFiles"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="📁  File Manager" />
+
+    <Button
         android:id="@+id/btnStopFloating"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

@@ -55,6 +55,20 @@ Sab kuch ⚙ settings ke andar hai, main screen par kuch nahi badla.
 Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 **Copy** (clipboard me), **Select all**, **Paste** (input box me). System long-press menu bhi allowed hai.
 
+## 📁 File Manager (v4.0, MyFiles app ab isi me)
+- Start page par 4 button: 🌐 Normal Browser, 🪟 Floating Window, **📁 File Manager**, ✕ Floating band karo.
+- File Manager = purani MyFiles app: 💽 AIC Disk, ☁️ HF Bucket, 📱 Phone Storage, copy/move (server par), video/music player, image viewer, Transfers. Code `files/` folder me hai (package `com.example.simplebrowser.files`).
+- **Ek hi login**: File Manager aur Browser ka "☁ Server par bhejo" dono ek hi URL/username/password use karte hain (⚙ → Downloads → Server settings ya File Manager ka login, kahin bhi badlo, dono me badal jata hai).
+- File Manager ka alag update checker nahi hai; Lion.apk ka hi auto-update chalta hai.
+- Phone Storage ke liye pehli baar "All files access" permission do.
+- File Manager ki screens safed background + kaale text me hain. Sirf video player aur image viewer dark rehte hain (media ke liye).
+- Purani alag MyFiles app ab uninstall kar sakte ho.
+- **Floating menu me 📁**: dot long-press -> pill me 📁 dabao -> File Manager khulta hai.
+- **Upload par File Manager**: kisi bhi site (normal ya floating browser) par "file chuno" (input type=file) dabane par dialog aata hai: 📁 Lion File Manager (AIC / HF / Phone) ya 📱 system picker. File Manager me file par tap = chuni gayi; kai files wale upload me pehle lambi dabao, aur tap karke **✔ Bhejo**. Server ki file pehle phone ke cache me utarti hai (progress dikhta hai), phir site ko milti hai. Login na ho to seedha system picker.
+
+## ⚡ Seedha server par download
+- ⚙ → Downloads → Server settings me "⚡ Seedha server par download" on ho to link server ko jata hai; server (`/xfer/dl`, xfer.py) khud download karke chune hue folder me rakhta hai. Server se na ho to phone par purana tareeka.
+
 ## Pehli baar floating chalane par
 - Notification permission (Android 13+) allow karo
 - "Display over other apps" permission allow karo

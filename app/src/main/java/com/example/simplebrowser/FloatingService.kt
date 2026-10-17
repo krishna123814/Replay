@@ -558,6 +558,7 @@ class FloatingService : Service() {
         private lateinit var btnNew: TextView
         private lateinit var btnLayout: TextView
         private lateinit var btnSettings: TextView
+        private lateinit var btnFiles: TextView
         private lateinit var btnClose: TextView
 
         private lateinit var inputUrl: EditText
@@ -986,6 +987,7 @@ class FloatingService : Service() {
             btnWindow = mkBtn("🪟")
             btnNew = mkBtn("➕")
             btnLayout = mkBtn("▤")
+            btnFiles = mkBtn("📁")
             btnSettings = mkBtn("⚙")
             btnClose = mkBtn("✕")
             for (b in menuButtons) pill.addView(b)
@@ -1641,6 +1643,17 @@ class FloatingService : Service() {
             btnWindow.setOnClickListener {
                 scheduleAutoCollapse()
                 toggleBrowser()
+            }
+            btnFiles.setOnClickListener {
+                scheduleAutoCollapse()
+                try {
+                    ctx.startActivity(
+                        Intent(ctx, com.example.simplebrowser.files.HomeActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "File Manager nahi khula: " + e.message, Toast.LENGTH_LONG).show()
+                }
             }
             btnSettings.setOnClickListener {
                 scheduleAutoCollapse()

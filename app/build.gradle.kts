@@ -14,7 +14,7 @@ android {
 
         val vcProp = (project.findProperty("vc") as String?)?.toIntOrNull()
         versionCode = vcProp ?: (System.currentTimeMillis() / 60000L).toInt()
-        versionName = "3.7"
+        versionName = "4.0"
 
         // GitHub Actions -PgithubRepo=<owner/repo> deta hai; na mile (local build) to ye default repo
         val repoProp = (project.findProperty("githubRepo") as String?)
@@ -66,4 +66,15 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // File Manager (MyFiles) ke liye
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("com.google.guava:guava:33.2.1-android")
+    val media3 = "1.4.1"
+    implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-session:$media3")
+    implementation("androidx.media3:media3-datasource-okhttp:$media3")
 }

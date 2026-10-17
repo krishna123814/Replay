@@ -1,11 +1,41 @@
 package com.example.simplebrowser
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.webkit.WebChromeClient
 import android.widget.Toast
+
+/** Upload ke liye file kahan se chuni jaye: Lion File Manager (AIC / HF / Phone) ya phone ka system picker. */
+object LionPicker {
+    fun hasLogin(ctx: Context): Boolean {
+        val a = ctx.applicationContext
+        return DlSettings.getStr(a, ServerSync.K_USER, "").isNotEmpty() && DlSettings.getStr(a, ServerSync.K_PASS, "").isNotEmpty()
+    }
+
+    fun filesIntent(ctx: Context, picker: Intent): Intent =
+        Intent(ctx, com.example.simplebrowser.files.HomeActivity::class.java)
+            .putExtra("pick", true)
+            .putExtra("pick_multi", picker.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+
+    /** Login nahi hai to seedha system picker; warna 2 option ka dialog. */
+    fun ask(act: Activity, onFiles: () -> Unit, onSystem: () -> Unit, onCancel: () -> Unit) {
+        if (!hasLogin(act)) {
+            onSystem()
+            return
+        }
+        AlertDialog.Builder(act)
+            .setTitle("File kahan se chunni hai?")
+            .setItems(arrayOf("📁 Lion File Manager (AIC / HF / Phone)", "📱 Phone ka system picker")) { _, i ->
+                if (i == 0) onFiles() else onSystem()
+            }
+            .setOnCancelListener { onCancel() }
+            .show()
+    }
+}
 
 // Transparent activity: FloatingService (ek Service) khud file picker nahi khol sakti,
 // isliye ye picker kholti hai aur result FloatingService.filePathCallback se WebView ko deti hai.
@@ -28,8 +58,17 @@ class FileChooserActivity : Activity() {
             return
         }
 
+        LionPicker.ask(
+            this,
+            onFiles = { launchPicker(LionPicker.filesIntent(this, picker)) },
+            onSystem = { launchPicker(Intent.createChooser(picker, "File chuniye")) },
+            onCancel = { sendResultAndFinish(null) }
+        )
+    }
+
+    private fun launchPicker(i: Intent) {
         try {
-            startActivityForResult(Intent.createChooser(picker, "File chuniye"), requestCode)
+            startActivityForResult(i, requestCode)
         } catch (e: Exception) {
             Toast.makeText(this, "File picker nahi khul paya: " + e.message, Toast.LENGTH_LONG).show()
             sendResultAndFinish(null)
