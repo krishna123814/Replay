@@ -23,6 +23,17 @@ object HlsDl {
     private class KeyInfo(val url: String, val iv: ByteArray?)
 
     fun start(ctx: Context, playlistUrl: String, baseName: String, cookie: String, ua: String, referer: String) {
+        if (ServerSync.direct(ctx)) {
+            // server ffmpeg se khud utarega; fail ho to neeche wala phone-par tareeka
+            ServerSync.sendDirect(ctx, DlSpec(playlistUrl, cookie, ua, referer, baseName, ""), "hls") {
+                startLocal(ctx, playlistUrl, baseName, cookie, ua, referer)
+            }
+            return
+        }
+        startLocal(ctx, playlistUrl, baseName, cookie, ua, referer)
+    }
+
+    private fun startLocal(ctx: Context, playlistUrl: String, baseName: String, cookie: String, ua: String, referer: String) {
         val app = ctx.applicationContext
         DlEngine.toast("HLS download shuru: $baseName")
         io.execute {
@@ -88,6 +99,30 @@ object HlsDl {
             } finally {
                 try { tmp.delete() } catch (e: Exception) { }
             }
+        }
+    }
+
+    /** Master playlist se (label, url) list: sabse badi quality pehle. Network error par khali list. */
+    fun variantList(url: String, cookie: String, ua: String, referer: String): List<Pair<String, String>> {
+        return try {
+            val t = get(url, cookie, ua, referer)
+            val lines = t.lines()
+            val out = ArrayList<Triple<Int, Long, Pair<String, String>>>()
+            for (i in lines.indices) {
+                if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue
+                val bw = attr(lines[i], "BANDWIDTH")?.toLongOrNull() ?: 0L
+                val h = Regex("RESOLUTION=\\d+x(\\d+)").find(lines[i])?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                var j = i + 1
+                while (j < lines.size && (lines[j].isBlank() || lines[j].startsWith("#"))) j++
+                if (j >= lines.size) continue
+                val label = "TS/MP4 • " + (if (h > 0) "${h}p" else "${bw / 1000} kbps") + " (HLS)"
+                out.add(Triple(h, bw, label to abs(url, lines[j].trim())))
+            }
+            if (out.isEmpty()) listOf("HLS • best" to url)
+            else out.sortedWith(compareByDescending<Triple<Int, Long, Pair<String, String>>> { it.first }.thenByDescending { it.second })
+                .map { it.third }.distinctBy { it.second }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 

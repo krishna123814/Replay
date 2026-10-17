@@ -14,7 +14,7 @@ android {
 
         val vcProp = (project.findProperty("vc") as String?)?.toIntOrNull()
         versionCode = vcProp ?: (System.currentTimeMillis() / 60000L).toInt()
-        versionName = "3.5"
+        versionName = "3.7"
 
         // GitHub Actions -PgithubRepo=<owner/repo> deta hai; na mile (local build) to ye default repo
         val repoProp = (project.findProperty("githubRepo") as String?)
@@ -65,4 +65,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

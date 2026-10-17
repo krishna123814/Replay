@@ -63,6 +63,9 @@ object DlSettings {
     fun setBool(ctx: Context, key: String, v: Boolean) { p(ctx).edit().putBoolean(key, v).apply() }
     fun setInt(ctx: Context, key: String, v: Int) { p(ctx).edit().putInt(key, v).apply() }
 
+    fun getStr(ctx: Context, key: String, def: String): String = p(ctx).getString(key, def) ?: def
+    fun setStr(ctx: Context, key: String, v: String) { p(ctx).edit().putString(key, v).apply() }
+
     fun engineOn(ctx: Context): Boolean = getBool(ctx, K_ENGINE, true)
     fun conns(ctx: Context): Int = getInt(ctx, K_CONNS, 4).coerceIn(1, 8)
     fun parallel(ctx: Context): Int = getInt(ctx, K_PARALLEL, 2).coerceIn(1, 4)
@@ -429,6 +432,16 @@ object DlEngine {
         init(ctx)
         val scheme = try { Uri.parse(spec.url).scheme?.lowercase() } catch (e: Exception) { null }
         if (scheme != "http" && scheme != "https") return false
+        // Server folder set hai to link seedha server ko: file phone par aati hi nahi. Fail ho to phone par.
+        if (ServerSync.direct(ctx)) {
+            ServerSync.sendDirect(ctx, spec, "auto") { addLocal(ctx, spec, wifiOnly) }
+            return true
+        }
+        return addLocal(ctx, spec, wifiOnly)
+    }
+
+    private fun addLocal(ctx: Context, spec: DlSpec, wifiOnly: Boolean): Boolean {
+        init(ctx)
         synchronized(lock) {
             val t = DlTask(nextId(), spec, wifiOnly)
             t.name = Downloader.cleanName(spec.name)
@@ -593,6 +606,7 @@ object DlEngine {
                 tasks.add(t)
                 save()
                 notifyDone(t)
+                ServerSync.onSaved(app, t)
             }
             toast("Save ho gaya: " + out.display)
             return true
@@ -793,6 +807,7 @@ object DlEngine {
         }
         save()
         notifyDone(t)
+        ServerSync.onSaved(app, t)
     }
 
     private fun abortTask(t: DlTask, e: Throwable) {

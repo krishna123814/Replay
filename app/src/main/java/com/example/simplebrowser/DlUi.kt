@@ -15,6 +15,10 @@ import android.view.WindowManager
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ProgressBar
@@ -106,6 +110,12 @@ object DlUi {
             check("📁 File type ke hisaab se folder", DlSettings.K_BY_TYPE, true)
             check("⬇ Video par download icon dikhao", DlSettings.K_VID_ICON, true)
 
+            val srv = Button(t)
+            srv.text = "☁ Server par bhejo (AIC / HF folder)…"
+            srv.isAllCaps = false
+            srv.setOnClickListener { serverSettings(ctx, overlay) }
+            col.addView(srv)
+
             val note = TextView(t)
             note.setTextColor(Color.parseColor(DIM))
             note.textSize = 11f
@@ -126,6 +136,185 @@ object DlUi {
         } catch (e: Exception) {
             Toast.makeText(ctx, "Settings khul nahi payi", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // ☁ Server par bhejo (AIC Disk / HF Bucket)
+    // ═════════════════════════════════════════════════════════════════════
+    fun serverSettings(ctx: Context, overlay: Boolean) {
+        try {
+            val t = themed(ctx)
+            val col = LinearLayout(t)
+            col.orientation = LinearLayout.VERTICAL
+            col.setPadding(dp(ctx, 16), dp(ctx, 8), dp(ctx, 16), dp(ctx, 4))
+
+            fun label(txt: String): TextView {
+                val tv = TextView(t)
+                tv.setTextColor(Color.parseColor(DIM)); tv.textSize = 12f
+                tv.setPadding(0, dp(ctx, 10), 0, 0); tv.text = txt
+                return tv
+            }
+            fun field(key: String, def: String, hint: String, pass: Boolean): EditText {
+                val e = EditText(t)
+                e.setTextColor(Color.parseColor(LIGHT)); e.setHintTextColor(Color.parseColor(DIM))
+                e.hint = hint; e.setSingleLine(true); e.textSize = 14f
+                e.setText(DlSettings.getStr(ctx, key, def))
+                e.inputType = if (pass) android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                else android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+                return e
+            }
+
+            col.addView(label("Download ke baad file kahan bhejni hai?"))
+            val rg = RadioGroup(t)
+            val rOff = RadioButton(t); rOff.text = "Sirf phone par (server nahi)"; rOff.id = 1001
+            val rAic = RadioButton(t); rAic.text = "💽 AIC Disk (VPS)"; rAic.id = 1002
+            val rHf = RadioButton(t); rHf.text = "☁️ HF Bucket"; rHf.id = 1003
+            for (r in listOf(rOff, rAic, rHf)) { r.setTextColor(Color.parseColor(LIGHT)); rg.addView(r) }
+            when (ServerSync.store(ctx)) { "aic" -> rAic.isChecked = true; "hf" -> rHf.isChecked = true; else -> rOff.isChecked = true }
+            col.addView(rg)
+
+            col.addView(label("Server URL (MyFiles wala login)"))
+            val eUrl = field(ServerSync.K_URL, ServerSync.DEFAULT_URL, "https://…/dav/", false)
+            col.addView(eUrl)
+            col.addView(label("Username"))
+            val eUser = field(ServerSync.K_USER, "", "username", false)
+            col.addView(eUser)
+            col.addView(label("Password"))
+            val ePass = field(ServerSync.K_PASS, "", "password", true)
+            col.addView(ePass)
+
+            val folderTv = TextView(t)
+            folderTv.setTextColor(Color.parseColor(LIGHT)); folderTv.textSize = 14f
+            folderTv.setPadding(0, dp(ctx, 14), 0, 0)
+            fun refreshFolder() { folderTv.text = "📂 Folder: " + ServerSync.path(ctx) }
+            refreshFolder()
+            col.addView(folderTv)
+
+            fun curStore(): String = when (rg.checkedRadioButtonId) { 1003 -> "hf"; 1002 -> "aic"; else -> "aic" }
+            fun saveLogin() {
+                DlSettings.setStr(ctx, ServerSync.K_URL, eUrl.text.toString().trim())
+                DlSettings.setStr(ctx, ServerSync.K_USER, eUser.text.toString().trim())
+                DlSettings.setStr(ctx, ServerSync.K_PASS, ePass.text.toString())
+                DlSettings.setStr(ctx, ServerSync.K_STORE, when (rg.checkedRadioButtonId) { 1003 -> "hf"; 1002 -> "aic"; else -> "off" })
+            }
+
+            val pick = Button(t)
+            pick.text = "📂 Folder chuno"
+            pick.isAllCaps = false
+            pick.setOnClickListener {
+                saveLogin()
+                if (DlSettings.getStr(ctx, ServerSync.K_USER, "").isEmpty()) {
+                    Toast.makeText(ctx, "Pehle username / password daalo", Toast.LENGTH_SHORT).show()
+                } else {
+                    folderPicker(ctx, overlay, curStore(), ServerSync.path(ctx)) { chosen ->
+                        DlSettings.setStr(ctx, ServerSync.K_PATH, chosen)
+                        refreshFolder()
+                    }
+                }
+            }
+            col.addView(pick)
+
+            val cb = CheckBox(t)
+            cb.text = "Upload ke baad phone se hata do"
+            cb.setTextColor(Color.parseColor(LIGHT))
+            cb.isChecked = DlSettings.getBool(ctx, ServerSync.K_DELETE, true)
+            cb.setOnCheckedChangeListener { _, on -> DlSettings.setBool(ctx, ServerSync.K_DELETE, on) }
+            col.addView(cb)
+
+            val cbDirect = CheckBox(t)
+            cbDirect.text = "⚡ Seedha server par download (phone me file nahi aayegi)"
+            cbDirect.setTextColor(Color.parseColor(LIGHT))
+            cbDirect.isChecked = DlSettings.getBool(ctx, ServerSync.K_DIRECT, true)
+            cbDirect.setOnCheckedChangeListener { _, on -> DlSettings.setBool(ctx, ServerSync.K_DIRECT, on) }
+            col.addView(cbDirect)
+
+            val note = TextView(t)
+            note.setTextColor(Color.parseColor(DIM)); note.textSize = 11f
+            note.setPadding(0, dp(ctx, 8), 0, 0)
+            note.text = "⚡ on: link server ko jata hai, server khud download karke folder me rakhta hai (blob: links phone par hi chalte hain). Server se na ho paye to phone par utarti hai. ⚡ off: pehle phone par, phir server par upload."
+            col.addView(note)
+
+            val sv = ScrollView(t)
+            sv.addView(col)
+            show(
+                AlertDialog.Builder(t)
+                    .setTitle("☁ Server par bhejo")
+                    .setView(sv)
+                    .setPositiveButton("Save") { _, _ -> saveLogin() }
+                    .setNegativeButton("Cancel", null),
+                overlay
+            )
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Server settings khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Server ke folders me ghumo; "Yahan chuno" se current folder set. */
+    fun folderPicker(ctx: Context, overlay: Boolean, store: String, startPath: String, onChosen: (String) -> Unit) {
+        val path = "/" + startPath.trim('/')
+        val ui = android.os.Handler(android.os.Looper.getMainLooper())
+        Thread {
+            var names: List<String> = emptyList()
+            var err: String? = null
+            try { names = ServerSync.listFolders(ctx, store, path) } catch (e: Throwable) { err = e.message ?: e.javaClass.simpleName }
+            ui.post {
+                try {
+                    val t = themed(ctx)
+                    val isRoot = path == "/"
+                    val labels = ArrayList<String>()
+                    if (!isRoot) labels.add("⬆  .. (upar)")
+                    for (n in names) labels.add("📁  $n")
+                    val b = AlertDialog.Builder(t)
+                        .setTitle((if (store == "hf") "☁️ HF " else "💽 AIC ") + path)
+                        .setPositiveButton("Yahan chuno") { _, _ -> onChosen(path) }
+                        .setNeutralButton("➕ Naya folder") { _, _ -> newFolderDialog(ctx, overlay, store, path, onChosen) }
+                        .setNegativeButton("Cancel", null)
+                    if (err != null) b.setMessage("Folders nahi mile: $err\n\nLogin / URL check karo.")
+                    else b.setItems(labels.toTypedArray()) { _, which ->
+                        val next = if (!isRoot && which == 0) {
+                            val up = path.trimEnd('/').substringBeforeLast('/')
+                            if (up.isEmpty()) "/" else up
+                        } else {
+                            val n = names[which - (if (isRoot) 0 else 1)]
+                            (if (path == "/") "" else path) + "/" + n
+                        }
+                        folderPicker(ctx, overlay, store, next, onChosen)
+                    }
+                    show(b, overlay)
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "Folder list khul nahi payi", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun newFolderDialog(ctx: Context, overlay: Boolean, store: String, path: String, onChosen: (String) -> Unit) {
+        val t = themed(ctx)
+        val e = EditText(t)
+        e.setTextColor(Color.parseColor(LIGHT)); e.hint = "folder ka naam"; e.setSingleLine(true)
+        val box = FrameLayout(t)
+        box.setPadding(dp(ctx, 20), dp(ctx, 8), dp(ctx, 20), 0)
+        box.addView(e)
+        show(
+            AlertDialog.Builder(t)
+                .setTitle("Naya folder ($path)")
+                .setView(box)
+                .setPositiveButton("Banao") { _, _ ->
+                    val name = e.text.toString().trim().replace("/", " ")
+                    if (name.isNotEmpty()) {
+                        val full = (if (path == "/") "" else path) + "/" + name
+                        Thread {
+                            val msg = try { ServerSync.mkdir(ctx, store, full); null } catch (x: Throwable) { x.message ?: "error" }
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                if (msg != null) Toast.makeText(ctx, "Folder nahi bana: $msg", Toast.LENGTH_LONG).show()
+                                else folderPicker(ctx, overlay, store, full, onChosen)
+                            }
+                        }.start()
+                    }
+                }
+                .setNegativeButton("Cancel", null),
+            overlay
+        )
     }
 
     /** Format/quality chuno. */

@@ -53,8 +53,26 @@ object VideoDetect {
             }
             val page = o.optString("page")
             val title = o.optString("title")
+            val note = o.optString("note")
+            val mans = ArrayList<String>()
+            o.optJSONArray("manifests")?.let { m -> for (i in 0 until m.length()) mans.add(m.optString(i)) }
+            if (mans.isEmpty()) { finish(items, page, title, note); return }
+            // JS CORS ki wajah se playlist nahi padh payi: Kotlin se padho
+            val app = ctx.applicationContext
+            Thread {
+                val ua = PopupLogin.cleanUa(app)
+                val extra = ArrayList<Item>()
+                for (m in mans.take(3)) {
+                    val cookie = try { android.webkit.CookieManager.getInstance().getCookie(m) ?: "" } catch (e: Exception) { "" }
+                    for ((label, url) in HlsDl.variantList(m, cookie, ua, page)) extra.add(Item(label, url, "hls", ""))
+                    if (extra.isNotEmpty()) break
+                }
+                main.post { finish(items + extra, page, title, note) }
+            }.start()
+        }
+
+        private fun finish(items: List<Item>, page: String, title: String, note: String) {
             if (items.isEmpty()) {
-                val note = o.optString("note")
                 DlUi.videoInfo(ctx, overlay,
                     (if (note.isNotEmpty()) note else "Is video ka seedha link nahi mila.") +
                         "\n\n(blob/protected stream, YouTube jaisi site ya DRM ho sakti hai)")
@@ -184,8 +202,8 @@ object VideoDetect {
     var out = [];
     try {
       h = h.replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&');
-      var re = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4|webm)(?:\?[^"'\s<>\\]*)?/gi, m;
-      while ((m = re.exec(h)) && out.length < 40) if (out.indexOf(m[0]) < 0) out.push(m[0]);
+      var re = /https?:\/\/[^"'\s<>\\]+/gi, m;
+      while ((m = re.exec(h)) && out.length < 60) if (/\.(m3u8|mp4|webm|mpd)(\?|#|$|\.)/i.test(m[0]) && out.indexOf(m[0]) < 0) out.push(m[0]);
     } catch (e) {}
     return out;
   }
@@ -206,9 +224,19 @@ object VideoDetect {
 
   // ── asli kaam: pool (urls) se format/quality items banao ──
   function run(pool, ref, note, title, pageUrl) {
-    var man = [], dir = [], hasMpd = false;
+    var man = [], dir = [], hasMpd = false, tpl = [];
     pool.forEach(function (u) {
       if (!/^https?:/i.test(u)) return;
+      if (u.indexOf('_TPL_') >= 0) {                 // template link: multi=WxH:144p,... se har quality ka link banao
+        var mm = /multi=([^\/]+)/.exec(u);
+        if (mm) mm[1].split(',').forEach(function (part) {
+          var f = part.split(':'), lab = f[1] || ((/x(\d+)/.exec(f[0]) || [])[1] ? (/x(\d+)/.exec(f[0]))[1] + 'p' : '');
+          if (!lab) return;
+          var link = u.replace('_TPL_', lab);
+          if (!tpl.some(function (t) { return t.url === link; })) tpl.push({ url: link, h: parseInt(lab, 10) || 0, lab: lab });
+        });
+        return;
+      }
       if (/\.m3u8(\?|#|$)/i.test(u)) { if (man.indexOf(u) < 0 && !JUNK.test(u)) man.push(u); }
       else if (/\.mpd(\?|#|$)/i.test(u)) hasMpd = true;
       else if (extOf(u) && !JUNK.test(u) && !/\.(m4s)/i.test(u)) { if (!dir.some(function (d) { return d.url === u; })) dir.push({ url: u, h: 0, dur: 0 }); }
@@ -219,7 +247,7 @@ object VideoDetect {
     var items = [];
     var minDur = ref > 60 ? ref * 0.8 : 20;
     function done() {
-      try { LionVid.show(JSON.stringify({ page: pageUrl, title: title || '', items: items, note: note })); } catch (e) {}
+      try { LionVid.show(JSON.stringify({ page: pageUrl, title: title || '', items: items, note: note, manifests: failed })); } catch (e) {}
     }
 
     var pm = Promise.all(dir.map(probe)).then(function (ds) {
@@ -232,7 +260,8 @@ object VideoDetect {
         });
     });
 
-    var variants = [], media = [];
+    var variants = [], media = [], failed = [];
+    tpl.forEach(function (t) { variants.push({ h: t.h, bw: 0, url: t.url }); });
     var hm = Promise.all(man.map(function (m) {
       return fetch(m).then(function (r) { return r.text(); }).then(function (t) {
         var lines = t.split(/\r?\n/), found = false;
@@ -248,7 +277,7 @@ object VideoDetect {
           var tot = 0, re = /#EXTINF:([\d.]+)/g, mm; while ((mm = re.exec(t))) tot += parseFloat(mm[1]);
           media.push({ url: m, dur: tot });
         }
-      }).catch(function () { media.push({ url: m, dur: 0 }); });
+      }).catch(function () { failed.push(m); });
     })).then(function () {
       var seenV = {};
       variants.sort(function (a, b) { return (b.h - a.h) || (b.bw - a.bw); });
@@ -256,7 +285,7 @@ object VideoDetect {
         if (seenV[x.url]) return; seenV[x.url] = 1;
         items.push({ label: 'TS/MP4 \u2022 ' + (x.h ? x.h + 'p' : Math.round(x.bw / 1000) + ' kbps') + ' (HLS)', url: x.url, kind: 'hls', ext: '' });
       });
-      if (!variants.length) media.forEach(function (x) {
+      if (!variants.length && !failed.length) media.forEach(function (x) {
         if (!x.dur || x.dur >= minDur)
           items.push({ label: 'HLS \u2022 best' + (x.dur ? ' \u2022 ' + fmtD(x.dur) : ''), url: x.url, kind: 'hls', ext: '' });
       });
