@@ -94,6 +94,7 @@ class BrowserActivity : AppCompatActivity() {
 
         // file download: Abhi / Schedule dialog
         web.addJavascriptInterface(BlobDl.Bridge(applicationContext), BlobDl.BRIDGE_NAME)
+        web.addJavascriptInterface(VideoDetect.Bridge(this, false), VideoDetect.BRIDGE_NAME)
         web.setDownloadListener { dlUrl, ua, cd, mime, len ->
             Downloader.offer(this, false, dlUrl, ua, cd, mime, len, web.url, web)
         }
@@ -102,10 +103,12 @@ class BrowserActivity : AppCompatActivity() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 if (!urlBar.hasFocus()) urlBar.setText(url)
                 progress.visibility = View.VISIBLE
+                VideoDetect.inject(view)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
                 progress.visibility = View.GONE
+                VideoDetect.inject(view)
                 updateNavButtons()
                 History.touchTitle(applicationContext, url, view.title)
             }

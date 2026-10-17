@@ -104,6 +104,7 @@ object DlUi {
             check("🔁 Auto-retry (net / server error par)", DlSettings.K_RETRY_ON, true)
             seek("Max retry", DlSettings.K_RETRY_MAX, 1, 10, 5) { "$it" }
             check("📁 File type ke hisaab se folder", DlSettings.K_BY_TYPE, true)
+            check("⬇ Video par download icon dikhao", DlSettings.K_VID_ICON, true)
 
             val note = TextView(t)
             note.setTextColor(Color.parseColor(DIM))
@@ -124,6 +125,30 @@ object DlUi {
             )
         } catch (e: Exception) {
             Toast.makeText(ctx, "Settings khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Video mili: sirf info dikhao (download abhi nahi). */
+    fun videoInfo(ctx: Context, overlay: Boolean, text: String) {
+        try {
+            val t = themed(ctx)
+            val tv = TextView(t)
+            tv.setTextColor(Color.parseColor(LIGHT))
+            tv.textSize = 13f
+            tv.setPadding(dp(ctx, 16), dp(ctx, 8), dp(ctx, 16), dp(ctx, 4))
+            tv.setTextIsSelectable(true)
+            tv.text = text
+            val sv = ScrollView(t)
+            sv.addView(tv)
+            show(
+                AlertDialog.Builder(t)
+                    .setTitle("⬇ Video mili")
+                    .setView(sv)
+                    .setPositiveButton("Theek hai", null),
+                overlay
+            )
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Info khul nahi payi", Toast.LENGTH_SHORT).show()
         }
     }
 

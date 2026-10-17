@@ -53,6 +53,7 @@ object DlSettings {
     const val K_RETRY_ON = "dl_retry_on"
     const val K_RETRY_MAX = "dl_retry_max"
     const val K_BY_TYPE = "dl_by_type"
+    const val K_VID_ICON = "vid_icon_on"
 
     private fun p(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(FloatingService.PREFS, Context.MODE_PRIVATE)
@@ -68,6 +69,7 @@ object DlSettings {
     fun retryOn(ctx: Context): Boolean = getBool(ctx, K_RETRY_ON, true)
     fun retryMax(ctx: Context): Int = getInt(ctx, K_RETRY_MAX, 5).coerceIn(1, 10)
     fun byType(ctx: Context): Boolean = getBool(ctx, K_BY_TYPE, true)
+    fun vidIcon(ctx: Context): Boolean = getBool(ctx, K_VID_ICON, true)
 }
 
 // ═════════════════════════════════════════════════════════════════════════

@@ -1855,6 +1855,7 @@ class FloatingService : Service() {
 
             // file download: Abhi / Schedule dialog (overlay)
             webView.addJavascriptInterface(BlobDl.Bridge(ctx.applicationContext), BlobDl.BRIDGE_NAME)
+            webView.addJavascriptInterface(VideoDetect.Bridge(ctx, true), VideoDetect.BRIDGE_NAME)
             webView.setDownloadListener { dlUrl, ua, cd, mime, len ->
                 Downloader.offer(ctx, true, dlUrl, ua, cd, mime, len, webView.url, webView)
             }
@@ -1865,12 +1866,14 @@ class FloatingService : Service() {
                     lastSelection = ""
                     editFocused = false
                     updateCopyBar()
+                    VideoDetect.inject(view)
                 }
 
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     CookieManager.getInstance().flush()
                     view?.evaluateJavascript(selectionJs, null)
                     view?.evaluateJavascript(scrollJs, null)
+                    VideoDetect.inject(view)
                     swipeRefresh.isRefreshing = false
                     History.touchTitle(ctx, pageUrl, view?.title)
                 }
