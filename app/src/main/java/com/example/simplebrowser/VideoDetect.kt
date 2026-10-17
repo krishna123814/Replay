@@ -10,7 +10,7 @@ import org.json.JSONObject
 /**
  * Snaptube jaisa video detect (STEP 1: sirf dikhana, download nahi).
  *  - Page me <video> milte hi uske upar chhota ⬇ icon aata hai.
- *  - Icon dabane par: video ka link, resolution, aur HLS/DASH me jo quality list mili wo dikhti hai.
+ *  - Icon dabane par: format/quality ki list aati hai, chun-ne par download shuru (direct file = download engine, HLS = HlsDl).
  *  - Settings > "Video par download icon dikhao" se on/off (LionVid.enabled() har baar check hota hai).
  */
 object VideoDetect {
@@ -31,45 +31,49 @@ object VideoDetect {
 
         @JavascriptInterface
         fun show(json: String?) {
-            val text = try {
-                format(JSONObject(json ?: "{}"))
-            } catch (e: Exception) {
-                "Info padh nahi payi"
-            }
-            main.post { DlUi.videoInfo(ctx, overlay, text) }
+            val o = try { JSONObject(json ?: "{}") } catch (e: Exception) { JSONObject() }
+            main.post { handle(o) }
         }
 
-        private fun format(o: JSONObject): String {
-            val sb = StringBuilder()
+        private class Item(val label: String, val url: String, val kind: String, val ext: String)
+
+        private fun handle(o: JSONObject) {
+            val items = ArrayList<Item>()
+            val arr = o.optJSONArray("items")
+            if (arr != null) for (i in 0 until arr.length()) {
+                val it = arr.optJSONObject(i) ?: continue
+                items.add(Item(it.optString("label"), it.optString("url"), it.optString("kind"), it.optString("ext")))
+            }
             val page = o.optString("page")
-            if (page.isNotEmpty()) sb.append("Page: ").append(page).append("\n\n")
-            val w = o.optInt("w"); val h = o.optInt("h")
-            if (w > 0 && h > 0) sb.append("Abhi chal rahi: ${w}x$h\n")
-            val dur = o.optDouble("dur", 0.0)
-            if (dur > 0 && !dur.isInfinite()) sb.append("Length: ").append(fmtDur(dur.toLong())).append("\n")
-            sb.append("\n")
-            val q = o.optJSONArray("quals")
-            if (q != null && q.length() > 0) {
-                sb.append("Quality (stream se):\n")
-                for (i in 0 until q.length()) sb.append("  • ").append(q.optString(i)).append("\n")
-                sb.append("\n")
-            } else {
-                sb.append("Quality list is stream me nahi mili (single file ho sakti hai).\n\n")
+            val title = o.optString("title")
+            if (items.isEmpty()) {
+                val note = o.optString("note")
+                DlUi.videoInfo(ctx, overlay,
+                    (if (note.isNotEmpty()) note else "Is video ka seedha link nahi mila.") +
+                        "\n\n(blob/protected stream, YouTube jaisi site ya DRM ho sakti hai)")
+                return
             }
-            val l = o.optJSONArray("links")
-            if (l != null && l.length() > 0) {
-                sb.append("Mile links:\n")
-                for (i in 0 until l.length()) sb.append("  ").append(i + 1).append(". ").append(l.optString(i)).append("\n")
-            } else {
-                sb.append("Koi seedha link nahi mila (blob/protected stream ho sakti hai).\n")
-            }
-            sb.append("\n(Download abhi band hai, agle step me aayega)")
-            return sb.toString()
+            DlUi.videoPick(ctx, overlay, items.map { it.label }) { idx -> start(items[idx], page, title) }
         }
 
-        private fun fmtDur(s: Long): String {
-            val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
-            return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
+        private fun start(it: Item, page: String, title: String) {
+            val app = ctx.applicationContext
+            val ua = PopupLogin.cleanUa(app)
+            val cookie = try { android.webkit.CookieManager.getInstance().getCookie(it.url) ?: "" } catch (e: Exception) { "" }
+            var base = title.replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), " ").replace(Regex("\\s+"), " ").trim().take(60)
+            if (base.isEmpty()) base = "video"
+            val q = Regex("(\\d{3,4})p").find(it.label)?.groupValues?.get(1)
+            if (q != null) base += "_" + q + "p"
+            if (it.kind == "hls") {
+                HlsDl.start(app, it.url, base, cookie, ua, page)
+            } else {
+                val ext = it.ext.ifEmpty { "mp4" }
+                val mime = when (ext) { "webm" -> "video/webm"; "mkv" -> "video/x-matroska"; "mov" -> "video/quicktime"; else -> "video/mp4" }
+                val ok = Downloader.enqueueNow(app, DlSpec(it.url, cookie, ua, page, "$base.$ext", mime), false)
+                android.widget.Toast.makeText(app,
+                    if (ok) "Download queue me: $base.$ext\n(⚙ Settings → 📥 Download queue)" else "Download nahi ho paya",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -119,57 +123,62 @@ object VideoDetect {
   }
 
   function abs(u) { try { return new URL(u, location.href).href; } catch (e) { return u; } }
+  function extOf(u) { var m = /\.(mp4|webm|mkv|mov|m4v)(\?|#|$)/i.exec(u); return m ? m[1].toLowerCase().replace('m4v', 'mp4') : ''; }
 
-  function mediaLinks(v) {
-    var out = [];
-    function add(u) { if (u && out.indexOf(u) < 0) out.push(u); }
-    if (v) {
-      add(v.currentSrc || v.src);
-      var ss = v.getElementsByTagName('source');
-      for (var i = 0; i < ss.length; i++) add(abs(ss[i].src));
+  function collect(v) {
+    var direct = [], manifests = [], note = '';
+    function addDirect(u, h) {
+      if (!u || !/^https?:/i.test(u)) return;
+      for (var i = 0; i < direct.length; i++) if (direct[i].url === u) return;
+      direct.push({ url: u, h: h || 0 });
     }
+    function addMan(u) { if (u && manifests.indexOf(u) < 0) manifests.push(u); }
+    var cur = v ? (v.currentSrc || v.src) : '';
+    if (cur) {
+      if (/^blob:/i.test(cur)) note = 'Ye video blob stream hai (site chhupa ke chalati hai).';
+      else if (/\.m3u8/i.test(cur)) addMan(cur);
+      else if (/\.mpd/i.test(cur)) note = 'DASH (.mpd) stream hai, abhi support nahi.';
+      else addDirect(cur, v.videoHeight);
+    }
+    if (v) { var ss = v.getElementsByTagName('source'); for (var i = 0; i < ss.length; i++) { var u = abs(ss[i].src); if (/\.m3u8/i.test(u)) addMan(u); else addDirect(u, 0); } }
     try {
       performance.getEntriesByType('resource').forEach(function (e) {
         var n = e.name;
-        if (/\.(mp4|webm|m3u8|mpd|mkv|mov|m4v)(\?|#|${'$'})/i.test(n)) add(n);
+        if (/\.m3u8(\?|#|$)/i.test(n)) addMan(n);
+        else if (/\.mpd(\?|#|$)/i.test(n) && !note) note = 'DASH (.mpd) stream hai, abhi support nahi.';
+      });
+      if (!manifests.length) performance.getEntriesByType('resource').forEach(function (e) {
+        if (extOf(e.name) && direct.length < 6) addDirect(e.name, 0);
       });
     } catch (e) {}
-    return out;
-  }
 
-  function parseM3u8(txt) {
-    var q = [], lines = txt.split(/\r?\n/);
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf('#EXT-X-STREAM-INF') === 0) {
-        var m = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]);
-        var bw = /BANDWIDTH=(\d+)/.exec(lines[i]);
-        if (m) q.push(m[2] + 'p (' + m[1] + 'x' + m[2] + ')' + (bw ? ' ~' + Math.round(bw[1] / 1000) + ' kbps' : ''));
-      }
-    }
-    return q;
-  }
-  function parseMpd(txt) {
-    var q = [], re = /<Representation[^>]*?(?:width="(\d+)"[^>]*?height="(\d+)"|height="(\d+)"[^>]*?width="(\d+)")/g, m;
-    while ((m = re.exec(txt))) {
-      var w = m[1] || m[4], h = m[2] || m[3];
-      var s = h + 'p (' + w + 'x' + h + ')';
-      if (q.indexOf(s) < 0) q.push(s);
-    }
-    return q;
-  }
-
-  function collect(v) {
-    var links = mediaLinks(v);
-    var info = { page: location.href, w: v ? v.videoWidth : 0, h: v ? v.videoHeight : 0,
-                 dur: v ? v.duration : 0, links: links, quals: [] };
-    var manifest = null;
-    for (var i = 0; i < links.length; i++) if (/\.(m3u8|mpd)(\?|#|${'$'})/i.test(links[i])) { manifest = links[i]; break; }
+    var items = [];
+    direct.forEach(function (d) {
+      var ex = extOf(d.url) || 'mp4';
+      items.push({ label: ex.toUpperCase() + (d.h ? ' \u2022 ' + d.h + 'p' : ' \u2022 original quality'), url: d.url, kind: 'file', ext: ex });
+    });
+    var info = { page: location.href, title: document.title || '', items: items, note: note };
+    var pending = manifests.length;
     function done() { try { LionVid.show(JSON.stringify(info)); } catch (e) {} }
-    if (!manifest) { done(); return; }
-    fetch(manifest).then(function (r) { return r.text(); }).then(function (t) {
-      info.quals = /\.mpd/i.test(manifest) ? parseMpd(t) : parseM3u8(t);
-      done();
-    }).catch(done);
+    if (!pending) { done(); return; }
+    manifests.slice(0, 3).forEach(function (m) {
+      function fin() { if (--pending <= 0 || false) done(); }
+      fetch(m).then(function (r) { return r.text(); }).then(function (t) {
+        var lines = t.split(/\r?\n/), vs = [];
+        for (var i = 0; i < lines.length; i++) {
+          if (lines[i].indexOf('#EXT-X-STREAM-INF') === 0) {
+            var res = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]), bw = /BANDWIDTH=(\d+)/.exec(lines[i]);
+            var j = i + 1; while (j < lines.length && (!lines[j].trim() || lines[j][0] === '#')) j++;
+            if (j < lines.length) vs.push({ h: res ? +res[2] : 0, bw: bw ? +bw[1] : 0, url: new URL(lines[j].trim(), m).href });
+          }
+        }
+        if (vs.length) {
+          vs.sort(function (a, b) { return (b.h - a.h) || (b.bw - a.bw); });
+          vs.forEach(function (x) { items.push({ label: 'TS/MP4 \u2022 ' + (x.h ? x.h + 'p' : Math.round(x.bw / 1000) + ' kbps') + ' (HLS)', url: x.url, kind: 'hls', ext: '' }); });
+        } else items.push({ label: 'HLS \u2022 auto quality', url: m, kind: 'hls', ext: '' });
+        fin();
+      }).catch(function () { items.push({ label: 'HLS \u2022 best quality', url: m, kind: 'hls', ext: '' }); fin(); });
+    });
   }
 
   window.__lionVid = { scan: place };

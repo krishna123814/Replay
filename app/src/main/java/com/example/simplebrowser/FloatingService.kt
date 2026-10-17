@@ -1836,6 +1836,7 @@ class FloatingService : Service() {
             s.allowFileAccess = false
             s.setSupportMultipleWindows(true)
             s.javaScriptCanOpenWindowsAutomatically = true
+            s.userAgentString = PopupLogin.cleanUa(ctx)
             s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
 
             // Streamlit image/canvas OOM fix: hardware layer nahi
@@ -1942,21 +1943,8 @@ class FloatingService : Service() {
                 override fun onCreateWindow(
                     view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?
                 ): Boolean {
-                    // target=_blank / window.open: naya window nahi, isi window me load karo
-                    val msg = resultMsg ?: return false
-                    val transport = msg.obj as? WebView.WebViewTransport ?: return false
-                    val temp = WebView(ctx)
-                    temp.webViewClient = object : WebViewClient() {
-                        override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean {
-                            val u = r?.url?.toString()
-                            if (u != null) handler.post { webView.loadUrl(u) }
-                            handler.post { try { temp.destroy() } catch (e: Exception) { } }
-                            return true
-                        }
-                    }
-                    transport.webView = temp
-                    msg.sendToTarget()
-                    return true
+                    // window.open / Google login popup: asli popup WebView (window.opener bana rahe)
+                    return PopupLogin.open(ctx, true, resultMsg)
                 }
 
                 override fun onJsPrompt(

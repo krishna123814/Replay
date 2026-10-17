@@ -90,7 +90,11 @@ class BrowserActivity : AppCompatActivity() {
             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
             allowFileAccess = false
             allowContentAccess = true
+            setSupportMultipleWindows(true)
+            javaScriptCanOpenWindowsAutomatically = true
+            userAgentString = PopupLogin.cleanUa(this@BrowserActivity)
         }
+        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
 
         // file download: Abhi / Schedule dialog
         web.addJavascriptInterface(BlobDl.Bridge(applicationContext), BlobDl.BRIDGE_NAME)
@@ -137,6 +141,10 @@ class BrowserActivity : AppCompatActivity() {
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 progress.progress = newProgress
             }
+
+            override fun onCreateWindow(
+                view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?
+            ): Boolean = PopupLogin.open(this@BrowserActivity, false, resultMsg)
 
             override fun onReceivedTitle(view: WebView, title: String?) {
                 super.onReceivedTitle(view, title)

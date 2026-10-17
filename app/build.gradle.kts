@@ -14,7 +14,7 @@ android {
 
         val vcProp = (project.findProperty("vc") as String?)?.toIntOrNull()
         versionCode = vcProp ?: (System.currentTimeMillis() / 60000L).toInt()
-        versionName = "3.2"
+        versionName = "3.3"
 
         // GitHub Actions -PgithubRepo=<owner/repo> deta hai; na mile (local build) to ye default repo
         val repoProp = (project.findProperty("githubRepo") as String?)

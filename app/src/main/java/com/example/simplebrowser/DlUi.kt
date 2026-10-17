@@ -128,7 +128,23 @@ object DlUi {
         }
     }
 
-    /** Video mili: sirf info dikhao (download abhi nahi). */
+    /** Format/quality chuno. */
+    fun videoPick(ctx: Context, overlay: Boolean, labels: List<String>, onPick: (Int) -> Unit) {
+        try {
+            val t = themed(ctx)
+            show(
+                AlertDialog.Builder(t)
+                    .setTitle("⬇ Kis format / quality me download karein?")
+                    .setItems(labels.toTypedArray()) { _, which -> onPick(which) }
+                    .setNegativeButton("Cancel", null),
+                overlay
+            )
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "List khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Video ka link nahi mila / info. */
     fun videoInfo(ctx: Context, overlay: Boolean, text: String) {
         try {
             val t = themed(ctx)
@@ -142,7 +158,7 @@ object DlUi {
             sv.addView(tv)
             show(
                 AlertDialog.Builder(t)
-                    .setTitle("⬇ Video mili")
+                    .setTitle("⬇ Video")
                     .setView(sv)
                     .setPositiveButton("Theek hai", null),
                 overlay
