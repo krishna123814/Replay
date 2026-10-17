@@ -30,6 +30,13 @@ object VideoDetect {
         fun enabled(): Boolean = DlSettings.vidIcon(ctx)
 
         @JavascriptInterface
+        fun toast(msg: String?) {
+            main.post {
+                try { android.widget.Toast.makeText(ctx.applicationContext, msg ?: "", android.widget.Toast.LENGTH_SHORT).show() } catch (e: Exception) { }
+            }
+        }
+
+        @JavascriptInterface
         fun show(json: String?) {
             val o = try { JSONObject(json ?: "{}") } catch (e: Exception) { JSONObject() }
             main.post { handle(o) }
@@ -81,7 +88,11 @@ object VideoDetect {
     private val JS = """
 (function () {
   if (window.__lionVid) { try { window.__lionVid.scan(); } catch (e) {} return; }
-  var btns = new Map();           // video element -> button
+  var btns = new Map();           // element (video ya card link) -> button
+  var SZ = 22;                    // icon size (px)
+  var STYLE = 'position:fixed;z-index:2147483647;width:' + SZ + 'px;height:' + SZ + 'px;border-radius:' + (SZ / 2) + 'px;' +
+    'background:rgba(41,98,255,.92);color:#fff;font:700 13px/' + SZ + 'px sans-serif;text-align:center;' +
+    'box-shadow:0 1px 5px rgba(0,0,0,.5);touch-action:manipulation;user-select:none;display:none';
 
   // Network URLs record karo (resource-timing buffer listing pages par bhar jata hai)
   var seen = window.__lionUrls = window.__lionUrls || [];
@@ -94,55 +105,85 @@ object VideoDetect {
     XMLHttpRequest.prototype.open = function (m, u) { try { rec(u); } catch (e) {} return oo.apply(this, arguments); };
     new PerformanceObserver(function (l) { l.getEntries().forEach(function (e) { rec(e.name); }); }).observe({ entryTypes: ['resource'] });
   } catch (e) {}
-  var STYLE = 'position:fixed;z-index:2147483647;width:40px;height:40px;border-radius:20px;' +
-    'background:rgba(41,98,255,.92);color:#fff;font:700 20px/40px sans-serif;text-align:center;' +
-    'box-shadow:0 2px 8px rgba(0,0,0,.5);touch-action:manipulation;user-select:none;display:none';
 
   function on() { try { return !!LionVid.enabled(); } catch (e) { return false; } }
+  function toast(m) { try { LionVid.toast(m); } catch (e) {} }
+  function abs(u) { try { return new URL(u, location.href).href; } catch (e) { return u; } }
+  function extOf(u) { var m = /\.(mp4|webm|mkv|mov|m4v)(\?|#|$)/i.exec(u); return m ? m[1].toLowerCase().replace('m4v', 'mp4') : ''; }
 
-  function mkBtn(v) {
+  // ── Card (listing page par thumbnail wala video link) pehchano ──
+  var VIDRE = /(video|watch|movie|clip|view|play|embed|v\/|\/\d{4,})/i;
+  function cardMedia(a) {
+    try {
+      if (!a.href || !/^https?:/i.test(a.href)) return null;
+      var u = new URL(a.href);
+      if (u.href.split('#')[0] === location.href.split('#')[0]) return null;
+      if (/\.(jpe?g|png|gif|webp|svg|css|js)(\?|$)/i.test(u.pathname)) return null;
+      if (!VIDRE.test(u.pathname)) return null;
+      return a.querySelector('img,video,picture');
+    } catch (e) { return null; }
+  }
+
+  function mkBtn(el, isCard) {
     var b = document.createElement('div');
     b.textContent = '\u2B07';
     b.setAttribute('style', STYLE);
     b.addEventListener('click', function (ev) {
-      ev.preventDefault(); ev.stopPropagation(); collect(v);
+      ev.preventDefault(); ev.stopPropagation();
+      if (isCard) collectCard(el); else collect(el);
     }, true);
     b.addEventListener('touchstart', function (ev) { ev.stopPropagation(); }, true);
     (document.body || document.documentElement).appendChild(b);
     return b;
   }
 
+  function show(b, r, left) {
+    b.style.display = 'block';
+    var x = left ? r.left + 6 : r.right - SZ - 6;
+    b.style.left = Math.max(2, Math.min(innerWidth - SZ - 2, x)) + 'px';
+    b.style.top = Math.max(2, Math.min(innerHeight - SZ - 2, r.top + 6)) + 'px';
+  }
+
+  function inView(r) { return r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth; }
+
   function place() {
     var enabled = on();
-    var vids = document.getElementsByTagName('video');
-    var seen = new Set();
-    for (var i = 0; i < vids.length; i++) {
-      var v = vids[i]; seen.add(v);
-      var r = v.getBoundingClientRect();
-      var visible = enabled && r.width > 120 && r.height > 80 &&
-        r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
-      var b = btns.get(v);
-      if (!b && visible) { b = mkBtn(v); btns.set(v, b); }
-      if (!b) continue;
-      if (!visible) { b.style.display = 'none'; continue; }
-      b.style.display = 'block';
-      b.style.left = Math.max(4, Math.min(innerWidth - 44, r.right - 48)) + 'px';
-      b.style.top = Math.max(4, Math.min(innerHeight - 44, r.top + 8)) + 'px';
+    var live = new Set();
+    function handle(el, isCard) {
+      var r = el.getBoundingClientRect();
+      var vis = enabled && r.width > 100 && r.height > 60 && inView(r);
+      var b = btns.get(el);
+      if (!b && vis) { b = mkBtn(el, isCard); btns.set(el, b); }
+      if (!b) return;
+      live.add(el);
+      if (!vis) { b.style.display = 'none'; return; }
+      show(b, r, isCard);
     }
-    btns.forEach(function (b, v) {
-      if (!seen.has(v) || !document.contains(v)) { b.remove(); btns.delete(v); }
+    var vids = document.getElementsByTagName('video');
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i], a = v.closest ? v.closest('a[href]') : null;
+      if (a && cardMedia(a)) continue;          // card ke andar ka hover-preview: card ka icon hi kaafi
+      handle(v, false);
+    }
+    var as = document.getElementsByTagName('a');
+    for (var j = 0; j < as.length; j++) {
+      var an = as[j], rr = an.getBoundingClientRect();
+      if (rr.width < 100 || rr.height < 60 || !inView(rr)) continue;
+      if (!cardMedia(an)) continue;
+      handle(an, true);
+    }
+    btns.forEach(function (b, el) {
+      if (!live.has(el) && !(enabled && inView(el.getBoundingClientRect()) && document.contains(el))) b.style.display = 'none';
+      if (!document.contains(el)) { b.remove(); btns.delete(el); }
     });
   }
 
-  function abs(u) { try { return new URL(u, location.href).href; } catch (e) { return u; } }
-  function extOf(u) { var m = /\.(mp4|webm|mkv|mov|m4v)(\?|#|$)/i.exec(u); return m ? m[1].toLowerCase().replace('m4v', 'mp4') : ''; }
-
   var JUNK = /thumb|preview|sprite|heatmap|poster|trailer|teaser|storyboard|\/ads?\//i;
 
-  function htmlUrls() {
+  function urlsFromText(h) {
     var out = [];
     try {
-      var h = document.documentElement.innerHTML.replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&');
+      h = h.replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&');
       var re = /https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mp4|webm)(?:\?[^"'\s<>\\]*)?/gi, m;
       while ((m = re.exec(h)) && out.length < 40) if (out.indexOf(m[0]) < 0) out.push(m[0]);
     } catch (e) {}
@@ -163,18 +204,8 @@ object VideoDetect {
 
   function fmtD(s) { s = Math.round(s); var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + ('0' + m).slice(-2) : m) + ':' + ('0' + x).slice(-2); }
 
-  function collect(v) {
-    var ref = v && isFinite(v.duration) ? v.duration : 0;
-    var cur = v ? (v.currentSrc || v.src) : '';
-    var note = '';
-    var pool = [];                       // priority order: current > html > hooks(latest first)
-    if (cur && !/^blob:/i.test(cur)) pool.push(cur);
-    if (v) { var ss = v.getElementsByTagName('source'); for (var i = 0; i < ss.length; i++) pool.push(abs(ss[i].src)); }
-    pool = pool.concat(htmlUrls());
-    pool = pool.concat(seen.slice().reverse());
-    try { performance.getEntriesByType('resource').reverse().forEach(function (e) { pool.push(e.name); }); } catch (e) {}
-    if (cur && /^blob:/i.test(cur)) note = 'Ye video blob stream hai; page ke andar se link dhoondh rahe hain.';
-
+  // ── asli kaam: pool (urls) se format/quality items banao ──
+  function run(pool, ref, note, title, pageUrl) {
     var man = [], dir = [], hasMpd = false;
     pool.forEach(function (u) {
       if (!/^https?:/i.test(u)) return;
@@ -186,12 +217,12 @@ object VideoDetect {
     if (hasMpd && !man.length && !dir.length) note = 'DASH (.mpd) stream hai, abhi support nahi.';
 
     var items = [];
+    var minDur = ref > 60 ? ref * 0.8 : 20;
     function done() {
-      try { LionVid.show(JSON.stringify({ page: location.href, title: document.title || '', items: items, note: note })); } catch (e) {}
+      try { LionVid.show(JSON.stringify({ page: pageUrl, title: title || '', items: items, note: note })); } catch (e) {}
     }
 
     var pm = Promise.all(dir.map(probe)).then(function (ds) {
-      var minDur = ref > 60 ? ref * 0.8 : 20;
       ds.filter(function (d) { return !d.dur || d.dur >= minDur; })
         .sort(function (a, b) { return b.h - a.h; })
         .forEach(function (d) {
@@ -226,15 +257,45 @@ object VideoDetect {
         items.push({ label: 'TS/MP4 \u2022 ' + (x.h ? x.h + 'p' : Math.round(x.bw / 1000) + ' kbps') + ' (HLS)', url: x.url, kind: 'hls', ext: '' });
       });
       if (!variants.length) media.forEach(function (x) {
-        if (!x.dur || x.dur >= (ref > 60 ? ref * 0.8 : 20))
+        if (!x.dur || x.dur >= minDur)
           items.push({ label: 'HLS \u2022 best' + (x.dur ? ' \u2022 ' + fmtD(x.dur) : ''), url: x.url, kind: 'hls', ext: '' });
       });
     });
 
     Promise.all([pm, hm]).then(function () {
-      if (!items.length && ref && ref < 30) note = 'Ye sirf chhota preview hai (' + fmtD(ref) + '). Video ka apna page kholkar play karo, phir ⬇ dabao.';
+      if (!items.length && !note && ref && ref < 30) note = 'Ye sirf chhota preview hai (' + fmtD(ref) + '). Video ka apna page kholkar play karo, phir \u2B07 dabao.';
       done();
     }).catch(done);
+  }
+
+  // Video player par icon
+  function collect(v) {
+    toast('Link dhoondh rahe hain\u2026');
+    var ref = v && isFinite(v.duration) ? v.duration : 0;
+    var cur = v ? (v.currentSrc || v.src) : '';
+    var note = '';
+    var pool = [];
+    if (cur && !/^blob:/i.test(cur)) pool.push(cur);
+    if (v) { var ss = v.getElementsByTagName('source'); for (var i = 0; i < ss.length; i++) pool.push(abs(ss[i].src)); }
+    pool = pool.concat(urlsFromText(document.documentElement.innerHTML));
+    pool = pool.concat(seen.slice().reverse());
+    try { performance.getEntriesByType('resource').reverse().forEach(function (e) { pool.push(e.name); }); } catch (e) {}
+    run(pool, ref, note, document.title, location.href);
+  }
+
+  // Listing page ke card par icon: us video ka page peeche se load karke link nikalo
+  function collectCard(a) {
+    var href = a.href;
+    toast('Video ka page load ho raha hai\u2026');
+    fetch(href, { credentials: 'include' }).then(function (r) { return r.text(); }).then(function (t) {
+      var ref = 0, m = /"duration"\s*:\s*"?(\d{2,6})"?/.exec(t) || /video:duration"\s+content="(\d+)/.exec(t);
+      if (m) ref = +m[1];
+      var tm = /<title[^>]*>([^<]*)<\/title>/i.exec(t);
+      var title = tm ? tm[1].replace(/&amp;/g, '&').trim() : (a.textContent || '').trim();
+      run(urlsFromText(t), ref, '', title, href);
+    }).catch(function () {
+      try { LionVid.show(JSON.stringify({ page: href, title: '', items: [], note: 'Is video ka page yahan se load nahi ho paya. Video kholkar play karo, phir \u2B07 dabao.' })); } catch (e) {}
+    });
   }
 
   window.__lionVid = { scan: place };
