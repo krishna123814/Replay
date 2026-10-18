@@ -399,8 +399,107 @@ object ServerSync {
         }
     }
 
+    // ── Batch: single download jaisa tareeka ──
+    // Single (⬇ icon) video-page ka HTML padh kar usme se m3u8 stream link nikalta hai aur server ko "hls" mode me deta hai.
+    // Batch pehle page link seedha yt-dlp ko deta tha (xHamster par KeyError('title')). Ab batch bhi har page se
+    // m3u8 nikalta hai (VideoDetect.collectCard jaisi logic) aur "hls" me bhejta hai. Link na mile to purana yt-dlp raasta.
+    private val resolveCache = java.util.concurrent.ConcurrentHashMap<String, List<Pair<Int, String>>>()
+    private val JUNK_RE = Regex("thumb|preview|sprite|heatmap|poster|trailer|teaser|storyboard|/ads?/", RegexOption.IGNORE_CASE)
+    private val URL_RE = Regex("https?://[^\"'\\s<>\\\\]+", RegexOption.IGNORE_CASE)
+    private val MEDIA_EXT_RE = Regex("\\.(m3u8|mp4|webm|mpd)(\\?|#|$|\\.)", RegexOption.IGNORE_CASE)
+    private val M3U8_RE = Regex("\\.m3u8(\\?|#|$)", RegexOption.IGNORE_CASE)
+
+    private fun cookieFor(url: String, fallback: String): String {
+        val c = try { android.webkit.CookieManager.getInstance().getCookie(url) ?: "" } catch (e: Exception) { "" }
+        return c.ifEmpty { fallback }
+    }
+
+    /** Video page ka HTML padh kar (height, m3u8 link) list: sabse badi quality pehle. Kuch na mile / error => khaali list. */
+    fun resolveHls(spec: DlSpec): List<Pair<Int, String>> {
+        resolveCache[spec.url]?.let { return it }
+        val out = try { resolveHlsUncached(spec) } catch (e: Throwable) { emptyList() }
+        if (out.isNotEmpty()) {
+            if (resolveCache.size > 400) resolveCache.clear()
+            resolveCache[spec.url] = out
+        }
+        return out
+    }
+
+    private fun resolveHlsUncached(spec: DlSpec): List<Pair<Int, String>> {
+        val html = HlsDl.get(spec.url, spec.cookie, spec.ua, spec.referer)
+        val t = html.replace("\\/", "/").replace("\\u0026", "&").replace("&amp;", "&")
+        val urls = ArrayList<String>()
+        for (m in URL_RE.findAll(t)) {
+            if (urls.size >= 60) break
+            val u = m.value
+            if (MEDIA_EXT_RE.containsMatchIn(u) && u !in urls) urls.add(u)
+        }
+        val variants = ArrayList<Pair<Int, String>>()
+        val manifests = ArrayList<String>()
+        for (u in urls) {
+            if (u.contains("_TPL_")) {               // template link: multi=WxH:144p,... se har quality ka link
+                val mm = Regex("multi=([^/]+)").find(u) ?: continue
+                for (part in mm.groupValues[1].split(",")) {
+                    val f = part.split(":")
+                    val lab = f.getOrNull(1)?.takeIf { it.isNotEmpty() }
+                        ?: Regex("x(\\d+)").find(f[0])?.groupValues?.get(1)?.let { it + "p" }
+                        ?: continue
+                    variants.add((lab.filter { it.isDigit() }.toIntOrNull() ?: 0) to u.replace("_TPL_", lab))
+                }
+                continue
+            }
+            if (M3U8_RE.containsMatchIn(u) && !JUNK_RE.containsMatchIn(u) && u !in manifests) manifests.add(u)
+        }
+        for (m in manifests.take(4)) {
+            val got = HlsDl.variantList(m, cookieFor(m, spec.cookie), spec.ua, spec.url)
+            for ((label, link) in got) {
+                val h = Regex("(\\d{3,4})p").find(label)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                variants.add(h to link)
+            }
+            if (got.isNotEmpty()) break
+        }
+        return variants.distinctBy { it.second }.sortedByDescending { it.first }
+    }
+
+    /** height: 0 = sabse badi; >0 = us tak ki sabse achhi, na ho to sabse nazdeek (sabse chhoti). */
+    private fun pickVariant(v: List<Pair<Int, String>>, height: Int): Pair<Int, String> {
+        if (height <= 0) return v.first()
+        return v.firstOrNull { it.first in 1..height }
+            ?: v.filter { it.first > 0 }.minByOrNull { it.first }
+            ?: v.first()
+    }
+
+    /** Batch ki quality list: pehle <=3 video ke pages se m3u8 qualities. Kuch na mile to purana yt-dlp tareeka. */
+    fun fetchHlsHeights(ctx: Context, specs: List<DlSpec>, cb: (List<FormatOpt>, Boolean) -> Unit) {
+        net.execute {
+            val futs = specs.take(3).map { s -> net.submit(java.util.concurrent.Callable<List<Pair<Int, String>>> { resolveHls(s) }) }
+            val got = futs.map {
+                try { it.get(40, TimeUnit.SECONDS) } catch (e: Throwable) { emptyList<Pair<Int, String>>() }
+            }.filter { it.isNotEmpty() }
+            if (got.isEmpty()) { fetchFormats(ctx, specs, cb); return@execute }
+            val count = java.util.TreeMap<Int, Int>()
+            for (v in got) for (h in v.map { it.first }.filter { it > 0 }.toSet()) count[h] = (count[h] ?: 0) + 1
+            val list = count.descendingMap().map { (h, c) -> FormatOpt(h, "", 0, c, got.size) }
+            cb(list, false)
+        }
+    }
+
+    /** Ek video server ko bhejo: pehle hls (single jaisa), na ho paye to yt-dlp. Sirf-audio (-1) hamesha yt-dlp. */
+    private fun postOne(app: Context, store: String, path: String, spec: DlSpec, height: Int): String {
+        if (height >= 0) {
+            val v = resolveHls(spec)
+            if (v.isNotEmpty()) {
+                val (h, link) = pickVariant(v, height)
+                val nm = if (h > 0) spec.name + "_" + h + "p" else spec.name
+                return postDl(app, store, path, DlSpec(link, cookieFor(link, spec.cookie), spec.ua, spec.url, nm, ""), "hls", 0)
+            }
+        }
+        return postDl(app, store, path, spec, "ytdlp", height)
+    }
+
     /**
-     * Kai video-page links ek saath (yt-dlp mode). Server ki queue bhari ho (HTTP 429) to 10 sec ruk ke dobara.
+     * Kai video-page links ek saath. Har page se m3u8 nikal kar "hls" me (single jaisa); link na mile to yt-dlp.
+     * Server ki queue bhari ho (HTTP 429) to 10 sec ruk ke dobara.
      * Phone par fallback NAHI (page link phone se download nahi ho sakta). Aakhir me summary toast.
      */
     fun sendBulk(ctx: Context, specs: List<DlSpec>, height: Int = 0) {
@@ -417,7 +516,7 @@ object ServerSync {
                 var tries = 0
                 while (true) {
                     try {
-                        val id = postDl(app, store, path, spec, "ytdlp", height)
+                        val id = postOne(app, store, path, spec, height)
                         ids.add(id); nameOf[id] = spec.name
                         histAdd(app, id, spec.name, spec.url, store, path)
                         break

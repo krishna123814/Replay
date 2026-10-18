@@ -81,7 +81,7 @@ object VideoDetect {
                     DlSpec(urls[i], cookie, ua, page, base.ifEmpty { "video" }, "")
                 }
                 android.widget.Toast.makeText(app, "Quality / formats padh rahe hain… (10-40 sec)", android.widget.Toast.LENGTH_LONG).show()
-                ServerSync.fetchFormats(app, specs) { opts, audio ->
+                ServerSync.fetchHlsHeights(app, specs) { opts, audio ->
                     main.post { askQuality(specs, opts, audio) }
                 }
             }

@@ -165,7 +165,7 @@ object HlsDl {
         return c
     }
 
-    private fun get(url: String, cookie: String, ua: String, referer: String): String =
+    fun get(url: String, cookie: String, ua: String, referer: String): String =
         String(getBytes(url, cookie, ua, referer), Charsets.UTF_8)
 
     private fun getBytes(url: String, cookie: String, ua: String, referer: String): ByteArray {
