@@ -757,11 +757,161 @@ class BrowserActivity : AppCompatActivity() {
                 return
             }
         }
+        // Phone <-> server: pehle SAB files compare (folder ke andar tak), phir ek saath faisla.
+        if (!LocalJobs.involvesLocal(items, store)) {
+            pasteOldWay(items, move, dest)
+            return
+        }
+        swipe.isRefreshing = true
+        io.execute {
+            val res: ScanResult? = try {
+                scanConflicts(items, dest)
+            } catch (e: Exception) {
+                null
+            }
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                swipe.isRefreshing = false
+                when {
+                    res == null -> {
+                        Toast.makeText(this, "Compare nahi ho paya — purane tareeke se", Toast.LENGTH_SHORT).show()
+                        pasteOldWay(items, move, dest)
+                    }
+                    res.conflicts.isEmpty() -> startXfer(items, move, "skip", dest, null)
+                    else -> showConflicts(items, move, dest, res)
+                }
+            }
+        }
+    }
+
+    private fun pasteOldWay(items: List<ClipItem>, move: Boolean, dest: String) {
         val names = entries.map { it.name }.toHashSet()
         if (items.any { it.name in names }) {
-            askConflict { oc -> startXfer(items, move, oc, dest) }
+            askConflict { oc -> startXfer(items, move, oc, dest, null) }
         } else {
-            startXfer(items, move, "skip", dest)
+            startXfer(items, move, "skip", dest, null)
+        }
+    }
+
+    // ───────── paste se pehle compare ─────────
+
+    /** Ek pehle se maujood file: rel = "Folder/a.mp4". forceRename = naam ka type alag (file vs folder). */
+    private class Conf(val rel: String, val srcSize: Long, val dstSize: Long, val forceRename: Boolean)
+
+    private class ScanResult {
+        val conflicts = ArrayList<Conf>()
+        var newFiles = 0
+        var newBytes = 0L
+    }
+
+    private fun scanConflicts(items: List<ClipItem>, dest: String): ScanResult {
+        val res = ScanResult()
+        val destPath = if (dest.endsWith("/")) dest else "$dest/"
+        val destKids = Fs.list(Storages.urlOf(store, destPath, true)).associateBy { it.name }
+        for (ci in items) {
+            scanItem(res, Storages.urlOf(ci.store, ci.path, ci.isDir), ci.isDir, ci.size, ci.name, destKids[ci.name])
+        }
+        return res
+    }
+
+    private fun scanItem(res: ScanResult, srcUrl: String, isDir: Boolean, size: Long, rel: String, existing: Entry?) {
+        if (!isDir) {
+            if (existing == null) {
+                res.newFiles++
+                res.newBytes += size
+            } else {
+                res.conflicts.add(Conf(rel, size, existing.size, existing.isDir))
+            }
+            return
+        }
+        if (existing == null) {
+            countNew(res, srcUrl)
+            return
+        }
+        if (!existing.isDir) {
+            res.conflicts.add(Conf(rel, 0L, existing.size, true))
+            return
+        }
+        val destKids = Fs.list(existing.url).associateBy { it.name }
+        for (k in Fs.list(srcUrl)) {
+            scanItem(res, k.url, k.isDir, k.size, rel + "/" + k.name, destKids[k.name])
+        }
+    }
+
+    private fun countNew(res: ScanResult, srcUrl: String) {
+        for (k in Fs.list(srcUrl)) {
+            if (res.newFiles > 100000) return
+            if (k.isDir) {
+                countNew(res, k.url)
+            } else {
+                res.newFiles++
+                res.newBytes += k.size
+            }
+        }
+    }
+
+    private fun showConflicts(items: List<ClipItem>, move: Boolean, dest: String, res: ScanResult) {
+        val c = res.conflicts
+        val same = c.count { !it.forceRename && it.srcSize == it.dstSize }
+        val diff = c.size - same
+        val head = TextView(this)
+        head.text = "⚠ ${c.size} files pehle se maujood ($same same size, $diff alag size)\n" +
+            "${res.newFiles} naye files (${fmtSize(res.newBytes)}) seedha copy honge"
+        head.textSize = 15f
+        head.setTypeface(null, android.graphics.Typeface.BOLD)
+        head.setPadding(dp(20), dp(16), dp(20), dp(8))
+        val labels = arrayOf(
+            "⏭ Sab skip — sirf naye copy honge",
+            "🧠 Same size skip, alag size replace",
+            "♻️ Sab replace",
+            "📄 Dono rakho (naya naam: name (1))",
+            "☑ Ek-ek karke chuno…"
+        )
+        fun go(f: (Conf) -> String) = startXfer(items, move, "skip", dest, c.associate { it.rel to f(it) })
+        AlertDialog.Builder(this)
+            .setCustomTitle(head)
+            .setItems(labels) { _, i ->
+                when (i) {
+                    0 -> go { if (it.forceRename) "rename" else "skip" }
+                    1 -> go { if (it.forceRename) "rename" else if (it.srcSize == it.dstSize) "skip" else "overwrite" }
+                    2 -> go { if (it.forceRename) "rename" else "overwrite" }
+                    3 -> go { "rename" }
+                    else -> pickConflicts(items, move, dest, res)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun pickConflicts(items: List<ClipItem>, move: Boolean, dest: String, res: ScanResult) {
+        val c = res.conflicts
+        val labels = Array(c.size) { i ->
+            val x = c[i]
+            x.rel + "\n" + if (x.forceRename) "⚠ file / folder ka naam takra raha hai — naya naam milega"
+            else "naya: ${fmtSize(x.srcSize)} · yahan pehle se: ${fmtSize(x.dstSize)}" + (if (x.srcSize == x.dstSize) "  ✓ same size" else "  ≠ alag size")
+        }
+        val checked = BooleanArray(c.size) { !c[it].forceRename && c[it].srcSize != c[it].dstSize }
+        val d = AlertDialog.Builder(this)
+            .setTitle("✔ = replace, bina ✔ = skip")
+            .setMultiChoiceItems(labels, checked) { _, i, on -> checked[i] = on }
+            .setPositiveButton("Paste") { _, _ ->
+                val dec = HashMap<String, String>()
+                for (i in c.indices) {
+                    dec[c[i].rel] = if (c[i].forceRename) "rename" else if (checked[i]) "overwrite" else "skip"
+                }
+                startXfer(items, move, "skip", dest, dec)
+            }
+            .setNegativeButton("Peeche") { _, _ -> showConflicts(items, move, dest, res) }
+            .setNeutralButton("Sab ✔ / ✘", null)
+            .create()
+        d.show()
+        d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            val on = checked.any { !it }
+            for (i in c.indices) {
+                if (c[i].forceRename) continue
+                checked[i] = on
+                d.listView.setItemChecked(i, on)
+            }
         }
     }
 
@@ -779,13 +929,13 @@ class BrowserActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun startXfer(items: List<ClipItem>, move: Boolean, onConflict: String, dest: String) {
+    private fun startXfer(items: List<ClipItem>, move: Boolean, onConflict: String, dest: String, decisions: Map<String, String>?) {
         val destPath = if (dest.endsWith("/")) dest else "$dest/"
         swipe.isRefreshing = true
         io.execute {
             try {
                 val id = if (LocalJobs.involvesLocal(items, store))
-                    LocalJobs.start(applicationContext, items, store, destPath, move, onConflict)
+                    LocalJobs.start(applicationContext, items, store, destPath, move, onConflict, decisions)
                 else
                     Xfer.start(items, store, destPath, move, onConflict)
                 runOnUiThread {

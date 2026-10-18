@@ -30,7 +30,10 @@ class LocalJob(
     val destStore: Store,
     val destPath: String,
     val move: Boolean,
-    val onConflict: String
+    val onConflict: String,
+    /** Paste se pehle compare ke baad har file ka faisla: relative path ("Folder/a.mp4") -> skip | overwrite | rename.
+     *  Jo path isme nahi, uske liye [onConflict] chalta hai. */
+    val decisions: Map<String, String>? = null
 ) {
     @Volatile var state = "queued"
     @Volatile var filesTotal = 0
@@ -113,10 +116,13 @@ object LocalJobs {
 
     fun list(): List<XferJob> = jobs.values.map { it.snap() }.sortedByDescending { it.created }
 
-    fun start(ctx: Context, items: List<ClipItem>, dest: Store, destPath: String, move: Boolean, onConflict: String): String {
+    fun start(
+        ctx: Context, items: List<ClipItem>, dest: Store, destPath: String, move: Boolean, onConflict: String,
+        decisions: Map<String, String>? = null
+    ): String {
         val app = ctx.applicationContext
         val id = "L-" + System.currentTimeMillis() + "-" + counter.incrementAndGet()
-        val job = LocalJob(id, items, dest, destPath, move, onConflict)
+        val job = LocalJob(id, items, dest, destPath, move, onConflict, decisions)
         // purani khatam jobs hata do (last 20 rakho)
         val old = jobs.values.filter { !it.active }.sortedByDescending { it.created }.drop(20)
         for (o in old) jobs.remove(o.id)
@@ -153,7 +159,7 @@ object LocalJobs {
                 if (job.cancelled) break
                 val srcUrl = Storages.urlOf(ci.store, ci.path, ci.isDir)
                 try {
-                    transfer(job, ci.store, srcUrl, ci.name, ci.isDir, ci.size, destDir, taken)
+                    transfer(job, ci.store, srcUrl, ci.name, ci.isDir, ci.size, destDir, taken, ci.name)
                 } catch (e: JobCancelled) {
                     break
                 } catch (e: DavAuthException) {
@@ -223,17 +229,19 @@ object LocalJobs {
         isDir: Boolean,
         size: Long,
         destDirUrl: String,
-        taken: MutableSet<String>
+        taken: MutableSet<String>,
+        rel: String
     ): Boolean {
         if (job.cancelled) throw JobCancelled()
         val destLocal = job.destStore == Store.LOCAL
         var target = name
         val exists = name in taken
         if (exists) {
+            val act = job.decisions?.get(rel) ?: job.onConflict
             if (isDir) {
-                if (job.onConflict == "rename") target = uniqueName(name, true, taken)
+                if (act == "rename") target = uniqueName(name, true, taken)
             } else {
-                when (job.onConflict) {
+                when (act) {
                     "skip" -> {
                         job.filesSkipped++
                         job.bytesDone += size
@@ -283,7 +291,7 @@ object LocalJobs {
             for (k in kids) {
                 if (job.cancelled) throw JobCancelled()
                 try {
-                    if (!transfer(job, srcStore, k.url, k.name, k.isDir, k.size, newDirUrl, childTaken)) ok = false
+                    if (!transfer(job, srcStore, k.url, k.name, k.isDir, k.size, newDirUrl, childTaken, rel + "/" + k.name)) ok = false
                 } catch (e: JobCancelled) {
                     throw e
                 } catch (e: DavAuthException) {

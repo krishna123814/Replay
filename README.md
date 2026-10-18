@@ -111,3 +111,8 @@ Key (LION_SECRETS.txt / lion-release.jks) kabhi delete/badli mat karo, warna ek 
 Repo me `SimpleBrowser.zip` upload karo -> Actions me "Unzip and Build APK" chalegi -> repo ke **Releases** se `Lion.apk` download karo.
 Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LION_STORE_PASSWORD`, `LION_KEY_ALIAS`, `LION_KEY_PASSWORD`.
 `.github/workflows/unzip.yml` ko haath se paste karna padta hai (GitHub me file kholo -> edit -> paste -> commit); zip ke andar wali workflow use nahi hoti.
+
+## 📋 Paste se pehle compare (phone ↔ server)
+- Phone / SD card se HF ya AIC me (ya ulta) paste dabate hi app pehle folder ke andar tak saari files compare karta hai (naya size vs wahan pehle se maujood size). Phir ek saath poochta hai: sab skip / same size skip + alag size replace / sab replace / dono rakho / ek-ek karke chuno (✔ = replace).
+- Naye files (jo wahan nahi hain) seedha copy hote hain. Move me skip ki hui file source par rehti hai.
+- Server ↔ server copy/move purane tareeke se (ek global choice).
