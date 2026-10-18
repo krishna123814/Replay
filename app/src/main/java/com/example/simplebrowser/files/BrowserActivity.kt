@@ -1323,6 +1323,9 @@ class BrowserActivity : AppCompatActivity() {
         }
         acts.add("🎬 Kholne ka tarika: ${Opener.labels[Opener.mode(this)]}" to { pickOpenMode() })
         acts.add("📊 Transfers" to { startActivity(Intent(this, TransfersActivity::class.java)) })
+        acts.add("🔍 Analyze: kaun si folder kitni jagah le rahi" to {
+            AnalyzeUi(this, store, rootUrl, storeLabel).show(if (currentUrl.isEmpty()) rootUrl else currentUrl)
+        })
         acts.add("↕ Sort: ${sortNames[sortMode]}" to { showSort() })
         acts.add(
             ("🎞 Video thumbnails: " + (if (videoThumbs) "ON" else "OFF") +

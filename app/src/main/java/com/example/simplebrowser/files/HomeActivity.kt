@@ -37,6 +37,7 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var aicSub: TextView
     private lateinit var hfSub: TextView
     private lateinit var hfCard: LinearLayout
+    private lateinit var hfBarBox: LinearLayout
     private lateinit var clipTv: TextView
     private lateinit var localSub: TextView
     private lateinit var volBox: LinearLayout
@@ -73,6 +74,7 @@ class HomeActivity : AppCompatActivity() {
         refreshClip()
         refreshLocal()
         probeHf()
+        refreshHfCap()
         VolumeWatcher.addListener(volCb)
         VolumeWatcher.rescanSoon()
     }
@@ -129,6 +131,9 @@ class HomeActivity : AppCompatActivity() {
             }
         }
         hfSub.text = "Check ho raha hai…"
+        hfBarBox = LinearLayout(this)                      // HF capacity ki patti (pichle Analyze ke hisaab se)
+        hfBarBox.orientation = LinearLayout.VERTICAL
+        (hfCard.getChildAt(1) as LinearLayout).addView(hfBarBox, LinearLayout.LayoutParams(MATCH, WRAP))
 
         localSub = TextView(this)
         val localCard = card(Store.LOCAL, localSub) { openLocal() }
@@ -151,6 +156,11 @@ class HomeActivity : AppCompatActivity() {
         tr.text = "📊 Transfers"
         tr.setOnClickListener { startActivity(Intent(this, TransfersActivity::class.java)) }
         col.addView(tr, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        val an = Button(this)
+        an.text = "🔍 Analyze: kaun si folder kitni jagah le rahi"
+        an.setOnClickListener { pickAnalyze() }
+        col.addView(an, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val scroll = ScrollView(this)
         scroll.setBackgroundColor(Color.WHITE)
@@ -367,6 +377,52 @@ class HomeActivity : AppCompatActivity() {
             "📋 ${c.size} item clipboard me (${if (Session.clipMove) "Move" else "Copy"}) — storage kholo, folder me jao aur 'Paste here' dabao"
     }
 
+    /** HF card ki line: 100 GB capacity + (pichla Analyze ho chuka ho to) kitna use hua. */
+    private fun hfCapText(): String {
+        val cap = fmtSize(Analyzer.HF_CAPACITY)
+        val c = Analyzer.cachedUsed(this, "hf")
+        return if (c == null) {
+            "Hugging Face Storage Bucket · $cap capacity · 🔍 Analyze se use dekho"
+        } else {
+            val pct = c.first.toDouble() * 100 / Analyzer.HF_CAPACITY
+            "Hugging Face Storage Bucket · " + fmtSize(c.first) + " / " + cap +
+                String.format(java.util.Locale.US, " (%.1f%%)", pct)
+        }
+    }
+
+    private fun refreshHfCap() {
+        if (!::hfBarBox.isInitialized) return
+        hfBarBox.removeAllViews()
+        val c = Analyzer.cachedUsed(this, "hf") ?: return
+        hfBarBox.addView(usageBar((c.first.toDouble() / Analyzer.HF_CAPACITY).toFloat().coerceIn(0f, 1f)))
+        if (hfReason == null) hfSub.text = hfCapText()
+    }
+
+    /** Kis storage ka analyze karna hai: AIC / HF / Phone / SD / USB. */
+    private fun pickAnalyze() {
+        class Opt(val label: String, val store: Store, val root: String)
+        val opts = ArrayList<Opt>()
+        opts.add(Opt(Store.AIC.icon + " " + Store.AIC.label, Store.AIC, Dav.withSlash(Storages.root(Store.AIC))))
+        opts.add(Opt(Store.HF.icon + " " + Store.HF.label, Store.HF, Dav.withSlash(Storages.root(Store.HF))))
+        if (LocalFs.hasAccess(this)) {
+            opts.add(Opt(Store.LOCAL.icon + " " + Store.LOCAL.label, Store.LOCAL, Dav.withSlash(LocalFs.rootUrl())))
+            for (v in VolumeWatcher.snapshot) {
+                if (v.mounted) opts.add(Opt(v.icon + " " + v.label, Store.LOCAL, LocalFs.urlOf(v.root, true)))
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Kis storage ka Analyze?")
+            .setItems(opts.map { it.label }.toTypedArray()) { _, i ->
+                val o = opts[i]
+                if (o.store == Store.HF && hfReason != null) {
+                    Toast.makeText(this, "❌ " + hfReason, Toast.LENGTH_LONG).show()
+                } else {
+                    AnalyzeUi(this, o.store, o.root, o.label) { refreshHfCap() }.show()
+                }
+            }
+            .show()
+    }
+
     private fun probeHf() {
         io.execute {
             val reason = Storages.hfDisabledReason()
@@ -374,7 +430,8 @@ class HomeActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 hfReason = reason
                 if (reason == null) {
-                    hfSub.text = "Hugging Face Storage Bucket"
+                    hfSub.text = hfCapText()
+                    refreshHfCap()
                     hfCard.alpha = 1f
                 } else {
                     hfSub.text = "❌ $reason"

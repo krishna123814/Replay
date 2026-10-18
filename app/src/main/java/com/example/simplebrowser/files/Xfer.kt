@@ -153,4 +153,13 @@ object Xfer {
         }
         return out
     }
+
+    /** Server (AIC) disk: (free, total) bytes. Nahi mili to null. */
+    fun disk(): Pair<Long, Long>? {
+        val req = Request.Builder().url(Storages.xferBase() + "/disk").build()
+        val o = call(req)
+        val total = o.optLong("total")
+        if (total <= 0L) return null
+        return Pair(o.optLong("free"), total)
+    }
 }
