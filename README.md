@@ -116,3 +116,12 @@ Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LIO
 - Phone / SD card se HF ya AIC me (ya ulta) paste dabate hi app pehle folder ke andar tak saari files compare karta hai (naya size vs wahan pehle se maujood size). Phir ek saath poochta hai: sab skip / same size skip + alag size replace / sab replace / dono rakho / ek-ek karke chuno (✔ = replace).
 - Naye files (jo wahan nahi hain) seedha copy hote hain. Move me skip ki hui file source par rehti hai.
 - Server ↔ server copy/move purane tareeke se (ek global choice).
+
+## 🔌 SD card / USB pendrive (OTG): v4.1 (advance)
+- **Sahi pehchaan**: USB ya SD ka faisla naam + OTG par lagi USB storage (UsbManager) se hota hai (pehle "pen" shabd se galat hota tha). Ek jaise naam wali do drive ho to UUID jud jata hai.
+- **Live detect**: App chalte hi (process zinda) drive lagne par notification "💾/🔌 ... mil gayi: dabao aur kholo". Android 11+ par StorageVolumeCallback, purane par broadcast. Home / File Manager apne aap badalte hain. Bina eject nikalne par ⚠ notification.
+- **Har halat dikhti hai**: Mounted ke alawa "check ho rahi", "khul nahi sakti (NTFS/RAW)", "mount nahi hai", "bina eject nikali gayi" bhi card me wajah ke saath. USB device lagi ho par Android ne volume na banaya ho to "USB device mili" card.
+- **Info card**: filesystem (FAT32 / exFAT / NTFS), khaali / total, use% ki bar, read-only ya "likhna band (Android restriction)". Card lamba dabao: ℹ jaankari, ⏏ Safe eject, 🔄 dobara scan. File Manager ke ⋮ menu me bhi ℹ aur ⏏.
+- **Safe eject**: Android app ko seedha unmount nahi karne deta. App check karti hai ki is drive par Lion ka koi transfer to nahi chal raha; phir Android Settings kholti hai jahan Eject dabate hain.
+- **Safe copy**: shuru se pehle likhne ki permission aur jagah check; FAT32 par 4 GB se badi file pehle hi roki jati hai (saaf message); har file `.lionpart` naam se banti hai, fsync hota hai, size verify hota hai, tabhi asli naam me badalti hai. Drive beech me nikal jaye to poori job "Drive nikal gayi" bolkar ruk jati hai; purani adhoori `.lionpart` files agli baar apne aap saaf. Drive par File Manager khula ho aur drive nikle to wo screen band ho jati hai.
+- Zaroori: Android 11+ par "All files access" ON ho.

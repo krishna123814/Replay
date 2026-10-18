@@ -1,7 +1,10 @@
 package com.example.simplebrowser.files
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -11,6 +14,7 @@ import android.os.Bundle
 import android.os.StatFs
 import android.provider.Settings
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
@@ -20,6 +24,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -34,8 +39,9 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var hfCard: LinearLayout
     private lateinit var clipTv: TextView
     private lateinit var localSub: TextView
-    private lateinit var sdSub: TextView
-    private lateinit var sdCard: LinearLayout
+    private lateinit var volBox: LinearLayout
+    private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val volCb: () -> Unit = { refreshSd() }
 
     private val storagePerm =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -67,6 +73,14 @@ class HomeActivity : AppCompatActivity() {
         refreshClip()
         refreshLocal()
         probeHf()
+        VolumeWatcher.addListener(volCb)
+        VolumeWatcher.rescanSoon()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        VolumeWatcher.removeListener(volCb)
+        uiHandler.removeCallbacksAndMessages(null)
     }
 
     override fun onDestroy() {
@@ -123,10 +137,9 @@ class HomeActivity : AppCompatActivity() {
         col.addView(hfCard)
         col.addView(localCard)
 
-        sdSub = TextView(this)
-        sdCard = card("💾", "SD Card", sdSub) { openSd() }
-        sdCard.visibility = android.view.View.GONE        // SD card lagi ho tabhi dikhta hai
-        col.addView(sdCard)
+        volBox = LinearLayout(this)                        // SD card / pendrive lagi ho tabhi cards dikhte hain
+        volBox.orientation = LinearLayout.VERTICAL
+        col.addView(volBox, LinearLayout.LayoutParams(MATCH, WRAP))
 
         clipTv = TextView(this)
         clipTv.setTextColor(0xFFE65100.toInt())
@@ -187,31 +200,94 @@ class HomeActivity : AppCompatActivity() {
     }
 
     private fun refreshSd() {
-        if (!::sdCard.isInitialized) return
-        val sd = LocalFs.sdRoot(this)
-        if (sd == null) {
-            sdCard.visibility = android.view.View.GONE
-            return
-        }
-        sdCard.visibility = android.view.View.VISIBLE
-        sdSub.text = if (LocalFs.hasAccess(this)) {
-            try {
-                "SD card · " + fmtSize(StatFs(sd.path).availableBytes) + " khaali"
-            } catch (e: Exception) {
-                "SD card"
+        if (!::volBox.isInitialized) return
+        volBox.removeAllViews()
+        val vols = VolumeWatcher.snapshot
+        for (v in vols) {
+            val sub = TextView(this)
+            val hasAccess = LocalFs.hasAccess(this)
+            var bar: View? = null
+            if (!v.mounted) {
+                sub.text = v.kind + " · " + v.stateText()
+            } else if (!hasAccess) {
+                sub.text = "${v.kind} · permission chahiye (dabao)"
+            } else {
+                var line = v.kind + (if (v.fs == "?") "" else " · " + v.fs)
+                try {
+                    val sf = StatFs(v.root.path)
+                    val total = sf.totalBytes
+                    val free = sf.availableBytes
+                    line += " · " + fmtSize(free) + " khaali / " + fmtSize(total)
+                    if (total > 0) bar = usageBar(((total - free).toFloat() / total.toFloat()).coerceIn(0f, 1f))
+                } catch (e: Exception) { }
+                if (v.readOnly) line += " · sirf padh sakte hain"
+                else if (!v.writable) line += " · likhna band (Android restriction)"
+                sub.text = line
             }
-        } else {
-            "SD card · permission chahiye (dabao)"
+            val c = card(v.icon, v.label, sub) { openVol(v) }
+            if (bar != null) (c.getChildAt(1) as LinearLayout).addView(bar)
+            c.setOnLongClickListener { volMenu(v); true }
+            volBox.addView(c)
+        }
+        // USB device lagi hai par Android ne storage banayi hi nahi
+        if (LocalFs.usbWithoutVolume(this, vols)) {
+            val sub = TextView(this)
+            sub.text = "Mount nahi hui: ya abhi ho rahi hai, ya filesystem (NTFS / RAW) Android nahi padh pa raha. Dabao: Settings"
+            volBox.addView(card("🔌", "USB device mili", sub) {
+                Toast.makeText(this, "Computer par drive ko exFAT / FAT32 me format karke dekho", Toast.LENGTH_LONG).show()
+                LocalFs.openStorageSettings(this)
+            })
         }
     }
 
-    private fun openSd() {
-        val sd = LocalFs.sdRoot(this) ?: return
+    private fun usageBar(used: Float): View {
+        val color = when {
+            used < 0.8f -> 0xFF2E7D32.toInt()
+            used < 0.92f -> 0xFFEF6C00.toInt()
+            else -> 0xFFC62828.toInt()
+        }
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.setBackgroundColor(0xFFD0D0D0.toInt())
+        val u = View(this)
+        u.setBackgroundColor(color)
+        bar.addView(u, LinearLayout.LayoutParams(0, MATCH, used.coerceAtLeast(0.01f)))
+        bar.addView(View(this), LinearLayout.LayoutParams(0, MATCH, (1f - used).coerceAtLeast(0.01f)))
+        val lp = LinearLayout.LayoutParams(MATCH, dp(6))
+        lp.topMargin = dp(8)
+        bar.layoutParams = lp
+        return bar
+    }
+
+    /** Card ko lamba dabane par: jaankari, eject, rescan. */
+    private fun volMenu(v: LocalFs.Vol) {
+        AlertDialog.Builder(this)
+            .setTitle(v.icon + " " + v.label)
+            .setItems(arrayOf("ℹ Drive ki jaankari", "⏏ Safe eject", "🔄 Dobara scan karo")) { _, i ->
+                when (i) {
+                    0 -> DriveUi.info(this, v)
+                    1 -> DriveUi.safeEject(this, v)
+                    else -> {
+                        VolumeWatcher.rescanSoon()
+                        Toast.makeText(this, "Scan ho raha hai…", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun openVol(v: LocalFs.Vol) {
+        if (!v.mounted) {
+            Toast.makeText(this, v.stateText(), Toast.LENGTH_LONG).show()
+            if (v.state == android.os.Environment.MEDIA_UNMOUNTED || v.state == android.os.Environment.MEDIA_UNMOUNTABLE ||
+                v.state == android.os.Environment.MEDIA_NOFS) LocalFs.openStorageSettings(this)
+            return
+        }
         if (!LocalFs.hasAccess(this)) {
             openLocal()                       // same permission dialog
             return
         }
-        open(Store.LOCAL, sd.absolutePath)
+        open(Store.LOCAL, v.root.absolutePath, v.label, v.icon)
     }
 
     private fun refreshLocal() {
@@ -272,9 +348,11 @@ class HomeActivity : AppCompatActivity() {
             }
         }
 
-    private fun open(store: Store, localRoot: String? = null) {
+    private fun open(store: Store, localRoot: String? = null, label: String? = null, icon: String? = null) {
         val i = Intent(this, BrowserActivity::class.java).putExtra("store", store.id)
         if (localRoot != null) i.putExtra("local_root", localRoot)
+        if (label != null) i.putExtra("local_label", label)
+        if (icon != null) i.putExtra("local_icon", icon)
         if (pickMode) {
             i.putExtra("pick", true).putExtra("pick_multi", intent.getBooleanExtra("pick_multi", false))
             pickBrowser.launch(i)
@@ -309,8 +387,21 @@ class HomeActivity : AppCompatActivity() {
     private fun showMenu() {
         AlertDialog.Builder(this)
             .setItems(
-                arrayOf("🎬 Kholne ka tarika: " + Opener.labels[Opener.mode(this)], "🚪 Logout / server badlo")
-            ) { _, i -> if (i == 0) pickOpenMode() else logout() }
+                arrayOf(
+                    "🎬 Kholne ka tarika: " + Opener.labels[Opener.mode(this)],
+                    "🔄 USB / SD card dobara scan karo",
+                    "🚪 Logout / server badlo"
+                )
+            ) { _, i ->
+                when (i) {
+                    0 -> pickOpenMode()
+                    1 -> {
+                        VolumeWatcher.rescanSoon()
+                        Toast.makeText(this, "Scan ho raha hai…", Toast.LENGTH_SHORT).show()
+                    }
+                    else -> logout()
+                }
+            }
             .show()
     }
 

@@ -69,8 +69,10 @@ class BrowserActivity : AppCompatActivity() {
 
     private var rootUrl = ""
     private var localRoot: String? = null        // SD card: Store.LOCAL ka alag root folder
-    private val storeLabel: String get() = if (localRoot != null) "SD Card" else store.label
-    private val storeIcon: String get() = if (localRoot != null) "💾" else store.icon
+    private var localLabel: String? = null
+    private var localIcon: String? = null
+    private val storeLabel: String get() = if (localRoot != null) (localLabel ?: "SD Card") else store.label
+    private val storeIcon: String get() = if (localRoot != null) (localIcon ?: "💾") else store.icon
     private var currentUrl = ""
     private val stack = ArrayList<String>()
     private var entries: List<Entry> = emptyList()
@@ -120,6 +122,8 @@ class BrowserActivity : AppCompatActivity() {
             return
         }
         localRoot = intent.getStringExtra("local_root")?.takeIf { it.isNotEmpty() && store == Store.LOCAL }
+        localLabel = intent.getStringExtra("local_label")
+        localIcon = intent.getStringExtra("local_icon")
         val lr = localRoot
         rootUrl = if (lr != null) Dav.withSlash(LocalFs.urlOf(File(lr), true)) else Dav.withSlash(Session.rootFor(store))
         gridMode = Session.bool(this, "grid", false)
@@ -149,13 +153,34 @@ class BrowserActivity : AppCompatActivity() {
 
     }
 
+    /** Ye File Manager kisi SD / USB drive par khula hai: drive nikal jaye to band karo. */
+    private val volCb: () -> Unit = {
+        val lr = localRoot
+        if (lr != null && !isFinishing) {
+            val cur = VolumeWatcher.snapshot.firstOrNull { it.root.absolutePath == lr }
+            if (cur == null || !cur.mounted) {
+                Toast.makeText(this, "⏏ ${localLabel ?: "Drive"} nikal gayi / unmount ho gayi", Toast.LENGTH_LONG).show()
+                finish()
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        if (localRoot != null) {
+            VolumeWatcher.addListener(volCb)
+            VolumeWatcher.rescanSoon()
+        }
         if (::pasteBar.isInitialized) refreshPasteBar()
         if (Queue.dirty && ::swipe.isInitialized) {
             Queue.dirty = false
             reload()
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        VolumeWatcher.removeListener(volCb)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -205,7 +230,7 @@ class BrowserActivity : AppCompatActivity() {
 
         // storage badge: dabane par doosre storage me jaa sakte ho (clipboard saath rehta hai)
         val badge = TextView(this)
-        badge.text = storeIcon + " " + (if (localRoot != null) "SD" else store.short)
+        badge.text = storeIcon + " " + (if (localRoot != null) (if (localIcon == "🔌") "USB" else "SD") else store.short)
         badge.textSize = 12f
         badge.setTextColor(Color.WHITE)
         badge.typeface = Typeface.DEFAULT_BOLD
@@ -1255,19 +1280,21 @@ class BrowserActivity : AppCompatActivity() {
 
     private fun switchStorage() {
         val all = Store.values()
-        val sd = LocalFs.sdRoot(this)
+        val vols = LocalFs.removableVolumes(this)
         val labels = (all.map { it.icon + " " + it.label + (if (it == store && !(it == Store.LOCAL && localRoot != null)) "  (abhi yahan)" else "") } +
-            (if (sd != null) listOf("💾 SD Card" + (if (localRoot != null) "  (abhi yahan)" else "")) else emptyList())).toTypedArray()
+            vols.map { it.icon + " " + it.label + (if (localRoot == it.root.absolutePath) "  (abhi yahan)" else "") }).toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Storage chuno")
             .setItems(labels) { _, i ->
                 if (i >= all.size) {
-                    if (sd != null && localRoot == null) {
+                    val v = vols[i - all.size]
+                    if (localRoot != v.root.absolutePath) {
                         if (!LocalFs.hasAccess(this)) {
                             Toast.makeText(this, "Pehle Home se Phone Storage kholo (permission ke liye)", Toast.LENGTH_LONG).show()
                         } else {
                             startActivity(Intent(this, BrowserActivity::class.java)
-                                .putExtra("store", Store.LOCAL.id).putExtra("local_root", sd.absolutePath))
+                                .putExtra("store", Store.LOCAL.id).putExtra("local_root", v.root.absolutePath)
+                                .putExtra("local_label", v.label).putExtra("local_icon", v.icon))
                             finish()
                         }
                     }
@@ -1289,6 +1316,11 @@ class BrowserActivity : AppCompatActivity() {
         acts.add("📁 Naya folder" to { newFolder() })
         if (store != Store.LOCAL) acts.add("⬆ Upload (files chuno)" to { pickFiles.launch(arrayOf("*/*")) })
         acts.add("🔁 Storage badlo" to { switchStorage() })
+        val drive = localRoot?.let { lr -> VolumeWatcher.snapshot.firstOrNull { it.root.absolutePath == lr } }
+        if (drive != null) {
+            acts.add("ℹ Drive ki jaankari (${drive.fs}, " + (if (drive.canWrite) "likh sakte hain" else "sirf padh") + ")" to { DriveUi.info(this, drive) })
+            acts.add("⏏ Safe eject" to { DriveUi.safeEject(this, drive) })
+        }
         acts.add("🎬 Kholne ka tarika: ${Opener.labels[Opener.mode(this)]}" to { pickOpenMode() })
         acts.add("📊 Transfers" to { startActivity(Intent(this, TransfersActivity::class.java)) })
         acts.add("↕ Sort: ${sortNames[sortMode]}" to { showSort() })

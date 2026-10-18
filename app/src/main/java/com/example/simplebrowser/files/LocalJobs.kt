@@ -3,6 +3,7 @@ package com.example.simplebrowser.files
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.StatFs
 import androidx.core.content.ContextCompat
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,6 +23,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 private class JobCancelled : IOException("cancel")
+
+/** Copy ke beech SD / USB drive nikal gayi: baaki files try karne ka koi fayda nahi, poori job roko. */
+private class DriveGone(msg: String) : IOException(msg)
+
+/** Copy ke dauran file is naam se banti hai; poori hone par asli naam me badalti hai (adhoori file asli naam par kabhi nahi). */
+private const val PART_EXT = ".lionpart"
 
 /** Phone se judi ek copy / move job (phone↔phone, phone↔server). Server wali jobs `/xfer` par chalti hain. */
 class LocalJob(
@@ -45,6 +52,9 @@ class LocalJob(
     @Volatile var current = ""
     @Volatile var cancelled = false
     @Volatile var finished = 0L
+    /** Destination agar SD / USB drive hai (FAT32 limit, likhne ki permission, fsync ke liye). */
+    @Volatile var destVol: LocalFs.Vol? = null
+    @Volatile var app: Context? = null
     val created: Long = System.currentTimeMillis() / 1000
     val errors = CopyOnWriteArrayList<String>()
 
@@ -114,6 +124,16 @@ object LocalJobs {
         jobs[id]?.cancelled = true
     }
 
+    /** Is drive ([root] = "/storage/XXXX-XXXX") par koi copy / move abhi chal raha hai? */
+    fun busyOn(root: String): Boolean {
+        val r = root.trimEnd('/')
+        fun under(p: String) = p == r || p.startsWith("$r/")
+        return jobs.values.any { j ->
+            j.active && ((j.destStore == Store.LOCAL && under(j.destPath)) ||
+                j.items.any { it.store == Store.LOCAL && under(it.path) })
+        }
+    }
+
     fun list(): List<XferJob> = jobs.values.map { it.snap() }.sortedByDescending { it.created }
 
     fun start(
@@ -123,6 +143,7 @@ object LocalJobs {
         val app = ctx.applicationContext
         val id = "L-" + System.currentTimeMillis() + "-" + counter.incrementAndGet()
         val job = LocalJob(id, items, dest, destPath, move, onConflict, decisions)
+        job.app = app
         // purani khatam jobs hata do (last 20 rakho)
         val old = jobs.values.filter { !it.active }.sortedByDescending { it.created }.drop(20)
         for (o in old) jobs.remove(o.id)
@@ -155,6 +176,7 @@ object LocalJobs {
             }
             val destDir = Storages.urlOf(job.destStore, job.destPath, true)
             val taken = existingNames(destDir)
+            if (job.destStore == Store.LOCAL) preflight(job, destDir, taken)
             for (ci in job.items) {
                 if (job.cancelled) break
                 val srcUrl = Storages.urlOf(ci.store, ci.path, ci.isDir)
@@ -165,6 +187,10 @@ object LocalJobs {
                 } catch (e: DavAuthException) {
                     job.filesFailed++
                     job.errors.add("Login galat / expire")
+                    break
+                } catch (e: DriveGone) {
+                    job.filesFailed++
+                    job.errors.add(e.message ?: "Drive nikal gayi")
                     break
                 } catch (e: Exception) {
                     job.filesFailed++
@@ -205,10 +231,68 @@ object LocalJobs {
 
     private fun existingNames(dirUrl: String): MutableSet<String> =
         try {
-            Fs.list(dirUrl).mapTo(HashSet()) { it.name }
+            val out = HashSet<String>()
+            for (e in Fs.list(dirUrl)) {
+                if (!e.isDir && e.name.endsWith(PART_EXT)) {
+                    // purani adhoori copy (app band hui / drive nikli): 2 min se purani ho to hata do
+                    if (LocalFs.isLocal(e.url)) {
+                        try {
+                            val f = LocalFs.fileOf(e.url)
+                            if (System.currentTimeMillis() - f.lastModified() > 120_000L) f.delete()
+                        } catch (x: Exception) { }
+                    }
+                    continue
+                }
+                out.add(e.name)
+            }
+            out
         } catch (e: Exception) {
             HashSet()
         }
+
+    /** Copy shuru karne se pehle destination drive ki jaanch: likh sakte hain? jagah hai? Fail ho to job turant ruk jati hai. */
+    private fun preflight(job: LocalJob, destDirUrl: String, taken: Set<String>) {
+        val a = job.app
+        val d = LocalFs.fileOf(destDirUrl)
+        if (a != null && LocalFs.underMissingVolume(a, d)) throw DriveGone("Destination drive nikal gayi / mounted nahi hai")
+        if (!d.isDirectory) throw IOException("Destination folder nahi mila (drive nikal gayi?)")
+        val vol = if (a != null) LocalFs.volumeFor(a, d) else null
+        job.destVol = vol
+        if (vol != null) {
+            if (vol.readOnly) throw IOException("${vol.label} read-only hai: usme likh nahi sakte")
+            if (!vol.writable) throw IOException("${vol.label} par Android is version me likhne nahi deta (sirf padh sakte hain)")
+        }
+        // jagah: same drive par move to rename hota hai, jagah nahi lagti
+        fun rootKey(f: java.io.File): String = (if (a != null) LocalFs.volumeFor(a, f)?.root?.absolutePath else null) ?: "primary"
+        val sameStorageMove = job.move && job.items.all { it.store == Store.LOCAL && rootKey(java.io.File(it.path)) == rootKey(d) }
+        if (!sameStorageMove) {
+            val avail = try { StatFs(d.path).availableBytes } catch (e: Exception) { Long.MAX_VALUE }
+            val conflicts = job.items.any { it.name in taken }      // conflict ho to skip / replace se jagah badal sakti hai: file-by-file check
+            if (!conflicts && job.bytesTotal > avail) {
+                throw IOException("Jagah kam hai: ${fmtSize(job.bytesTotal)} chahiye, sirf ${fmtSize(avail)} khaali")
+            }
+        }
+    }
+
+    /** Low-level IOException ko saaf Hinglish wajah me badalo; drive nikal gayi ho to DriveGone. */
+    private fun friendly(job: LocalJob, e: Throwable, src: java.io.File?, dest: java.io.File): Throwable {
+        if (e !is IOException || e is JobCancelled || e is DavAuthException || e is DriveGone) return e
+        val a = job.app
+        if (a != null) {
+            if (LocalFs.underMissingVolume(a, dest)) return DriveGone("Drive nikal gayi (ya unmount ho gayi): copy ruk gayi")
+            if (src != null && LocalFs.underMissingVolume(a, src)) return DriveGone("Source drive nikal gayi: copy ruk gayi")
+        }
+        val m = e.message ?: ""
+        return when {
+            m.contains("EFBIG") || m.contains("File too large", true) ->
+                IOException("File itni badi hai ki drive ka filesystem nahi sambhalta (FAT32 par max 4 GB). exFAT me format karo")
+            m.contains("ENOSPC") || m.contains("No space", true) -> IOException("Drive me jagah khatam ho gayi")
+            m.contains("EROFS") || m.contains("Read-only", true) -> IOException("Drive read-only ho gayi")
+            m.contains("EACCES") || m.contains("Permission denied", true) ->
+                IOException("Is drive par likhne ki permission nahi (Android restriction)")
+            else -> e
+        }
+    }
 
     private fun uniqueName(name: String, isDir: Boolean, taken: Set<String>): String {
         if (name !in taken) return name
@@ -296,6 +380,8 @@ object LocalJobs {
                     throw e
                 } catch (e: DavAuthException) {
                     throw e
+                } catch (e: DriveGone) {
+                    throw e
                 } catch (e: Exception) {
                     job.filesFailed++
                     job.errors.add(k.name + ": " + (e.message ?: "error"))
@@ -314,7 +400,7 @@ object LocalJobs {
         }
 
         job.current = name
-        copyFile(job, srcStore, srcUrl, destDirUrl, target, merging)
+        copyFile(job, srcStore, srcUrl, destDirUrl, target, merging, size)
         job.filesDone++
         taken.add(target)
         if (job.move) {
@@ -327,15 +413,34 @@ object LocalJobs {
         return true
     }
 
-    private fun copyFile(job: LocalJob, srcStore: Store, srcUrl: String, destDirUrl: String, destName: String, overwrite: Boolean) {
+    private fun copyFile(job: LocalJob, srcStore: Store, srcUrl: String, destDirUrl: String, destName: String, overwrite: Boolean, size: Long) {
         val srcLocal = srcStore == Store.LOCAL
         if (job.destStore == Store.LOCAL) {
-            val dest = File(LocalFs.fileOf(destDirUrl), destName)
-            val tmp = File(dest.parentFile, "$destName.part")
+            val dest = java.io.File(LocalFs.fileOf(destDirUrl), destName)
+            val vol = job.destVol
+            // FAT32: 4 GB se badi file copy shuru karne se pehle hi roko (warna 4 GB likh ke fail hota)
+            if (vol != null && size > vol.maxFileBytes) {
+                throw IOException("'$destName' (${fmtSize(size)}) ${vol.fs} drive par nahi ja sakti: 4 GB se badi file nahi chalti. Drive ko exFAT me format karo")
+            }
+            // is file ke liye jagah
+            if (size > 0) {
+                val avail = try {
+                    StatFs(dest.parentFile!!.path).availableBytes + (if (overwrite && dest.exists()) dest.length() else 0L)
+                } catch (e: Exception) { Long.MAX_VALUE }
+                if (avail < size) throw IOException("Jagah nahi: '$destName' (${fmtSize(size)}) ke liye sirf ${fmtSize(avail)} khaali")
+            }
+            val srcFile: java.io.File? = if (srcLocal) LocalFs.fileOf(srcUrl) else null
+            val expected = srcFile?.length() ?: -1L
+            val tmp = java.io.File(dest.parentFile, destName + PART_EXT)
             try {
-                if (srcLocal) {
-                    FileInputStream(LocalFs.fileOf(srcUrl)).use { ins ->
-                        FileOutputStream(tmp).use { out -> pump(job, ins, out) }
+                var written = 0L
+                if (srcFile != null) {
+                    FileInputStream(srcFile).use { ins ->
+                        FileOutputStream(tmp).use { out ->
+                            written = pump(job, ins, out)
+                            out.flush()
+                            if (vol != null) out.fd.sync()      // drive par sach me likh do (nikalne par adhoori na rahe)
+                        }
                     }
                 } else {
                     val req = Request.Builder().url(srcUrl).build()
@@ -344,31 +449,51 @@ object LocalJobs {
                         if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
                         val body = r.body ?: throw IOException("khaali jawab")
                         body.byteStream().use { ins ->
-                            FileOutputStream(tmp).use { out -> pump(job, ins, out) }
+                            FileOutputStream(tmp).use { out ->
+                                written = pump(job, ins, out)
+                                out.flush()
+                                if (vol != null) out.fd.sync()
+                            }
                         }
                     }
                 }
+                // verify: phone/drive source ho to size bilkul barabar hona chahiye (move me source isi ke baad hatta hai)
+                if (expected >= 0 && written != expected) {
+                    throw IOException("Copy adhoori rahi ($written / $expected bytes)")
+                }
+                if (tmp.length() != written) throw IOException("Drive par file poori save nahi hui")
                 if (overwrite && dest.exists()) dest.delete()
                 if (!tmp.renameTo(dest)) throw IOException("File save nahi hui")
             } catch (e: Throwable) {
-                tmp.delete()
-                throw e
+                try { tmp.delete() } catch (x: Throwable) { }
+                throw friendly(job, e, srcFile, dest)
             }
         } else {
             // phone -> server (AIC / HF)
             val f = LocalFs.fileOf(srcUrl)
-            Dav.put(Dav.withSlash(destDirUrl) + Uri.encode(destName), CountingFileBody(f, job))
+            try {
+                Dav.put(Dav.withSlash(destDirUrl) + Uri.encode(destName), CountingFileBody(f, job))
+            } catch (e: Throwable) {
+                val a = job.app
+                if (a != null && e is IOException && e !is JobCancelled && e !is DavAuthException && LocalFs.underMissingVolume(a, f)) {
+                    throw DriveGone("Source drive nikal gayi: upload ruk gaya")
+                }
+                throw e
+            }
         }
     }
 
-    private fun pump(job: LocalJob, ins: InputStream, out: OutputStream) {
+    private fun pump(job: LocalJob, ins: InputStream, out: OutputStream): Long {
         val buf = ByteArray(128 * 1024)
+        var total = 0L
         while (true) {
             if (job.cancelled) throw JobCancelled()
             val n = ins.read(buf)
             if (n < 0) break
             out.write(buf, 0, n)
             job.bytesDone += n
+            total += n
         }
+        return total
     }
 }
