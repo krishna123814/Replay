@@ -72,7 +72,11 @@ Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 ## ⬇ Sab videos ek saath (listing / playlist page)
 - Kisi page par 2+ video cards ho to neeche-right me **⬇ Sab** button aata hai (jab "Video par download icon" on ho).
 - Dabane par page ke saare video links ki list (checkbox) khulti hai -> **☁ Server par bhejo** -> **quality / format chuno** (⭐ Best, 1080p, 720p… ya 🎵 sirf audio mp3). Quality ki list server se aati hai (chune hue pehle 3 videos ka union), jis video me wo quality na ho use sabse nazdeek wali milti hai. Har link server ke yt-dlp ko jata hai (cookie + referer ke saath) aur chune folder me save hota hai. Phone ka data/storage nahi lagta.
-- Server me ek baar me 2 download chalte hain, queue 20 ki hai: bachi hui videos app apne aap 10-10 sec ruk ke bhejta rehta hai. Aakhir me toast: kitne ho gaye / kitne fail.
+- Server me ek baar me 3 download chalte hain (env `XFER_DL_WORKERS`), queue 500 ki hai (`XFER_DL_QUEUE`): poora batch ek baar me server ko chala jaata hai, phir app band kar sakte ho. Queue bhar jaye (429) to purana tareeka: app 10-10 sec ruk ke bhejta rehta hai.
+- Jobs server par file me save hoti hain (hf_tmp/state/xfer_jobs.json): restart ke baad download jobs dobara queue me aa jaati hain. `watch.sh` / `alert.sh` downloads chalte waqt container restart nahi karte (max 6 ghante wait).
+- HLS (.m3u8) ke segments ek saath (6) khinche jaate hain (`XFER_HLS_PAR`, band karna ho `XFER_HLS_FAST=0`). Jo playlist sambhal na sake (live, fMP4, alag audio) wahan purana ffmpeg tareeka.
+- Download se pehle dekhta hai ki wahi naam (extension ke bina) dest folder me AIC ya HF par pehle se hai to skip (`XFER_DUP_PRECHECK=0` se band).
+- Disk kam hone par (`XFER_DISK_WARN_MB`, default 3072) Downloads screen par patti; batch khatam hone par Telegram message (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID).
 - Jo video site se hata di gayi / private / country-lock hai, wo apne aap skip hoti hai aur agli video chalti rehti hai; aakhir me summary me "N site se hata di gayi (skip)" alag dikhta hai.
 - Sirf server mode me chalta hai (⚙ -> Downloads -> Server settings me AIC/HF + login + folder). Page ko pehle neeche tak scroll karo taaki saare cards load ho jayein.
 - Server side: `xfer.py` (naya, `_KEEP_JOBS=300`, yt-dlp naam/progress fix).

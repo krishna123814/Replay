@@ -68,6 +68,9 @@ class BrowserActivity : AppCompatActivity() {
     private lateinit var pasteInfo: TextView
 
     private var rootUrl = ""
+    private var localRoot: String? = null        // SD card: Store.LOCAL ka alag root folder
+    private val storeLabel: String get() = if (localRoot != null) "SD Card" else store.label
+    private val storeIcon: String get() = if (localRoot != null) "💾" else store.icon
     private var currentUrl = ""
     private val stack = ArrayList<String>()
     private var entries: List<Entry> = emptyList()
@@ -116,7 +119,9 @@ class BrowserActivity : AppCompatActivity() {
             finish()
             return
         }
-        rootUrl = Dav.withSlash(Session.rootFor(store))
+        localRoot = intent.getStringExtra("local_root")?.takeIf { it.isNotEmpty() && store == Store.LOCAL }
+        val lr = localRoot
+        rootUrl = if (lr != null) Dav.withSlash(LocalFs.urlOf(File(lr), true)) else Dav.withSlash(Session.rootFor(store))
         gridMode = Session.bool(this, "grid", false)
         sortMode = Session.int(this, "sort", 0).coerceIn(0, sortNames.size - 1)
         videoThumbs = Session.bool(this, "vthumbs", true)
@@ -200,7 +205,7 @@ class BrowserActivity : AppCompatActivity() {
 
         // storage badge: dabane par doosre storage me jaa sakte ho (clipboard saath rehta hai)
         val badge = TextView(this)
-        badge.text = store.icon + " " + store.short
+        badge.text = storeIcon + " " + (if (localRoot != null) "SD" else store.short)
         badge.textSize = 12f
         badge.setTextColor(Color.WHITE)
         badge.typeface = Typeface.DEFAULT_BOLD
@@ -363,10 +368,10 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun updateHeader() {
-        titleTv.text = if (currentUrl == rootUrl) store.label
+        titleTv.text = if (currentUrl == rootUrl) storeLabel
         else Uri.decode(currentUrl.trimEnd('/').substringAfterLast('/'))
         val folders = entries.count { it.isDir }
-        subTv.text = "${store.icon} ${store.label} · $folders folders · ${entries.size - folders} files"
+        subTv.text = "$storeIcon $storeLabel · $folders folders · ${entries.size - folders} files"
     }
 
     // ───────────────────────── loading ─────────────────────────
@@ -614,7 +619,7 @@ class BrowserActivity : AppCompatActivity() {
 
     private fun info(e: Entry) {
         val msg = "Naam: ${e.name}\n" +
-            "Storage: ${store.label}\n" +
+            "Storage: ${storeLabel}\n" +
             (if (e.isDir) "Type: Folder\n" else "Size: ${fmtSize(e.size)}\n") +
             "Badla: ${fmtDate(e.modified)}\n\n${Storages.pathOf(store, e.url)}"
         AlertDialog.Builder(this).setTitle("Info").setMessage(msg).setPositiveButton("OK", null).show()
@@ -790,7 +795,7 @@ class BrowserActivity : AppCompatActivity() {
                         Session.clearClip()
                         refreshPasteBar()
                     }
-                    showProgress(id, (if (move) "Move" else "Copy") + " → " + store.label + ":" + destPath)
+                    showProgress(id, (if (move) "Move" else "Copy") + " → " + storeLabel + ":" + destPath)
                 }
             } catch (e: DavAuthException) {
                 runOnUiThread {
@@ -1100,14 +1105,28 @@ class BrowserActivity : AppCompatActivity() {
 
     private fun switchStorage() {
         val all = Store.values()
-        val labels = all.map { it.icon + " " + it.label + (if (it == store) "  (abhi yahan)" else "") }.toTypedArray()
+        val sd = LocalFs.sdRoot(this)
+        val labels = (all.map { it.icon + " " + it.label + (if (it == store && !(it == Store.LOCAL && localRoot != null)) "  (abhi yahan)" else "") } +
+            (if (sd != null) listOf("💾 SD Card" + (if (localRoot != null) "  (abhi yahan)" else "")) else emptyList())).toTypedArray()
         AlertDialog.Builder(this)
             .setTitle("Storage chuno")
             .setItems(labels) { _, i ->
+                if (i >= all.size) {
+                    if (sd != null && localRoot == null) {
+                        if (!LocalFs.hasAccess(this)) {
+                            Toast.makeText(this, "Pehle Home se Phone Storage kholo (permission ke liye)", Toast.LENGTH_LONG).show()
+                        } else {
+                            startActivity(Intent(this, BrowserActivity::class.java)
+                                .putExtra("store", Store.LOCAL.id).putExtra("local_root", sd.absolutePath))
+                            finish()
+                        }
+                    }
+                    return@setItems
+                }
                 val s = all[i]
                 if (s == Store.LOCAL && !LocalFs.hasAccess(this)) {
                     Toast.makeText(this, "Pehle Home se Phone Storage kholo (permission ke liye)", Toast.LENGTH_LONG).show()
-                } else if (s != store) {
+                } else if (s != store || (s == Store.LOCAL && localRoot != null)) {
                     startActivity(Intent(this, BrowserActivity::class.java).putExtra("store", s.id))
                     finish()
                 }

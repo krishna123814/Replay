@@ -193,7 +193,8 @@ object ServerSync {
     // (server restart ho jaye ya purani job server se hat jaye tab bhi "ab tak ki downloads" me dikhti rehti hain)
     class SrvRow(
         val id: String, val name: String, val url: String, val store: String, val path: String,
-        val t: Long, val state: String, val done: Long, val total: Long, val result: String, val error: String
+        val t: Long, val state: String, val done: Long, val total: Long, val result: String, val error: String,
+        val h: Int = 0, val tries: Int = 0
     ) {
         val active: Boolean get() = state == "queued" || state == "running"
         val removed: Boolean get() = error.startsWith("[removed]")
@@ -221,14 +222,30 @@ object ServerSync {
         DlSettings.setStr(app, K_HIST, arr.toString())
     }
 
-    fun histAdd(app: Context, id: String, name: String, url: String, store: String, path: String) {
+    fun histAdd(app: Context, id: String, name: String, url: String, store: String, path: String, height: Int = 0, tries: Int = 0) {
         synchronized(histLock) {
             val a = histLoad(app)
             a.put(
                 JSONObject().put("id", id).put("name", name.ifEmpty { url }).put("url", url)
                     .put("store", store).put("path", path).put("t", System.currentTimeMillis())
                     .put("state", "queued").put("done", 0).put("total", 0).put("result", "").put("err", "")
+                    .put("h", height).put("tries", tries)
             )
+            histSave(app, a)
+        }
+    }
+
+    /** Dobara bhejne ki koshish fail hui: koshish ginti +1 aur samay abhi ka (agli koshish thodi der baad). */
+    private fun histBump(app: Context, id: String) {
+        synchronized(histLock) {
+            val a = histLoad(app)
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                if (o.optString("id") == id) {
+                    o.put("tries", o.optInt("tries") + 1).put("t", System.currentTimeMillis())
+                    break
+                }
+            }
             histSave(app, a)
         }
     }
@@ -273,7 +290,8 @@ object ServerSync {
             val o = a.optJSONObject(i) ?: continue
             out.add(
                 SrvRow(o.optString("id"), o.optString("name"), o.optString("url"), o.optString("store"), o.optString("path"),
-                    o.optLong("t"), o.optString("state"), o.optLong("done"), o.optLong("total"), o.optString("result"), o.optString("err"))
+                    o.optLong("t"), o.optString("state"), o.optLong("done"), o.optLong("total"), o.optString("result"), o.optString("err"),
+                    o.optInt("h"), o.optInt("tries"))
             )
         }
         return out.sortedBy { if (it.active) 0 else 1 }
@@ -304,6 +322,21 @@ object ServerSync {
         }
     }
 
+    /** Server ke /xfer/list ke saath aaya disk ka haal (AIC disk). null = abhi pata nahi. */
+    @Volatile var disk: JSONObject? = null
+
+    /** Disk kam ho to warning text, warna null. level: ok / low / stop (server tay karta hai). */
+    fun diskWarning(): String? {
+        val d = disk ?: return null
+        val level = d.optString("level", "ok")
+        if (level == "ok") return null
+        val free = d.optLong("free", 0L) / 1073741824.0
+        val total = d.optLong("total", 0L) / 1073741824.0
+        val s = String.format(java.util.Locale.US, "%.1f GB khaali / %.0f GB", free, total)
+        return if (level == "stop") "🚨 Server disk bhar gaya: $s. Naye downloads fail honge — pehle jagah banao."
+        else "⚠️ Server disk me jagah kam hai: $s"
+    }
+
     /** Server se poori job-list lao aur record taaza karo. [cb] background thread par; null = theek, warna error text. */
     fun refreshServer(ctx: Context, cb: (String?) -> Unit) {
         val app = ctx.applicationContext
@@ -315,7 +348,11 @@ object ServerSync {
                     val txt = r.body?.string() ?: ""
                     if (r.code == 401) err = "Username / password galat"
                     else if (!r.isSuccessful) err = "Server: HTTP " + r.code
-                    else mergeJobs(app, JSONObject(txt).optJSONArray("jobs"), true)
+                    else {
+                        val j = JSONObject(txt)
+                        disk = j.optJSONObject("disk")
+                        mergeJobs(app, j.optJSONArray("jobs"), true)
+                    }
                 }
             } catch (e: Throwable) {
                 err = "Server se judne me dikkat: " + (e.message ?: e.javaClass.simpleName)
@@ -378,11 +415,11 @@ object ServerSync {
 
     private class HttpErr(val code: Int, msg: String) : IOException(msg)
 
-    private fun postDl(app: Context, store: String, path: String, spec: DlSpec, kind: String, height: Int = 0): String {
+    private fun postDl(app: Context, store: String, path: String, spec: DlSpec, kind: String, height: Int = 0, onConflict: String = "rename"): String {
         val body = JSONObject()
             .put("url", spec.url).put("name", spec.name).put("cookie", spec.cookie)
             .put("ua", spec.ua).put("referer", spec.referer).put("kind", kind)
-            .put("on_conflict", "rename")
+            .put("on_conflict", onConflict)
             .put("dest", JSONObject().put("store", store).put("path", path))
         if (height < 0) body.put("audio", true) else if (height > 0) body.put("height", height)
         val req = Request.Builder().url(xferBase(app, store) + "dl").post(jsonBody(body)).build()
@@ -485,16 +522,188 @@ object ServerSync {
     }
 
     /** Ek video server ko bhejo: pehle hls (single jaisa), na ho paye to yt-dlp. Sirf-audio (-1) hamesha yt-dlp. */
-    private fun postOne(app: Context, store: String, path: String, spec: DlSpec, height: Int): String {
+    private fun postOne(app: Context, store: String, path: String, spec: DlSpec, height: Int, onConflict: String = "rename"): String {
+        // link khud stream / file ka ho (single download ki purani entry) to seedha usi tarah bhejo
+        val upath = try { (java.net.URI(spec.url).path ?: "").lowercase() } catch (e: Exception) { "" }
+        if (upath.endsWith(".m3u8")) return postDl(app, store, path, spec, "hls", 0, onConflict)
+        if (Regex("\\.(mp4|webm|mkv|mov|m4v)$").containsMatchIn(upath)) return postDl(app, store, path, spec, "file", 0, onConflict)
         if (height >= 0) {
             val v = resolveHls(spec)
             if (v.isNotEmpty()) {
                 val (h, link) = pickVariant(v, height)
                 val nm = if (h > 0) spec.name + "_" + h + "p" else spec.name
-                return postDl(app, store, path, DlSpec(link, cookieFor(link, spec.cookie), spec.ua, spec.url, nm, ""), "hls", 0)
+                return postDl(app, store, path, DlSpec(link, cookieFor(link, spec.cookie), spec.ua, spec.url, nm, ""), "hls", 0, onConflict)
             }
         }
-        return postDl(app, store, path, spec, "ytdlp", height)
+        return postDl(app, store, path, spec, "ytdlp", height, onConflict)
+    }
+
+    // ── Fail / lost / adhoori jobs apne aap dobara ──
+    // * fail (site se hata di gayi ko chhod ke) aur lost (server restart) jobs: 3 baar tak apne aap, 3 / 15 / 60 minute ke gap par.
+    //   Dobara bhejte waqt on_conflict=skip, taaki jo file pehle ban chuki thi uski duplicate na bane.
+    // * bulk bhejte waqt app band ho gayi to bacha hua hissa (pending) phone me yaad rehta hai aur app dobara chalte hi bhej diya jata hai.
+    private const val K_PEND = "srv_pend"
+    private val pendLock = Any()
+    private val bulkBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val retryBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val autoStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+    private const val RETRY_MAX = 3
+    private val RETRY_WAIT_MIN = longArrayOf(3, 15, 60)
+
+    private fun pendLoad(app: Context): JSONArray =
+        try { JSONArray(DlSettings.getStr(app, K_PEND, "[]")) } catch (e: Exception) { JSONArray() }
+
+    private fun pendAdd(app: Context, specs: List<DlSpec>, height: Int, store: String, path: String) {
+        synchronized(pendLock) {
+            val a = pendLoad(app)
+            val have = HashSet<String>()
+            for (i in 0 until a.length()) have.add(a.getJSONObject(i).optString("u"))
+            for (sp in specs) {
+                if (!have.add(sp.url)) continue
+                a.put(JSONObject().put("u", sp.url).put("n", sp.name).put("h", height).put("s", store).put("p", path))
+            }
+            DlSettings.setStr(app, K_PEND, a.toString())
+        }
+    }
+
+    private fun pendRemove(app: Context, url: String) {
+        synchronized(pendLock) {
+            val a = pendLoad(app)
+            val keep = JSONArray()
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                if (o.optString("u") != url) keep.put(o)
+            }
+            DlSettings.setStr(app, K_PEND, keep.toString())
+        }
+    }
+
+    /** Dobara bheji ja sakti hai? (fail, par "site se hata di gayi" nahi; ya lost). */
+    fun canRetry(r: SrvRow): Boolean =
+        ((r.state == "error" && !r.removed) || r.state == "lost") && r.url.isNotBlank()
+
+    private fun retryDue(r: SrvRow, now: Long): Boolean =
+        canRetry(r) && r.tries < RETRY_MAX &&
+            now - r.t >= RETRY_WAIT_MIN[r.tries.coerceIn(0, RETRY_WAIT_MIN.size - 1)] * 60_000L
+
+    /**
+     * manual=true: gap aur 3-koshish ki seema nahi dekhta. only != null: sirf wahi ek row.
+     * [cb](bheji, fail) background thread par; bheji = -1 matlab pehle se ek retry chal raha hai.
+     */
+    fun retryFailed(ctx: Context, manual: Boolean, only: SrvRow? = null, cb: ((Int, Int) -> Unit)? = null) {
+        val app = ctx.applicationContext
+        if (!enabled(app)) { cb?.invoke(0, 0); return }
+        if (!retryBusy.compareAndSet(false, true)) { cb?.invoke(-1, 0); return }
+        net.execute {
+            var sent = 0
+            var failed = 0
+            try {
+                val now = System.currentTimeMillis()
+                val rows = if (only != null) listOf(only)
+                else history(app).filter { if (manual) canRetry(it) else retryDue(it, now) }
+                rows@ for (r in rows) {
+                    val st = r.store.ifEmpty { store(app) }
+                    val pa = r.path.ifEmpty { path(app) }
+                    val spec = DlSpec(r.url, cookieFor(r.url, ""), PopupLogin.cleanUa(app), r.url, r.name, "")
+                    var waits = 0
+                    while (true) {
+                        try {
+                            val id = postOne(app, st, pa, spec, r.h, "skip")
+                            histAdd(app, id, r.name, r.url, st, pa, r.h, r.tries + 1)
+                            histRemove(app, r.id)
+                            sent++
+                            break
+                        } catch (e: HttpErr) {
+                            if (e.code == 429 && ++waits <= 60) {
+                                try { Thread.sleep(10_000) } catch (x: InterruptedException) { break@rows }
+                                continue
+                            }
+                            if (e.code == 401) break@rows
+                            histBump(app, r.id); failed++
+                            break
+                        } catch (e: Throwable) {
+                            histBump(app, r.id); failed++
+                            break
+                        }
+                    }
+                }
+            } finally {
+                retryBusy.set(false)
+            }
+            cb?.invoke(sent, failed)
+        }
+    }
+
+    /** Pichli bulk ka bacha (bheja nahi gaya) hissa server ko bhejo. */
+    fun drainPending(ctx: Context) {
+        val app = ctx.applicationContext
+        if (!enabled(app)) return
+        if (synchronized(pendLock) { pendLoad(app).length() } == 0) return
+        if (!bulkBusy.compareAndSet(false, true)) return
+        net.execute {
+            try {
+                val a = synchronized(pendLock) { pendLoad(app) }
+                for (i in 0 until a.length()) {
+                    val o = a.getJSONObject(i)
+                    val url = o.optString("u")
+                    if (url.isEmpty()) continue
+                    val st = o.optString("s").ifEmpty { store(app) }
+                    val pa = o.optString("p").ifEmpty { path(app) }
+                    val h = o.optInt("h")
+                    val name = o.optString("n")
+                    val spec = DlSpec(url, cookieFor(url, ""), PopupLogin.cleanUa(app), url, name, "")
+                    var waits = 0
+                    while (true) {
+                        try {
+                            val id = postOne(app, st, pa, spec, h)
+                            histAdd(app, id, name, url, st, pa, h)
+                            pendRemove(app, url)
+                            break
+                        } catch (e: HttpErr) {
+                            if (e.code == 429 && ++waits <= 360) {
+                                try { Thread.sleep(10_000) } catch (x: InterruptedException) { return@execute }
+                                continue
+                            }
+                            if (e.code == 401) return@execute
+                            pendRemove(app, url)          // server ne is link ko hi mana kar diya: dobara bhejna bekaar
+                            break
+                        } catch (e: Throwable) {
+                            break                          // net / server band: pending me rehne do, agli baar bhejenge
+                        }
+                    }
+                }
+            } finally {
+                bulkBusy.set(false)
+            }
+        }
+    }
+
+    fun nudge(ctx: Context) {
+        drainPending(ctx)
+        retryFailed(ctx, false)
+    }
+
+    /** App chalte hi ek halka background thread: har 2 minute me server ki state taaza karke adhoori / fail jobs dobara bhejta hai. */
+    fun startAuto(ctx: Context) {
+        if (!autoStarted.compareAndSet(false, true)) return
+        val app = ctx.applicationContext
+        val t = Thread {
+            try { Thread.sleep(20_000) } catch (e: InterruptedException) { return@Thread }
+            while (true) {
+                try {
+                    if (enabled(app)) {
+                        val latch = java.util.concurrent.CountDownLatch(1)
+                        refreshServer(app) { latch.countDown() }
+                        latch.await(30, TimeUnit.SECONDS)
+                        nudge(app)
+                    }
+                } catch (e: Throwable) { }
+                try { Thread.sleep(120_000) } catch (e: InterruptedException) { return@Thread }
+            }
+        }
+        t.isDaemon = true
+        t.name = "srv-auto-retry"
+        t.start()
     }
 
     /**
@@ -507,18 +716,24 @@ object ServerSync {
         val store = store(app)
         val path = path(app)
         net.execute {
+            while (!bulkBusy.compareAndSet(false, true)) {          // pichli pending bulk / dusri bulk khatam hone do
+                try { Thread.sleep(2000) } catch (x: InterruptedException) { return@execute }
+            }
             val ids = ArrayList<String>()
             val nameOf = HashMap<String, String>()
             var rejected = 0
             var lastErr = ""
+            pendAdd(app, specs, height, store, path)               // app beech me band ho jaye to bacha hissa yaad rahe
             DlEngine.toast("☁ " + specs.size + " video server ko bhej rahe hain (" + qualityName(height) + ")…")
+            try {
             for (spec in specs) {
                 var tries = 0
                 while (true) {
                     try {
                         val id = postOne(app, store, path, spec, height)
                         ids.add(id); nameOf[id] = spec.name
-                        histAdd(app, id, spec.name, spec.url, store, path)
+                        histAdd(app, id, spec.name, spec.url, store, path, height)
+                        pendRemove(app, spec.url)
                         break
                     } catch (e: HttpErr) {
                         if (e.code == 429 && ++tries <= 360) {
@@ -526,6 +741,7 @@ object ServerSync {
                             continue
                         }
                         rejected++; lastErr = e.message ?: ""
+                        if (e.code != 401) pendRemove(app, spec.url)
                         if (e.code == 401) { DlEngine.toast("☁ " + lastErr); return@execute }
                         break
                     } catch (e: Throwable) {
@@ -533,6 +749,9 @@ object ServerSync {
                         break
                     }
                 }
+            }
+            } finally {
+                bulkBusy.set(false)
             }
             if (ids.isEmpty()) {
                 DlEngine.toast("☁ Server ne koi video nahi liya: $lastErr")

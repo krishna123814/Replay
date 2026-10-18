@@ -569,10 +569,17 @@ object DlUi {
                     }
                 }
                 "cancelled" -> sb.append("✕ Cancel hua")
-                "lost" -> sb.append("❓ Server ko ye job yaad nahi (restart ya purani) – folder me file dekh lo")
+                "lost" -> {
+                    sb.append("❓ Server ko ye job yaad nahi (restart ya purani)")
+                    sb.append(if (r.tries < 3) " – apne aap dobara bhejenge" else " – folder me file dekh lo ya 🔁 dabao")
+                }
                 else -> {
                     if (r.removed) sb.append("🚫 Site se hata di gayi / available nahi (skip)")
-                    else sb.append("❌ Server par fail: ").append(r.error)
+                    else {
+                        sb.append("❌ Server par fail: ").append(r.error)
+                        if (r.tries > 0) sb.append("\n🔁 koshish ").append(r.tries + 1)
+                        sb.append(if (r.tries < 3) " · apne aap dobara try hoga" else " · 🔁 dabao dobara ke liye")
+                    }
                 }
             }
             sb.append("\n").append(ago(r.t))
@@ -602,6 +609,16 @@ object DlUi {
             bar.addView(btnToggle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             bar.addView(btnClear, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             root.addView(bar)
+            val btnRetry = smallBtn(t, "🔁 Fail / lost wali dobara bhejo")
+            root.addView(btnRetry)
+
+            // Server disk kam ho to yahan lal/pili patti (server ke /xfer/list se aata hai)
+            val diskWarn = TextView(t)
+            diskWarn.textSize = 12.5f
+            diskWarn.setTextColor(Color.WHITE)
+            diskWarn.setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
+            diskWarn.visibility = View.GONE
+            root.addView(diskWarn)
 
             val empty = TextView(t)
             empty.setTextColor(Color.parseColor(DIM))
@@ -635,8 +652,16 @@ object DlUi {
                     if (tick % 3 == 0) {                       // har 3 sec: record padho + server se taaza state
                         srv = ServerSync.history(ctx)
                         if (ServerSync.enabled(ctx)) ServerSync.refreshServer(ctx) { handler.post { srv = ServerSync.history(ctx) } }
+                        if (tick % 30 == 0) ServerSync.nudge(ctx)       // fail / lost / adhoori jobs apne aap dobara
                     }
                     tick++
+                    val dw = ServerSync.diskWarning()
+                    if (dw == null) diskWarn.visibility = View.GONE
+                    else {
+                        diskWarn.text = dw
+                        diskWarn.setBackgroundColor(Color.parseColor(if (dw.startsWith("🚨")) "#C62828" else "#EF6C00"))
+                        diskWarn.visibility = View.VISIBLE
+                    }
                     val rows = DlEngine.snapshot()
                     val items = ArrayList<Any>()
                     if (rows.isNotEmpty()) { items.add("📱 Phone par (" + rows.size + ")"); items.addAll(rows) }
@@ -652,6 +677,22 @@ object DlUi {
 
             btnToggle.setOnClickListener {
                 if (DlEngine.hasActive()) DlEngine.pauseAll() else DlEngine.resumeAll()
+            }
+            btnRetry.setOnClickListener {
+                if (!ServerSync.enabled(ctx)) {
+                    Toast.makeText(ctx, "Pehle Server settings (login + folder) set karo", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(ctx, "Fail / lost wali dobara bhej rahe hain…", Toast.LENGTH_SHORT).show()
+                    ServerSync.retryFailed(ctx, true) { sent, failed ->
+                        handler.post {
+                            Toast.makeText(ctx,
+                                if (sent < 0) "Retry pehle se chal raha hai, thodi der baad dekho"
+                                else if (sent == 0 && failed == 0) "Dobara bhejne layak kuch nahi mila"
+                                else "☁ $sent dobara bheji" + (if (failed > 0) ", $failed nahi gayi" else ""),
+                                Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
             }
             btnClear.setOnClickListener {
                 DlEngine.clearDone()
@@ -684,6 +725,18 @@ object DlUi {
             acts.add {
                 Toast.makeText(ctx, "Server se pooch rahe hain…", Toast.LENGTH_SHORT).show()
                 ServerSync.verifyServerFile(ctx, r) { m -> ui.post { Toast.makeText(ctx, m, Toast.LENGTH_LONG).show() } }
+            }
+        }
+        if (ServerSync.canRetry(r)) {
+            labels.add("🔁 Dobara download")
+            acts.add {
+                ServerSync.retryFailed(ctx, true, r) { sent, _ ->
+                    ui.post {
+                        Toast.makeText(ctx,
+                            if (sent > 0) "Server ko dobara bhej diya" else if (sent < 0) "Retry pehle se chal raha hai, thodi der baad" else "Nahi gaya, baad me try karo",
+                            Toast.LENGTH_LONG).show()
+                    }
+                }
             }
         }
         labels.add("🔗 Link copy")

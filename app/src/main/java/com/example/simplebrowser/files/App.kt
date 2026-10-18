@@ -7,5 +7,6 @@ class App : Application() {
         super.onCreate()
         Session.load(this)
         Thumbs.init(this)
+        com.example.simplebrowser.ServerSync.startAuto(this)
     }
 }

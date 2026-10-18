@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.storage.StorageManager
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.IOException
@@ -16,6 +17,36 @@ object LocalFs {
     fun isLocal(url: String): Boolean = url.startsWith("file:")
 
     fun rootDir(): File = Environment.getExternalStorageDirectory()
+
+    /**
+     * SD card (removable, mounted) ka root folder; nahi hai to null.
+     * Android 11+ par "All files access" me SD card bhi aa jata hai (alag permission nahi).
+     */
+    fun sdRoot(ctx: Context): File? {
+        try {
+            val sm = ctx.getSystemService(Context.STORAGE_SERVICE) as StorageManager
+            for (v in sm.storageVolumes) {
+                if (v.isPrimary || !v.isRemovable || v.state != Environment.MEDIA_MOUNTED) continue
+                if (Build.VERSION.SDK_INT >= 30) {
+                    val d = v.directory
+                    if (d != null) return d
+                }
+            }
+        } catch (e: Exception) { }
+        // purane Android / fallback: app ke external dirs se volume ka root nikaalo
+        try {
+            val prim = rootDir().absolutePath
+            for (d in ctx.getExternalFilesDirs(null)) {
+                if (d == null) continue
+                val p = d.absolutePath
+                val i = p.indexOf("/Android/data")
+                if (i <= 0) continue
+                val root = File(p.substring(0, i))
+                if (root.absolutePath != prim && Environment.isExternalStorageRemovable(d)) return root
+            }
+        } catch (e: Exception) { }
+        return null
+    }
 
     fun urlOf(f: File, dir: Boolean): String {
         val s = Uri.fromFile(f).toString()

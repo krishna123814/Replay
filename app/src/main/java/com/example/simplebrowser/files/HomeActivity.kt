@@ -34,6 +34,8 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var hfCard: LinearLayout
     private lateinit var clipTv: TextView
     private lateinit var localSub: TextView
+    private lateinit var sdSub: TextView
+    private lateinit var sdCard: LinearLayout
 
     private val storagePerm =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -121,6 +123,11 @@ class HomeActivity : AppCompatActivity() {
         col.addView(hfCard)
         col.addView(localCard)
 
+        sdSub = TextView(this)
+        sdCard = card("💾", "SD Card", sdSub) { openSd() }
+        sdCard.visibility = android.view.View.GONE        // SD card lagi ho tabhi dikhta hai
+        col.addView(sdCard)
+
         clipTv = TextView(this)
         clipTv.setTextColor(0xFFE65100.toInt())
         clipTv.textSize = 13f
@@ -139,7 +146,10 @@ class HomeActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    private fun card(store: Store, sub: TextView, onClick: () -> Unit): LinearLayout {
+    private fun card(store: Store, sub: TextView, onClick: () -> Unit): LinearLayout =
+        card(store.icon, store.label, sub, onClick)
+
+    private fun card(iconText: String, labelText: String, sub: TextView, onClick: () -> Unit): LinearLayout {
         val c = LinearLayout(this)
         c.orientation = LinearLayout.HORIZONTAL
         c.gravity = Gravity.CENTER_VERTICAL
@@ -153,7 +163,7 @@ class HomeActivity : AppCompatActivity() {
         c.layoutParams = lp
 
         val icon = TextView(this)
-        icon.text = store.icon
+        icon.text = iconText
         icon.textSize = 40f
         icon.setPadding(0, 0, dp(16), 0)
 
@@ -161,7 +171,7 @@ class HomeActivity : AppCompatActivity() {
         txt.orientation = LinearLayout.VERTICAL
         txt.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
         val name = TextView(this)
-        name.text = store.label
+        name.text = labelText
         name.textSize = 20f
         name.setTextColor(Color.BLACK)
         name.typeface = Typeface.DEFAULT_BOLD
@@ -176,8 +186,37 @@ class HomeActivity : AppCompatActivity() {
         return c
     }
 
+    private fun refreshSd() {
+        if (!::sdCard.isInitialized) return
+        val sd = LocalFs.sdRoot(this)
+        if (sd == null) {
+            sdCard.visibility = android.view.View.GONE
+            return
+        }
+        sdCard.visibility = android.view.View.VISIBLE
+        sdSub.text = if (LocalFs.hasAccess(this)) {
+            try {
+                "SD card · " + fmtSize(StatFs(sd.path).availableBytes) + " khaali"
+            } catch (e: Exception) {
+                "SD card"
+            }
+        } else {
+            "SD card · permission chahiye (dabao)"
+        }
+    }
+
+    private fun openSd() {
+        val sd = LocalFs.sdRoot(this) ?: return
+        if (!LocalFs.hasAccess(this)) {
+            openLocal()                       // same permission dialog
+            return
+        }
+        open(Store.LOCAL, sd.absolutePath)
+    }
+
     private fun refreshLocal() {
         if (!::localSub.isInitialized) return
+        refreshSd()
         localSub.text = if (LocalFs.hasAccess(this)) {
             try {
                 val sf = StatFs(LocalFs.rootDir().path)
@@ -233,8 +272,9 @@ class HomeActivity : AppCompatActivity() {
             }
         }
 
-    private fun open(store: Store) {
+    private fun open(store: Store, localRoot: String? = null) {
         val i = Intent(this, BrowserActivity::class.java).putExtra("store", store.id)
+        if (localRoot != null) i.putExtra("local_root", localRoot)
         if (pickMode) {
             i.putExtra("pick", true).putExtra("pick_multi", intent.getBooleanExtra("pick_multi", false))
             pickBrowser.launch(i)
