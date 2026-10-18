@@ -362,6 +362,24 @@ object DlUi {
         }
     }
 
+    /** Floating window me <select> dropdown: native popup nahi khulta, isliye apni list (overlay dialog). */
+    fun selectPick(ctx: Context, overlay: Boolean, title: String, labels: List<String>, checked: Int, onPick: (Int) -> Unit) {
+        try {
+            val t = themed(ctx)
+            val b = AlertDialog.Builder(t)
+                .setTitle(if (title.isBlank()) "Chuniye" else title.take(60))
+                .setSingleChoiceItems(labels.toTypedArray(), checked) { dlg, which ->
+                    dlg.dismiss()
+                    onPick(which)
+                }
+                .setNegativeButton("Cancel", null)
+            val d = show(b, overlay)
+            if (checked > 2) d.listView.setSelection(checked - 2)
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "List khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /** Video ka link nahi mila / info. */
     fun videoInfo(ctx: Context, overlay: Boolean, text: String) {
         try {

@@ -77,6 +77,10 @@ Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 - Sirf server mode me chalta hai (⚙ -> Downloads -> Server settings me AIC/HF + login + folder). Page ko pehle neeche tak scroll karo taaki saare cards load ho jayein.
 - Server side: `xfer.py` (naya, `_KEEP_JOBS=300`, yt-dlp naam/progress fix).
 
+## 🔽 Floating window me dropdown (<select>)
+- Overlay window me Android ka native dropdown popup nahi khulta. Ab floating browser me `<select>` par tap karte hi app apni list dikhata hai (title = field ka label, chuni hui value tick ke saath). Chunne par value set hoti hai aur site ko `input`/`change` event jata hai.
+- Sirf normal `<select>` ke liye; custom (div wale) dropdown pehle se chalte hain. Multi-select aur iframe ke andar wale select abhi pehle jaise hain.
+
 ## Pehli baar floating chalane par
 - Notification permission (Android 13+) allow karo
 - "Display over other apps" permission allow karo
