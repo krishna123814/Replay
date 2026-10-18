@@ -196,7 +196,7 @@ object ServerSync {
         val t: Long, val state: String, val done: Long, val total: Long, val result: String, val error: String,
         val h: Int = 0, val tries: Int = 0
     ) {
-        val active: Boolean get() = state == "queued" || state == "running"
+        val active: Boolean get() = state == "queued" || state == "running" || state == "paused"
         val removed: Boolean get() = error.startsWith("[removed]")
     }
 
@@ -304,7 +304,7 @@ object ServerSync {
             for (i in 0 until a.length()) {
                 val o = a.getJSONObject(i)
                 val st = o.optString("state")
-                if (st == "queued" || st == "running") keep.put(o)
+                if (st == "queued" || st == "running" || st == "paused") keep.put(o)
             }
             histSave(app, keep)
         }
@@ -324,6 +324,9 @@ object ServerSync {
 
     /** Server ke /xfer/list ke saath aaya disk ka haal (AIC disk). null = abhi pata nahi. */
     @Volatile var disk: JSONObject? = null
+
+    /** Server par "sab pause" laga hai? (/xfer/list se aata hai) */
+    @Volatile var serverPaused: Boolean = false
 
     /** Disk kam ho to warning text, warna null. level: ok / low / stop (server tay karta hai). */
     fun diskWarning(): String? {
@@ -351,6 +354,7 @@ object ServerSync {
                     else {
                         val j = JSONObject(txt)
                         disk = j.optJSONObject("disk")
+                        serverPaused = j.optBoolean("paused", false)
                         mergeJobs(app, j.optJSONArray("jobs"), true)
                     }
                 }
@@ -360,6 +364,35 @@ object ServerSync {
             cb(err)
         }
     }
+
+    /** Server par pause / resume / cancel_all. id == null => saare download jobs. */
+    private fun xferPost(ctx: Context, what: String, id: String?, okMsg: String, cb: (String) -> Unit) {
+        val app = ctx.applicationContext
+        net.execute {
+            val msg = try {
+                val url = xferBase(app, store(app)) + what + (if (id != null) "?id=" + Uri.encode(id) else "")
+                val req = Request.Builder().url(url).post(ByteArray(0).toRequestBody(null)).build()
+                client(app).newCall(req).execute().use { r ->
+                    if (r.isSuccessful) {
+                        if (id == null && what == "pause") serverPaused = true
+                        if (id == null && what == "resume") serverPaused = false
+                        okMsg
+                    } else if (r.code == 404 || r.code == 405) "Server purana hai — naya server.zip deploy karo (HTTP " + r.code + ")"
+                    else "Nahi hua (HTTP " + r.code + ")"
+                }
+            } catch (e: Throwable) { "Nahi hua: " + (e.message ?: "") }
+            cb(msg)
+        }
+    }
+
+    fun pauseServer(ctx: Context, id: String?, cb: (String) -> Unit) =
+        xferPost(ctx, "pause", id, if (id == null) "Server ke saare downloads pause" else "Server par pause", cb)
+
+    fun resumeServer(ctx: Context, id: String?, cb: (String) -> Unit) =
+        xferPost(ctx, "resume", id, if (id == null) "Server ke saare downloads resume" else "Server par resume", cb)
+
+    fun cancelAllServer(ctx: Context, cb: (String) -> Unit) =
+        xferPost(ctx, "cancel_all", null, "Server ke saare downloads cancel", cb)
 
     fun cancelServer(ctx: Context, id: String, cb: (String) -> Unit) {
         val app = ctx.applicationContext

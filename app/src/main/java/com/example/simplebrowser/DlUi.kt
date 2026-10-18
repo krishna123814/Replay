@@ -540,7 +540,7 @@ object DlUi {
             val info = box.getChildAt(2) as TextView
             title.text = "☁ " + r.name
             val pct = if (r.total > 0) (r.done * 100 / r.total).toInt() else -1
-            pb.visibility = if (r.active) View.VISIBLE else View.GONE
+            pb.visibility = if (r.active && r.state != "paused") View.VISIBLE else View.GONE
             if (r.state == "running" && r.total > 0) {
                 pb.isIndeterminate = false
                 pb.progress = (r.done * 1000 / r.total).toInt()
@@ -567,6 +567,10 @@ object DlUi {
                         if (sz > 0) sb.append(" · ").append(DlFmt.size(sz))
                         if (r.result.isNotEmpty()) sb.append("\n").append(r.result)
                     }
+                }
+                "paused" -> {
+                    sb.append("⏸ Server par ruka hua")
+                    if (r.done > 0) sb.append(" · ").append(DlFmt.size(r.done))
                 }
                 "cancelled" -> sb.append("✕ Cancel hua")
                 "lost" -> {
@@ -611,6 +615,8 @@ object DlUi {
             root.addView(bar)
             val btnRetry = smallBtn(t, "🔁 Fail / lost wali dobara bhejo")
             root.addView(btnRetry)
+            val btnCancelAll = smallBtn(t, "✕ Server ke sab downloads cancel")
+            root.addView(btnCancelAll)
 
             // Server disk kam ho to yahan lal/pili patti (server ke /xfer/list se aata hai)
             val diskWarn = TextView(t)
@@ -656,7 +662,11 @@ object DlUi {
                     }
                     tick++
                     val dw = ServerSync.diskWarning()
-                    if (dw == null) diskWarn.visibility = View.GONE
+                    if (dw == null && ServerSync.serverPaused) {
+                        diskWarn.text = "⏸ Server ke downloads pause hain — chalane ke liye ⏯ dabao"
+                        diskWarn.setBackgroundColor(Color.parseColor("#546E7A"))
+                        diskWarn.visibility = View.VISIBLE
+                    } else if (dw == null) diskWarn.visibility = View.GONE
                     else {
                         diskWarn.text = dw
                         diskWarn.setBackgroundColor(Color.parseColor(if (dw.startsWith("🚨")) "#C62828" else "#EF6C00"))
@@ -676,7 +686,25 @@ object DlUi {
             dlg.setOnDismissListener { handler.removeCallbacks(refresh) }
 
             btnToggle.setOnClickListener {
-                if (DlEngine.hasActive()) DlEngine.pauseAll() else DlEngine.resumeAll()
+                val srvRunning = srv.any { it.state == "queued" || it.state == "running" }
+                val pauseNow = DlEngine.hasActive() || (srvRunning && !ServerSync.serverPaused)
+                if (pauseNow) DlEngine.pauseAll() else DlEngine.resumeAll()
+                if (ServerSync.enabled(ctx)) {
+                    val done: (String) -> Unit = { m -> handler.post { Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show() } }
+                    if (pauseNow) ServerSync.pauseServer(ctx, null, done) else ServerSync.resumeServer(ctx, null, done)
+                }
+            }
+            btnCancelAll.setOnClickListener {
+                show(
+                    AlertDialog.Builder(t)
+                        .setTitle("Server ke saare downloads cancel?")
+                        .setMessage("Server par queue me jo bhi download hain sab cancel ho jayenge. Phone wale downloads par asar nahi.")
+                        .setPositiveButton("Haan, sab cancel") { _, _ ->
+                            ServerSync.cancelAllServer(ctx) { m -> handler.post { Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show() } }
+                        }
+                        .setNegativeButton("Nahi", null),
+                    overlay
+                )
             }
             btnRetry.setOnClickListener {
                 if (!ServerSync.enabled(ctx)) {
@@ -716,6 +744,14 @@ object DlUi {
         val ui = Handler(Looper.getMainLooper())
         val labels = ArrayList<String>()
         val acts = ArrayList<() -> Unit>()
+        if (r.state == "queued" || r.state == "running") {
+            labels.add("⏸ Server par pause")
+            acts.add { ServerSync.pauseServer(ctx, r.id) { m -> ui.post { Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show() } } }
+        }
+        if (r.state == "paused") {
+            labels.add("▶ Server par resume")
+            acts.add { ServerSync.resumeServer(ctx, r.id) { m -> ui.post { Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show() } } }
+        }
         if (r.active) {
             labels.add("✕ Server par cancel")
             acts.add { ServerSync.cancelServer(ctx, r.id) { m -> ui.post { Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show() } } }
