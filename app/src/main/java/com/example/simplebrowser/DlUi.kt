@@ -333,6 +333,35 @@ object DlUi {
         }
     }
 
+    /** "⬇ Sab": page ke videos ki list (checkbox), chune hue server par bhejo. */
+    fun bulkPick(ctx: Context, overlay: Boolean, labels: List<String>, onOk: (List<Int>) -> Unit) {
+        try {
+            val t = themed(ctx)
+            val checked = BooleanArray(labels.size) { true }
+            val b = AlertDialog.Builder(t)
+                .setTitle("⬇ " + labels.size + " videos mile")
+                .setMultiChoiceItems(labels.map { it.take(90) }.toTypedArray(), checked) { _, i, on -> checked[i] = on }
+                .setPositiveButton("☁ Server par bhejo") { _, _ ->
+                    val sel = checked.indices.filter { checked[it] }
+                    if (sel.isEmpty()) Toast.makeText(ctx, "Kuch chuna nahi", Toast.LENGTH_SHORT).show() else onOk(sel)
+                }
+                .setNeutralButton("Sab hatao", null)
+                .setNegativeButton("Cancel", null)
+            val d = show(b, overlay)
+            val neutral = d.getButton(AlertDialog.BUTTON_NEUTRAL)
+            neutral.setOnClickListener {
+                val any = checked.any { it }
+                for (i in checked.indices) {
+                    checked[i] = !any
+                    d.listView.setItemChecked(i, !any)
+                }
+                neutral.text = if (any) "Sab chuno" else "Sab hatao"
+            }
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "List khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /** Video ka link nahi mila / info. */
     fun videoInfo(ctx: Context, overlay: Boolean, text: String) {
         try {

@@ -129,6 +129,118 @@ object ServerSync {
         }
     }
 
+
+    private class HttpErr(val code: Int, msg: String) : IOException(msg)
+
+    private fun postDl(app: Context, store: String, path: String, spec: DlSpec, kind: String): String {
+        val body = JSONObject()
+            .put("url", spec.url).put("name", spec.name).put("cookie", spec.cookie)
+            .put("ua", spec.ua).put("referer", spec.referer).put("kind", kind)
+            .put("on_conflict", "rename")
+            .put("dest", JSONObject().put("store", store).put("path", path))
+        val req = Request.Builder().url(xferBase(app, store) + "dl").post(jsonBody(body)).build()
+        client(app).newCall(req).execute().use { r ->
+            val txt = r.body?.string() ?: ""
+            if (r.code == 401) throw HttpErr(401, "Username / password galat")
+            if (!r.isSuccessful) {
+                val m = try { JSONObject(txt).optString("error") } catch (e: Exception) { "" }
+                throw HttpErr(r.code, if (m.isNotEmpty()) m else "HTTP ${r.code}")
+            }
+            val id = JSONObject(txt).optString("id")
+            if (id.isEmpty()) throw IOException("server ne id nahi di")
+            return id
+        }
+    }
+
+    /**
+     * Kai video-page links ek saath (yt-dlp mode). Server ki queue bhari ho (HTTP 429) to 10 sec ruk ke dobara.
+     * Phone par fallback NAHI (page link phone se download nahi ho sakta). Aakhir me summary toast.
+     */
+    fun sendBulk(ctx: Context, specs: List<DlSpec>) {
+        val app = ctx.applicationContext
+        val store = store(app)
+        val path = path(app)
+        net.execute {
+            val ids = ArrayList<String>()
+            val nameOf = HashMap<String, String>()
+            var rejected = 0
+            var lastErr = ""
+            DlEngine.toast("☁ " + specs.size + " video server ko bhej rahe hain…")
+            for (spec in specs) {
+                var tries = 0
+                while (true) {
+                    try {
+                        val id = postDl(app, store, path, spec, "ytdlp")
+                        ids.add(id); nameOf[id] = spec.name
+                        break
+                    } catch (e: HttpErr) {
+                        if (e.code == 429 && ++tries <= 360) {
+                            try { Thread.sleep(10_000) } catch (x: InterruptedException) { return@execute }
+                            continue
+                        }
+                        rejected++; lastErr = e.message ?: ""
+                        if (e.code == 401) { DlEngine.toast("☁ " + lastErr); return@execute }
+                        break
+                    } catch (e: Throwable) {
+                        rejected++; lastErr = e.message ?: e.javaClass.simpleName
+                        break
+                    }
+                }
+            }
+            if (ids.isEmpty()) {
+                DlEngine.toast("☁ Server ne koi video nahi liya: $lastErr")
+                return@execute
+            }
+            DlEngine.toast("☁ " + ids.size + " video server ki queue me" + (if (rejected > 0) " ($rejected nahi gaye)" else "") + ". Ho jane par batayenge.")
+            val want = HashSet(ids)
+            var reported = 0
+            var bad = 0
+            val end = System.currentTimeMillis() + 12L * 3600 * 1000
+            while (System.currentTimeMillis() < end) {
+                try { Thread.sleep(10_000) } catch (e: InterruptedException) { return@execute }
+                try {
+                    val req = Request.Builder().url(xferBase(app, store) + "list").build()
+                    client(app).newCall(req).execute().use { r ->
+                        val txt = r.body?.string() ?: ""
+                        if (!r.isSuccessful) { bad++; return@use }
+                        bad = 0
+                        val jobs = JSONObject(txt).optJSONArray("jobs") ?: return@use
+                        var done = 0; var failed = 0; var removed = 0; var open = 0
+                        var firstFail = ""
+                        for (i in 0 until jobs.length()) {
+                            val j = jobs.optJSONObject(i) ?: continue
+                            val id = j.optString("id")
+                            if (id !in want) continue
+                            when (j.optString("state")) {
+                                "done" -> done++
+                                "error", "cancelled" -> {
+                                    val errs = j.optJSONArray("errors")
+                                    val why = if (errs != null && errs.length() > 0) errs.optString(0) else j.optString("state")
+                                    if (why.startsWith("[removed]")) {
+                                        removed++          // site se hata di gayi / private / country-lock: skip, agle par
+                                    } else {
+                                        failed++
+                                        if (firstFail.isEmpty()) firstFail = (nameOf[id] ?: "") + ": " + why
+                                    }
+                                }
+                                else -> open++
+                            }
+                        }
+                        val seen = done + failed + removed
+                        if (open == 0 && seen >= want.size - 0) {
+                            DlEngine.toast("☁ Server par: $done ho gaye" +
+                                (if (removed > 0) ", $removed site se hata di gayi (skip)" else "") +
+                                (if (failed > 0) ", $failed fail ($firstFail)" else ""))
+                            return@execute
+                        }
+                        if (done >= reported + 5) { reported = done; DlEngine.toast("☁ $done / ${want.size} ho gaye") }
+                    }
+                } catch (e: Throwable) { bad++ }
+                if (bad >= 30) return@execute
+            }
+        }
+    }
+
     private fun pollDirect(app: Context, store: String, id: String, name: String, onFail: () -> Unit) {
         var bad = 0
         val end = System.currentTimeMillis() + 12L * 3600 * 1000
@@ -152,8 +264,12 @@ object ServerSync {
                         "error" -> {
                             val errs = j.optJSONArray("errors")
                             val m = if (errs != null && errs.length() > 0) errs.optString(0) else "error"
-                            DlEngine.toast("☁ Server se download nahi hua ($m), phone par try kar rahe hain")
-                            onFail()
+                            if (m.startsWith("[removed]")) {
+                                DlEngine.toast("☁ Video site se hata di gayi ya available nahi: $name")
+                            } else {
+                                DlEngine.toast("☁ Server se download nahi hua ($m), phone par try kar rahe hain")
+                                onFail()
+                            }
                             return
                         }
                     }

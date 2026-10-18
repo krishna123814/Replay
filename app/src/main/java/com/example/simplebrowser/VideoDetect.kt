@@ -42,6 +42,48 @@ object VideoDetect {
             main.post { handle(o) }
         }
 
+
+        /** Listing page ka "⬇ Sab": page ke saare video links (JS se aate hain). */
+        @JavascriptInterface
+        fun bulk(json: String?) {
+            val o = try { JSONObject(json ?: "{}") } catch (e: Exception) { JSONObject() }
+            main.post { handleBulk(o) }
+        }
+
+        private fun handleBulk(o: JSONObject) {
+            val arr = o.optJSONArray("items")
+            val urls = ArrayList<String>()
+            val names = ArrayList<String>()
+            if (arr != null) for (i in 0 until arr.length()) {
+                val it = arr.optJSONObject(i) ?: continue
+                val u = it.optString("u")
+                if (u.isEmpty()) continue
+                urls.add(u)
+                names.add(it.optString("t").trim().ifEmpty { "video " + (urls.size) })
+            }
+            if (urls.isEmpty()) {
+                android.widget.Toast.makeText(ctx.applicationContext, "Is page par video nahi mile", android.widget.Toast.LENGTH_SHORT).show()
+                return
+            }
+            if (!ServerSync.enabled(ctx)) {
+                DlUi.videoInfo(ctx, overlay,
+                    "Sab videos ek saath server par bhejne ke liye pehle ⚙ Settings → ⬇ Downloads → ☁ Server settings me " +
+                        "server (AIC ya HF), login aur folder chuno.")
+                return
+            }
+            val page = o.optString("page")
+            DlUi.bulkPick(ctx, overlay, names) { picked ->
+                val app = ctx.applicationContext
+                val ua = PopupLogin.cleanUa(app)
+                val specs = picked.map { i ->
+                    val cookie = try { android.webkit.CookieManager.getInstance().getCookie(urls[i]) ?: "" } catch (e: Exception) { "" }
+                    val base = names[i].replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), " ").replace(Regex("\\s+"), " ").trim().take(80)
+                    DlSpec(urls[i], cookie, ua, page, base.ifEmpty { "video" }, "")
+                }
+                ServerSync.sendBulk(app, specs)
+            }
+        }
+
         private class Item(val label: String, val url: String, val kind: String, val ext: String)
 
         private fun handle(o: JSONObject) {
@@ -327,8 +369,55 @@ object VideoDetect {
     });
   }
 
+  // ── Listing page par "⬇ Sab" button: page ke saare video-card links ek saath server ko ──
+  var allBtn = null;
+  function cardCount(max) {
+    var n = 0, seenU = {}, as = document.getElementsByTagName('a');
+    for (var i = 0; i < as.length && n < max; i++) {
+      var a = as[i];
+      if (!cardMedia(a)) continue;
+      var u = a.href.split('#')[0];
+      if (seenU[u]) continue;
+      seenU[u] = 1; n++;
+    }
+    return n;
+  }
+  function collectAll() {
+    var as = document.getElementsByTagName('a'), seenU = {}, items = [];
+    for (var i = 0; i < as.length && items.length < 300; i++) {
+      var a = as[i], m = cardMedia(a);
+      if (!m) continue;
+      var u = a.href.split('#')[0];
+      if (seenU[u]) continue;
+      seenU[u] = 1;
+      var t = (a.getAttribute('title') || (m.getAttribute && m.getAttribute('alt')) || a.getAttribute('aria-label') || a.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!t) {
+        var p = a.closest ? a.closest('li,article,div') : null;
+        var h = p ? p.querySelector('[class*=title],h2,h3,h4') : null;
+        if (h) t = (h.textContent || '').replace(/\s+/g, ' ').trim();
+      }
+      items.push({ u: u, t: t.slice(0, 120) });
+    }
+    if (!items.length) { toast('Is page par video nahi mile'); return; }
+    try { LionVid.bulk(JSON.stringify({ page: location.href, title: document.title, items: items })); } catch (e) { toast('Sab-download khul nahi paya'); }
+  }
+  function updateAll() {
+    var show = on() && cardCount(2) >= 2;
+    if (show && !allBtn) {
+      allBtn = document.createElement('div');
+      allBtn.textContent = '\u2B07 Sab';
+      allBtn.setAttribute('style', 'position:fixed;z-index:2147483647;right:10px;bottom:110px;padding:7px 13px;border-radius:18px;' +
+        'background:rgba(41,98,255,.95);color:#fff;font:700 14px sans-serif;box-shadow:0 1px 6px rgba(0,0,0,.55);touch-action:manipulation;user-select:none;display:none');
+      allBtn.addEventListener('click', function (ev) { ev.preventDefault(); ev.stopPropagation(); collectAll(); }, true);
+      allBtn.addEventListener('touchstart', function (ev) { ev.stopPropagation(); }, true);
+      (document.body || document.documentElement).appendChild(allBtn);
+    }
+    if (allBtn) allBtn.style.display = show ? 'block' : 'none';
+  }
+
   window.__lionVid = { scan: place };
   setInterval(place, 700);
+  setInterval(updateAll, 1500);
   addEventListener('scroll', place, { passive: true, capture: true });
   addEventListener('resize', place);
   place();

@@ -69,6 +69,14 @@ Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 ## ⚡ Seedha server par download
 - ⚙ → Downloads → Server settings me "⚡ Seedha server par download" on ho to link server ko jata hai; server (`/xfer/dl`, xfer.py) khud download karke chune hue folder me rakhta hai. Server se na ho to phone par purana tareeka.
 
+## ⬇ Sab videos ek saath (listing / playlist page)
+- Kisi page par 2+ video cards ho to neeche-right me **⬇ Sab** button aata hai (jab "Video par download icon" on ho).
+- Dabane par page ke saare video links ki list (checkbox) khulti hai -> **☁ Server par bhejo**. Har link server ke yt-dlp ko jata hai (cookie + referer ke saath) aur chune folder me save hota hai. Phone ka data/storage nahi lagta.
+- Server me ek baar me 2 download chalte hain, queue 20 ki hai: bachi hui videos app apne aap 10-10 sec ruk ke bhejta rehta hai. Aakhir me toast: kitne ho gaye / kitne fail.
+- Jo video site se hata di gayi / private / country-lock hai, wo apne aap skip hoti hai aur agli video chalti rehti hai; aakhir me summary me "N site se hata di gayi (skip)" alag dikhta hai.
+- Sirf server mode me chalta hai (⚙ -> Downloads -> Server settings me AIC/HF + login + folder). Page ko pehle neeche tak scroll karo taaki saare cards load ho jayein.
+- Server side: `xfer.py` (naya, `_KEEP_JOBS=300`, yt-dlp naam/progress fix).
+
 ## Pehli baar floating chalane par
 - Notification permission (Android 13+) allow karo
 - "Display over other apps" permission allow karo
