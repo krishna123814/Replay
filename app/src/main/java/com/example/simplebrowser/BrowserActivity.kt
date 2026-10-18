@@ -221,7 +221,7 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun showMoreMenu() {
-        val items = arrayOf("📜 History", "📥 Download queue (speed / ETA)", "⚡ Download settings")
+        val items = arrayOf("📜 History", "📥 Downloads (phone + server)", "⚡ Download settings")
         android.app.AlertDialog.Builder(this)
             .setItems(items) { _, which ->
                 when (which) {

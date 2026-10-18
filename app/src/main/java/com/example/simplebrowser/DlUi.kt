@@ -380,6 +380,22 @@ object DlUi {
         }
     }
 
+    /** "⬇ Sab": sabhi videos ke liye ek common quality / format. */
+    fun qualityPick(ctx: Context, overlay: Boolean, title: String, labels: List<String>, onPick: (Int) -> Unit) {
+        try {
+            val t = themed(ctx)
+            show(
+                AlertDialog.Builder(t)
+                    .setTitle(title)
+                    .setItems(labels.toTypedArray()) { _, which -> onPick(which) }
+                    .setNegativeButton("Cancel", null),
+                overlay
+            )
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "List khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /** Video ka link nahi mila / info. */
     fun videoInfo(ctx: Context, overlay: Boolean, text: String) {
         try {
@@ -408,16 +424,21 @@ object DlUi {
     // 📥 Queue
     // ═════════════════════════════════════════════════════════════════════
     private class RowAdapter(val ctx: Context) : BaseAdapter() {
-        var rows: List<DlRow> = emptyList()
+        // items: String = section header, DlRow = phone download, ServerSync.SrvRow = server download
+        var items: List<Any> = emptyList()
 
-        fun set(r: List<DlRow>) {
-            rows = r
+        fun set(r: List<Any>) {
+            items = r
             notifyDataSetChanged()
         }
 
-        override fun getCount(): Int = rows.size
-        override fun getItem(position: Int): DlRow? = rows.getOrNull(position)
-        override fun getItemId(position: Int): Long = rows.getOrNull(position)?.id?.toLong() ?: 0L
+        override fun getCount(): Int = items.size
+        override fun getItem(position: Int): Any? = items.getOrNull(position)
+        override fun getItemId(position: Int): Long = (items.getOrNull(position) as? DlRow)?.id?.toLong() ?: position.toLong()
+        override fun getViewTypeCount(): Int = 2
+        override fun getItemViewType(position: Int): Int = if (items.getOrNull(position) is String) 1 else 0
+        override fun areAllItemsEnabled(): Boolean = false
+        override fun isEnabled(position: Int): Boolean = items.getOrNull(position) !is String
 
         private fun build(): LinearLayout {
             val box = LinearLayout(ctx)
@@ -441,8 +462,23 @@ object DlUi {
         }
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val item = items[position]
+            if (item is String) {
+                val tv = (convertView as? TextView) ?: TextView(ctx)
+                tv.text = item
+                tv.setTextColor(Color.parseColor(LIGHT))
+                tv.textSize = 12.5f
+                tv.setTypeface(null, android.graphics.Typeface.BOLD)
+                tv.setBackgroundColor(Color.parseColor("#2A2A2A"))
+                tv.setPadding(dp(ctx, 12), dp(ctx, 6), dp(ctx, 12), dp(ctx, 6))
+                return tv
+            }
             val box = (convertView as? LinearLayout) ?: build()
-            val r = rows[position]
+            if (item is ServerSync.SrvRow) bindServer(box, item) else bindPhone(box, item as DlRow)
+            return box
+        }
+
+        private fun bindPhone(box: LinearLayout, r: DlRow) {
             val title = box.getChildAt(0) as TextView
             val pb = box.getChildAt(1) as ProgressBar
             val info = box.getChildAt(2) as TextView
@@ -486,7 +522,61 @@ object DlUi {
             if (r.retries > 0 && r.status != DlStatus.DONE) sb.append(" · retries ${r.retries}")
             if (r.note.isNotEmpty()) sb.append("\n").append(r.note)
             info.text = sb.toString()
-            return box
+        }
+
+        private fun ago(t: Long): String {
+            val s = (System.currentTimeMillis() - t) / 1000
+            return when {
+                s < 60 -> "abhi"
+                s < 3600 -> (s / 60).toString() + " min pehle"
+                s < 86400 -> (s / 3600).toString() + " ghante pehle"
+                else -> (s / 86400).toString() + " din pehle"
+            }
+        }
+
+        private fun bindServer(box: LinearLayout, r: ServerSync.SrvRow) {
+            val title = box.getChildAt(0) as TextView
+            val pb = box.getChildAt(1) as ProgressBar
+            val info = box.getChildAt(2) as TextView
+            title.text = "☁ " + r.name
+            val pct = if (r.total > 0) (r.done * 100 / r.total).toInt() else -1
+            pb.visibility = if (r.active) View.VISIBLE else View.GONE
+            if (r.state == "running" && r.total > 0) {
+                pb.isIndeterminate = false
+                pb.progress = (r.done * 1000 / r.total).toInt()
+            } else {
+                pb.isIndeterminate = true
+            }
+            val sb = StringBuilder()
+            when (r.state) {
+                "queued" -> sb.append("⏳ Server ki queue me")
+                "running" -> {
+                    sb.append("⬇ Server download kar raha hai")
+                    if (pct >= 0) sb.append(" · ").append(pct).append("%")
+                    if (r.done > 0) {
+                        sb.append(" · ").append(DlFmt.size(r.done))
+                        if (r.total > 0) sb.append(" / ").append(DlFmt.size(r.total))
+                    }
+                }
+                "done" -> {
+                    if (r.result.startsWith("skipped:")) {
+                        sb.append("⏭ Server par pehle se tha (skip)")
+                    } else {
+                        sb.append("✅ Server ne confirm kiya")
+                        val sz = if (r.total > 0) r.total else r.done
+                        if (sz > 0) sb.append(" · ").append(DlFmt.size(sz))
+                        if (r.result.isNotEmpty()) sb.append("\n").append(r.result)
+                    }
+                }
+                "cancelled" -> sb.append("✕ Cancel hua")
+                "lost" -> sb.append("❓ Server ko ye job yaad nahi (restart ya purani) – folder me file dekh lo")
+                else -> {
+                    if (r.removed) sb.append("🚫 Site se hata di gayi / available nahi (skip)")
+                    else sb.append("❌ Server par fail: ").append(r.error)
+                }
+            }
+            sb.append("\n").append(ago(r.t))
+            info.text = sb.toString()
         }
     }
 
@@ -518,7 +608,7 @@ object DlUi {
             empty.textSize = 13f
             empty.gravity = Gravity.CENTER
             empty.setPadding(dp(ctx, 12), dp(ctx, 20), dp(ctx, 12), dp(ctx, 20))
-            empty.text = "Queue khali hai.\n\"➕ URLs\" se ek ya kai links daalo (har line me ek)."
+            empty.text = "Abhi koi download nahi.\n\"➕ URLs\" se links daalo, ya kisi video par ⬇ dabao."
             root.addView(empty)
 
             val lv = ListView(t)
@@ -529,7 +619,7 @@ object DlUi {
 
             val dlg = show(
                 AlertDialog.Builder(t)
-                    .setTitle("📥 Download queue")
+                    .setTitle("📥 Downloads (phone + server)")
                     .setView(root)
                     .setPositiveButton("➕ URLs") { _, _ -> Downloader.askUrls(ctx, overlay) }
                     .setNegativeButton("Band", null),
@@ -537,13 +627,23 @@ object DlUi {
             )
 
             val handler = Handler(Looper.getMainLooper())
+            var srv: List<ServerSync.SrvRow> = ServerSync.history(ctx)
+            var tick = 0
             val refresh = object : Runnable {
                 override fun run() {
                     if (!dlg.isShowing) return
+                    if (tick % 3 == 0) {                       // har 3 sec: record padho + server se taaza state
+                        srv = ServerSync.history(ctx)
+                        if (ServerSync.enabled(ctx)) ServerSync.refreshServer(ctx) { handler.post { srv = ServerSync.history(ctx) } }
+                    }
+                    tick++
                     val rows = DlEngine.snapshot()
-                    adapter.set(rows)
-                    empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
-                    lv.visibility = if (rows.isEmpty()) View.GONE else View.VISIBLE
+                    val items = ArrayList<Any>()
+                    if (rows.isNotEmpty()) { items.add("📱 Phone par (" + rows.size + ")"); items.addAll(rows) }
+                    if (srv.isNotEmpty()) { items.add("☁ Server par (" + srv.size + ")"); items.addAll(srv) }
+                    adapter.set(items)
+                    empty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+                    lv.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
                     handler.postDelayed(this, 1000)
                 }
             }
@@ -555,14 +655,57 @@ object DlUi {
             }
             btnClear.setOnClickListener {
                 DlEngine.clearDone()
+                ServerSync.histClearFinished(ctx)
+                srv = ServerSync.history(ctx)
                 Toast.makeText(ctx, "Poore hue downloads list se hata diye (files safe hain)", Toast.LENGTH_SHORT).show()
             }
             lv.setOnItemClickListener { _, _, pos, _ ->
-                val row = adapter.getItem(pos)
-                if (row != null) rowActions(ctx, overlay, row)
+                when (val row = adapter.getItem(pos)) {
+                    is DlRow -> rowActions(ctx, overlay, row)
+                    is ServerSync.SrvRow -> srvActions(ctx, overlay, row)
+                    else -> {}
+                }
             }
         } catch (e: Exception) {
             Toast.makeText(ctx, "Queue khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun srvActions(ctx: Context, overlay: Boolean, r: ServerSync.SrvRow) {
+        val ui = Handler(Looper.getMainLooper())
+        val labels = ArrayList<String>()
+        val acts = ArrayList<() -> Unit>()
+        if (r.active) {
+            labels.add("✕ Server par cancel")
+            acts.add { ServerSync.cancelServer(ctx, r.id) { m -> ui.post { Toast.makeText(ctx, m, Toast.LENGTH_SHORT).show() } } }
+        }
+        if (r.state == "done" && r.result.isNotEmpty() && !r.result.startsWith("skipped:")) {
+            labels.add("🔍 Server par file check karo")
+            acts.add {
+                Toast.makeText(ctx, "Server se pooch rahe hain…", Toast.LENGTH_SHORT).show()
+                ServerSync.verifyServerFile(ctx, r) { m -> ui.post { Toast.makeText(ctx, m, Toast.LENGTH_LONG).show() } }
+            }
+        }
+        labels.add("🔗 Link copy")
+        acts.add {
+            try {
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("link", r.url))
+                Toast.makeText(ctx, "Link copy ho gaya", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+            }
+        }
+        labels.add("List se hatao (server par file safe)")
+        acts.add { ServerSync.histRemove(ctx, r.id) }
+        try {
+            show(
+                AlertDialog.Builder(themed(ctx))
+                    .setTitle(r.name)
+                    .setItems(labels.toTypedArray()) { _, which -> acts[which]() }
+                    .setNegativeButton("Cancel", null),
+                overlay
+            )
+        } catch (e: Exception) {
         }
     }
 

@@ -15,6 +15,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Credentials
 import okio.BufferedSink
 import okio.source
+import org.json.JSONArray
 import org.json.JSONObject
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
@@ -124,20 +125,266 @@ object ServerSync {
                 onFail()
                 return@execute
             }
+            histAdd(app, id, spec.name, spec.url, store, path)
             DlEngine.toast("☁ Server par download shuru: " + spec.name)
             pollDirect(app, store, id, spec.name, onFail)
         }
     }
 
 
+
+    fun qualityName(height: Int): String = when {
+        height < 0 -> "sirf audio mp3"
+        height == 0 -> "best quality"
+        else -> height.toString() + "p tak"
+    }
+
+    /** Server se ek video ke quality options. */
+    class FormatOpt(val h: Int, val ext: String, val fps: Int, val count: Int, val sampled: Int)
+
+    /**
+     * Chune hue videos me se pehle <=3 ke formats server (yt-dlp) se padho; heights ka union do.
+     * [cb] background thread par chalta hai. Khaali list = padh nahi payi (caller standard ladder dikhaye).
+     */
+    fun fetchFormats(ctx: Context, specs: List<DlSpec>, cb: (List<FormatOpt>, Boolean) -> Unit) {
+        val app = ctx.applicationContext
+        val store = store(app)
+        net.execute {
+            val sample = specs.take(3)
+            val futures = sample.map { spec ->
+                net.submit(java.util.concurrent.Callable<JSONObject?> {
+                    try {
+                        val body = JSONObject().put("url", spec.url).put("cookie", spec.cookie)
+                            .put("ua", spec.ua).put("referer", spec.referer)
+                        val req = Request.Builder().url(xferBase(app, store) + "formats").post(jsonBody(body)).build()
+                        client(app).newCall(req).execute().use { r ->
+                            val txt = r.body?.string() ?: ""
+                            if (r.isSuccessful) JSONObject(txt) else null
+                        }
+                    } catch (e: Throwable) { null }
+                })
+            }
+            val got = futures.mapNotNull {
+                try { it.get(60, java.util.concurrent.TimeUnit.SECONDS) } catch (e: Throwable) { null }
+            }
+            val byH = java.util.TreeMap<Int, IntArray>()      // height -> [count, fps]
+            val extOf = HashMap<Int, String>()
+            var audio = false
+            for (j in got) {
+                if (j.optBoolean("audio")) audio = true
+                val arr = j.optJSONArray("formats") ?: continue
+                for (i in 0 until arr.length()) {
+                    val f = arr.optJSONObject(i) ?: continue
+                    val h = f.optInt("h")
+                    if (h <= 0) continue
+                    val cur = byH.getOrPut(h) { intArrayOf(0, 0) }
+                    cur[0]++
+                    cur[1] = maxOf(cur[1], f.optInt("fps"))
+                    if (!extOf.containsKey(h)) extOf[h] = f.optString("ext")
+                }
+            }
+            val list = byH.descendingMap().map { (h, v) -> FormatOpt(h, extOf[h] ?: "", v[1], v[0], got.size) }
+            cb(list, audio || got.isEmpty())
+        }
+    }
+
+
+    // ── Server downloads ka local record: jo link server ko bheje, unki state yaad rakhte hain ──
+    // (server restart ho jaye ya purani job server se hat jaye tab bhi "ab tak ki downloads" me dikhti rehti hain)
+    class SrvRow(
+        val id: String, val name: String, val url: String, val store: String, val path: String,
+        val t: Long, val state: String, val done: Long, val total: Long, val result: String, val error: String
+    ) {
+        val active: Boolean get() = state == "queued" || state == "running"
+        val removed: Boolean get() = error.startsWith("[removed]")
+    }
+
+    private const val K_HIST = "srv_hist"
+    private val histLock = Any()
+
+    private fun histLoad(app: Context): JSONArray =
+        try { JSONArray(DlSettings.getStr(app, K_HIST, "[]")) } catch (e: Exception) { JSONArray() }
+
+    private fun histSave(app: Context, a: JSONArray) {
+        var arr = a
+        if (arr.length() > 500) {            // sabse purani khatam hui entries hatao
+            val keep = JSONArray()
+            var drop = arr.length() - 500
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val st = o.optString("state")
+                if (drop > 0 && st != "queued" && st != "running") { drop--; continue }
+                keep.put(o)
+            }
+            arr = keep
+        }
+        DlSettings.setStr(app, K_HIST, arr.toString())
+    }
+
+    fun histAdd(app: Context, id: String, name: String, url: String, store: String, path: String) {
+        synchronized(histLock) {
+            val a = histLoad(app)
+            a.put(
+                JSONObject().put("id", id).put("name", name.ifEmpty { url }).put("url", url)
+                    .put("store", store).put("path", path).put("t", System.currentTimeMillis())
+                    .put("state", "queued").put("done", 0).put("total", 0).put("result", "").put("err", "")
+            )
+            histSave(app, a)
+        }
+    }
+
+    /** Server ki job-list (ya ek job) se record ki states taaza karo. markLost: poori list mili thi, jo job usme nahi wo "lost". */
+    fun mergeJobs(app: Context, jobs: JSONArray?, markLost: Boolean) {
+        synchronized(histLock) {
+            val a = histLoad(app)
+            val byId = HashMap<String, JSONObject>()
+            if (jobs != null) for (i in 0 until jobs.length()) {
+                val j = jobs.optJSONObject(i) ?: continue
+                byId[j.optString("id")] = j
+            }
+            var changed = false
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                val st = o.optString("state")
+                if (st == "done" || st == "error" || st == "cancelled" || st == "lost") continue
+                val j = byId[o.optString("id")]
+                if (j != null) {
+                    o.put("state", j.optString("state", st))
+                    o.put("done", j.optLong("bytes_done", 0)).put("total", j.optLong("bytes_total", 0))
+                    val res = j.optString("result")
+                    if (res.isNotEmpty()) o.put("result", res)
+                    val errs = j.optJSONArray("errors")
+                    if (errs != null && errs.length() > 0) o.put("err", errs.optString(0))
+                    changed = true
+                } else if (markLost) {
+                    o.put("state", "lost")
+                    changed = true
+                }
+            }
+            if (changed) histSave(app, a)
+        }
+    }
+
+    /** Naya pehle; chalti hui (queued/running) sabse upar. */
+    fun history(app: Context): List<SrvRow> {
+        val a = synchronized(histLock) { histLoad(app) }
+        val out = ArrayList<SrvRow>()
+        for (i in a.length() - 1 downTo 0) {
+            val o = a.optJSONObject(i) ?: continue
+            out.add(
+                SrvRow(o.optString("id"), o.optString("name"), o.optString("url"), o.optString("store"), o.optString("path"),
+                    o.optLong("t"), o.optString("state"), o.optLong("done"), o.optLong("total"), o.optString("result"), o.optString("err"))
+            )
+        }
+        return out.sortedBy { if (it.active) 0 else 1 }
+    }
+
+    fun histClearFinished(app: Context) {
+        synchronized(histLock) {
+            val a = histLoad(app)
+            val keep = JSONArray()
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                val st = o.optString("state")
+                if (st == "queued" || st == "running") keep.put(o)
+            }
+            histSave(app, keep)
+        }
+    }
+
+    fun histRemove(app: Context, id: String) {
+        synchronized(histLock) {
+            val a = histLoad(app)
+            val keep = JSONArray()
+            for (i in 0 until a.length()) {
+                val o = a.getJSONObject(i)
+                if (o.optString("id") != id) keep.put(o)
+            }
+            histSave(app, keep)
+        }
+    }
+
+    /** Server se poori job-list lao aur record taaza karo. [cb] background thread par; null = theek, warna error text. */
+    fun refreshServer(ctx: Context, cb: (String?) -> Unit) {
+        val app = ctx.applicationContext
+        net.execute {
+            var err: String? = null
+            try {
+                val req = Request.Builder().url(xferBase(app, store(app)) + "list").build()
+                client(app).newCall(req).execute().use { r ->
+                    val txt = r.body?.string() ?: ""
+                    if (r.code == 401) err = "Username / password galat"
+                    else if (!r.isSuccessful) err = "Server: HTTP " + r.code
+                    else mergeJobs(app, JSONObject(txt).optJSONArray("jobs"), true)
+                }
+            } catch (e: Throwable) {
+                err = "Server se judne me dikkat: " + (e.message ?: e.javaClass.simpleName)
+            }
+            cb(err)
+        }
+    }
+
+    fun cancelServer(ctx: Context, id: String, cb: (String) -> Unit) {
+        val app = ctx.applicationContext
+        net.execute {
+            val msg = try {
+                val req = Request.Builder().url(xferBase(app, store(app)) + "cancel?id=" + Uri.encode(id))
+                    .post(ByteArray(0).toRequestBody(null)).build()
+                client(app).newCall(req).execute().use { r ->
+                    if (r.isSuccessful) "Server par cancel bhej diya" else "Cancel nahi hua (HTTP " + r.code + ")"
+                }
+            } catch (e: Throwable) { "Cancel nahi hua: " + (e.message ?: "") }
+            cb(msg)
+        }
+    }
+
+    private const val PROPFIND_SIZE =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:propfind xmlns:d=\"DAV:\"><d:prop><d:getcontentlength/></d:prop></d:propfind>"
+
+    /** Server ki WebDAV se dekho ki file sach me wahan hai (aur kitni badi). [cb] background thread par. */
+    fun verifyServerFile(ctx: Context, row: SrvRow, cb: (String) -> Unit) {
+        val app = ctx.applicationContext
+        net.execute {
+            val msg = try {
+                val res = row.result
+                val st = res.substringBefore(":/")
+                val p = res.substringAfter(":/", "")
+                if (st != "aic" && st != "hf" || p.isEmpty()) {
+                    "Server ne file ka path nahi diya"
+                } else {
+                    val sb = StringBuilder(root(app, st))
+                    for (seg in p.split('/').filter { it.isNotEmpty() }) sb.append(Uri.encode(seg)).append('/')
+                    val url = sb.toString().trimEnd('/')
+                    val req = Request.Builder().url(url)
+                        .method("PROPFIND", PROPFIND_SIZE.toRequestBody("application/xml; charset=utf-8".toMediaType()))
+                        .header("Depth", "0").build()
+                    client(app).newCall(req).execute().use { r ->
+                        val txt = r.body?.string() ?: ""
+                        when {
+                            r.code == 404 -> "❌ Server par ye file nahi mili"
+                            r.code == 401 -> "Username / password galat"
+                            !r.isSuccessful -> "Server: HTTP " + r.code
+                            else -> {
+                                val m = Regex("getcontentlength[^>]*>\\s*(\\d+)").find(txt)
+                                "✅ Server par file hai" + (if (m != null) " · " + DlFmt.size(m.groupValues[1].toLong()) else "")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Throwable) { "Check nahi ho paya: " + (e.message ?: "") }
+            cb(msg)
+        }
+    }
+
     private class HttpErr(val code: Int, msg: String) : IOException(msg)
 
-    private fun postDl(app: Context, store: String, path: String, spec: DlSpec, kind: String): String {
+    private fun postDl(app: Context, store: String, path: String, spec: DlSpec, kind: String, height: Int = 0): String {
         val body = JSONObject()
             .put("url", spec.url).put("name", spec.name).put("cookie", spec.cookie)
             .put("ua", spec.ua).put("referer", spec.referer).put("kind", kind)
             .put("on_conflict", "rename")
             .put("dest", JSONObject().put("store", store).put("path", path))
+        if (height < 0) body.put("audio", true) else if (height > 0) body.put("height", height)
         val req = Request.Builder().url(xferBase(app, store) + "dl").post(jsonBody(body)).build()
         client(app).newCall(req).execute().use { r ->
             val txt = r.body?.string() ?: ""
@@ -156,7 +403,7 @@ object ServerSync {
      * Kai video-page links ek saath (yt-dlp mode). Server ki queue bhari ho (HTTP 429) to 10 sec ruk ke dobara.
      * Phone par fallback NAHI (page link phone se download nahi ho sakta). Aakhir me summary toast.
      */
-    fun sendBulk(ctx: Context, specs: List<DlSpec>) {
+    fun sendBulk(ctx: Context, specs: List<DlSpec>, height: Int = 0) {
         val app = ctx.applicationContext
         val store = store(app)
         val path = path(app)
@@ -165,13 +412,14 @@ object ServerSync {
             val nameOf = HashMap<String, String>()
             var rejected = 0
             var lastErr = ""
-            DlEngine.toast("☁ " + specs.size + " video server ko bhej rahe hain…")
+            DlEngine.toast("☁ " + specs.size + " video server ko bhej rahe hain (" + qualityName(height) + ")…")
             for (spec in specs) {
                 var tries = 0
                 while (true) {
                     try {
-                        val id = postDl(app, store, path, spec, "ytdlp")
+                        val id = postDl(app, store, path, spec, "ytdlp", height)
                         ids.add(id); nameOf[id] = spec.name
+                        histAdd(app, id, spec.name, spec.url, store, path)
                         break
                     } catch (e: HttpErr) {
                         if (e.code == 429 && ++tries <= 360) {
@@ -205,6 +453,7 @@ object ServerSync {
                         if (!r.isSuccessful) { bad++; return@use }
                         bad = 0
                         val jobs = JSONObject(txt).optJSONArray("jobs") ?: return@use
+                        mergeJobs(app, jobs, false)
                         var done = 0; var failed = 0; var removed = 0; var open = 0
                         var firstFail = ""
                         for (i in 0 until jobs.length()) {
@@ -254,6 +503,7 @@ object ServerSync {
                     if (!r.isSuccessful) { bad++; return@use }
                     bad = 0
                     val j = JSONObject(txt)
+                    mergeJobs(app, JSONArray().put(j), false)
                     when (j.optString("state")) {
                         "done" -> {
                             val res = j.optString("result")

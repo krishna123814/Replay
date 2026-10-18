@@ -392,7 +392,7 @@ object Downloader {
             }
             b.setPositiveButton("Naya URL") { _, _ -> askUrls(ctx, overlay) }
             if (DlSettings.engineOn(ctx)) {
-                b.setNeutralButton("Queue (speed/ETA)") { _, _ -> DlUi.queue(ctx, overlay) }
+                b.setNeutralButton("Downloads") { _, _ -> DlUi.queue(ctx, overlay) }
             } else {
                 b.setNeutralButton("Downloads dekho") { _, _ -> openSystemDownloads(ctx) }
             }

@@ -80,7 +80,35 @@ object VideoDetect {
                     val base = names[i].replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), " ").replace(Regex("\\s+"), " ").trim().take(80)
                     DlSpec(urls[i], cookie, ua, page, base.ifEmpty { "video" }, "")
                 }
-                ServerSync.sendBulk(app, specs)
+                android.widget.Toast.makeText(app, "Quality / formats padh rahe hain… (10-40 sec)", android.widget.Toast.LENGTH_LONG).show()
+                ServerSync.fetchFormats(app, specs) { opts, audio ->
+                    main.post { askQuality(specs, opts, audio) }
+                }
+            }
+        }
+
+        /** Sabhi videos ke liye ek common quality chuno, phir server ko bhejo. */
+        private fun askQuality(specs: List<DlSpec>, opts: List<ServerSync.FormatOpt>, audio: Boolean) {
+            val labels = ArrayList<String>()
+            val heights = ArrayList<Int>()          // 0 = best, -1 = audio, >0 = us quality tak
+            labels.add("⭐ Best available (har video ki sabse badi)"); heights.add(0)
+            if (opts.isNotEmpty()) {
+                for (o in opts) {
+                    val extra = ArrayList<String>()
+                    if (o.ext.isNotEmpty()) extra.add(o.ext)
+                    if (o.fps > 30) extra.add(o.fps.toString() + "fps")
+                    if (o.count < o.sampled) extra.add("kuch me hi")
+                    labels.add(o.h.toString() + "p" + (if (extra.isEmpty()) "" else "  (" + extra.joinToString(", ") + ")"))
+                    heights.add(o.h)
+                }
+            } else {
+                for (h in intArrayOf(2160, 1440, 1080, 720, 480, 360, 240)) { labels.add(h.toString() + "p"); heights.add(h) }
+            }
+            if (audio) { labels.add("🎵 Sirf audio (mp3)"); heights.add(-1) }
+            val title = "⬇ " + specs.size + " videos: kaunsi quality?" +
+                (if (opts.isEmpty()) "\n(list nahi mili, standard options)" else "\n(jis video me wo quality na ho use sabse nazdeek milegi)")
+            DlUi.qualityPick(ctx, overlay, title, labels) { idx ->
+                ServerSync.sendBulk(ctx.applicationContext, specs, heights[idx])
             }
         }
 

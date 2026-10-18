@@ -71,7 +71,7 @@ Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 
 ## ⬇ Sab videos ek saath (listing / playlist page)
 - Kisi page par 2+ video cards ho to neeche-right me **⬇ Sab** button aata hai (jab "Video par download icon" on ho).
-- Dabane par page ke saare video links ki list (checkbox) khulti hai -> **☁ Server par bhejo**. Har link server ke yt-dlp ko jata hai (cookie + referer ke saath) aur chune folder me save hota hai. Phone ka data/storage nahi lagta.
+- Dabane par page ke saare video links ki list (checkbox) khulti hai -> **☁ Server par bhejo** -> **quality / format chuno** (⭐ Best, 1080p, 720p… ya 🎵 sirf audio mp3). Quality ki list server se aati hai (chune hue pehle 3 videos ka union), jis video me wo quality na ho use sabse nazdeek wali milti hai. Har link server ke yt-dlp ko jata hai (cookie + referer ke saath) aur chune folder me save hota hai. Phone ka data/storage nahi lagta.
 - Server me ek baar me 2 download chalte hain, queue 20 ki hai: bachi hui videos app apne aap 10-10 sec ruk ke bhejta rehta hai. Aakhir me toast: kitne ho gaye / kitne fail.
 - Jo video site se hata di gayi / private / country-lock hai, wo apne aap skip hoti hai aur agli video chalti rehti hai; aakhir me summary me "N site se hata di gayi (skip)" alag dikhta hai.
 - Sirf server mode me chalta hai (⚙ -> Downloads -> Server settings me AIC/HF + login + folder). Page ko pehle neeche tak scroll karo taaki saare cards load ho jayein.
@@ -80,6 +80,13 @@ Floating window me text select karne par neeche Lion **Copy bar** aata hai:
 ## 🔽 Floating window me dropdown (<select>)
 - Overlay window me Android ka native dropdown popup nahi khulta. Ab floating browser me `<select>` par tap karte hi app apni list dikhata hai (title = field ka label, chuni hui value tick ke saath). Chunne par value set hoti hai aur site ko `input`/`change` event jata hai.
 - Sirf normal `<select>` ke liye; custom (div wale) dropdown pehle se chalte hain. Multi-select aur iframe ke andar wale select abhi pehle jaise hain.
+
+## 📥 Downloads (phone + server)
+- Kahan: normal browser me reload button lamba dabao -> **📥 Downloads**; floating me ⚙ -> **📥 Downloads (phone + server)**.
+- Ek screen me do hisse: **📱 Phone par** (speed/ETA/pause/resume pehle jaisa) aur **☁ Server par** (jo link server ko bheje: ⬇, ⬇ Sab, direct mode).
+- Server rows ki state server se hi aati hai (har 3 sec): ⏳ queue me, ⬇ download ho raha (% aur size), ✅ **Server ne confirm kiya** (size + path jaise `aic:/video/x/naam.mp4`), 🚫 site se hata di gayi, ❌ fail (wajah), ❓ server ko yaad nahi (restart).
+- Server row par tap: ✕ cancel, 🔍 **server par file check** (WebDAV se pooch ke size batata hai), 🔗 link copy, list se hatao. 🧹 "Done saaf" dono jagah ki khatam hui entries hata deta hai (files safe).
+- Record phone me ~500 entries tak yaad rehta hai, to server restart ke baad bhi "ab tak ki downloads" dikhti hain.
 
 ## Pehli baar floating chalane par
 - Notification permission (Android 13+) allow karo

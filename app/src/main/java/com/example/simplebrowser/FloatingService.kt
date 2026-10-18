@@ -1351,7 +1351,7 @@ class FloatingService : Service() {
             dlBtn.setOnClickListener { Downloader.manager(ctx, true) }
             col.addView(dlBtn, lp)
 
-            val dlQueueBtn = blueButton("📥 Download queue (speed / ETA)")
+            val dlQueueBtn = blueButton("📥 Downloads (phone + server)")
             dlQueueBtn.setOnClickListener { DlUi.queue(ctx, true) }
             col.addView(dlQueueBtn, lp)
 
