@@ -1116,29 +1116,6 @@ class FloatingService : Service() {
                 }
             }
 
-            // <select> dropdown: JS ne pakda, yahan overlay dialog me list dikhao
-            @JavascriptInterface
-            fun pickSelect(json: String?) {
-                handler.post {
-                    try {
-                        val o = org.json.JSONObject(json ?: return@post)
-                        val arr = o.getJSONArray("o")
-                        val labels = ArrayList<String>()
-                        val off = HashSet<Int>()
-                        for (i in 0 until arr.length()) {
-                            val it = arr.getJSONObject(i)
-                            labels.add(it.optString("t"))
-                            if (it.optInt("d", 0) == 1) off.add(i)
-                        }
-                        if (labels.isEmpty()) return@post
-                        DlUi.selectPick(ctx, true, o.optString("title"), labels, o.optInt("i", -1)) { idx ->
-                            if (idx !in off) webView.evaluateJavascript("window.__lionSelSet && window.__lionSelSet(" + idx + ")", null)
-                        }
-                    } catch (e: Exception) {
-                    }
-                }
-            }
-
             // page par naya touch aaya aur koi selection nahi: bar turant hata do
             @JavascriptInterface
             fun onTap() {
@@ -1149,71 +1126,6 @@ class FloatingService : Service() {
                 }
             }
         }
-
-        // <select> dropdown fix: floating (overlay) window me native popup nahi khulta.
-        // Tap pakad ke apni list dikhate hain; chunne par value set + input/change event.
-        private val selectJs = """
-(function () {
-  if (window.__lionSel) return;
-  window.__lionSel = 1;
-  var tx = 0, ty = 0, moved = false, lastOpen = 0;
-  function selOf(ev) {
-    var t = ev.target;
-    var s = t && t.closest ? t.closest('select') : null;
-    if (!s || s.disabled || s.multiple || s.size > 1) return null;
-    return s;
-  }
-  function label(s) {
-    var l = s.getAttribute('aria-label') || '';
-    if (!l && s.labels && s.labels[0]) l = s.labels[0].textContent || '';
-    if (!l) l = s.name || s.id || '';
-    return l.replace(/\s+/g, ' ').trim();
-  }
-  function openSel(s) {
-    var now = Date.now();
-    if (now - lastOpen < 500) return;
-    lastOpen = now;
-    var opts = [];
-    for (var i = 0; i < s.options.length; i++) {
-      var o = s.options[i];
-      opts.push({ t: (o.text || o.label || o.value || '').replace(/\s+/g, ' ').trim(), d: (o.disabled ? 1 : 0) });
-    }
-    window.__lionSelEl = s;
-    try { s.blur(); } catch (e) {}
-    try { LionBridge.pickSelect(JSON.stringify({ i: s.selectedIndex, o: opts, title: label(s) })); } catch (e) {}
-  }
-  window.__lionSelSet = function (i) {
-    var s = window.__lionSelEl;
-    if (!s || i < 0 || i >= s.options.length) return;
-    s.selectedIndex = i;
-    s.dispatchEvent(new Event('input', { bubbles: true }));
-    s.dispatchEvent(new Event('change', { bubbles: true }));
-  };
-  document.addEventListener('touchstart', function (ev) {
-    var t = ev.touches && ev.touches[0];
-    if (t) { tx = t.clientX; ty = t.clientY; moved = false; }
-  }, { capture: true, passive: true });
-  document.addEventListener('touchmove', function (ev) {
-    var t = ev.touches && ev.touches[0];
-    if (t && (Math.abs(t.clientX - tx) > 10 || Math.abs(t.clientY - ty) > 10)) moved = true;
-  }, { capture: true, passive: true });
-  document.addEventListener('touchend', function (ev) {
-    var s = selOf(ev);
-    if (!s || moved) return;
-    ev.preventDefault();
-    openSel(s);
-  }, { capture: true, passive: false });
-  ['mousedown', 'click'].forEach(function (n) {
-    document.addEventListener(n, function (ev) {
-      var s = selOf(ev);
-      if (!s) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (n === 'click') openSel(s);
-    }, true);
-  });
-})();
-""".trimIndent()
 
         private val scrollJs = """
             (function () {
@@ -1954,6 +1866,7 @@ class FloatingService : Service() {
             webView.isLongClickable = true
             webView.setOnLongClickListener { false }
             webView.addJavascriptInterface(Bridge(), "LionBridge")
+            SelectFix.install(webView, ctx, true)
 
             // file download: Abhi / Schedule dialog (overlay)
             webView.addJavascriptInterface(BlobDl.Bridge(ctx.applicationContext), BlobDl.BRIDGE_NAME)
@@ -1969,14 +1882,14 @@ class FloatingService : Service() {
                     editFocused = false
                     updateCopyBar()
                     VideoDetect.inject(view)
-                    view?.evaluateJavascript(selectJs, null)
+                    SelectFix.inject(view)
                 }
 
                 override fun onPageFinished(view: WebView?, pageUrl: String?) {
                     CookieManager.getInstance().flush()
                     view?.evaluateJavascript(selectionJs, null)
                     view?.evaluateJavascript(scrollJs, null)
-                    view?.evaluateJavascript(selectJs, null)
+                    SelectFix.inject(view)
                     VideoDetect.inject(view)
                     swipeRefresh.isRefreshing = false
                     History.touchTitle(ctx, pageUrl, view?.title)

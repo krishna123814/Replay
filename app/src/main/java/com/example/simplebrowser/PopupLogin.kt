@@ -51,6 +51,7 @@ object PopupLogin {
                 userAgentString = cleanUa(ctx)
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(pw, true)
+            SelectFix.install(pw, ctx, overlay)
 
             val dlg = Dialog(themed)
             val frame = FrameLayout(themed)
@@ -76,6 +77,7 @@ object PopupLogin {
                 override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean = false
                 override fun onPageFinished(v: WebView?, url: String?) {
                     CookieManager.getInstance().flush()
+                    SelectFix.inject(v)
                 }
             }
             pw.webChromeClient = object : WebChromeClient() {
