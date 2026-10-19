@@ -53,11 +53,13 @@ class HomeActivity : AppCompatActivity() {
     // live capacity (har card par % khaali + free + patti)
     private lateinit var capAic: CapHolder
     private lateinit var capHf: CapHolder
+    private lateinit var capHf2: CapHolder
     private lateinit var capLocal: CapHolder
     private val volCaps = HashMap<String, CapHolder>()
     private lateinit var favBox: LinearLayout
     private lateinit var homeSwipe: SwipeRefreshLayout
     private var hfProbed = false
+    private var hf2Probed = false
     private var tickN = 0
     private val liveTask = object : Runnable {
         override fun run() {
@@ -206,6 +208,7 @@ class HomeActivity : AppCompatActivity() {
             }
         }
         hf2Sub.text = "Check ho raha hai…"
+        capHf2 = addCap(hf2Card)
 
         localSub = TextView(this)
         val localCard = card(Store.LOCAL, localSub) { openLocal() }
@@ -452,7 +455,7 @@ class HomeActivity : AppCompatActivity() {
     private fun updateHfCap() {
         if (!::capHf.isInitialized || hfReason != null) return
         val c = CapLive.hfCached(this)
-        val scanning = CapLive.hfScanning
+        val scanning = CapLive.hfScanning(Store.HF)
         if (c == null) {
             capHf.set(null, "Capacity " + fmtSize(Analyzer.HF_CAPACITY) + (if (scanning) " · ⟳ use nikaal raha hu…" else ""))
         } else {
@@ -460,7 +463,19 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshHfCap() = updateHfCap()
+    /** HF2 card ki capacity (HF jaisi hi). */
+    private fun updateHf2Cap() {
+        if (!::capHf2.isInitialized || hf2Reason != null) return
+        val c = CapLive.hfCached(this, Store.HF2)
+        val scanning = CapLive.hfScanning(Store.HF2)
+        if (c == null) {
+            capHf2.set(null, "Capacity " + fmtSize(Analyzer.HF_CAPACITY) + (if (scanning) " · ⟳ use nikaal raha hu…" else ""))
+        } else {
+            capHf2.set(c, if (scanning) " · ⟳ refresh ho raha hai…" else "")
+        }
+    }
+
+    private fun refreshHfCap() { updateHfCap(); updateHf2Cap() }
 
     /** Har ~3 sec: phone + SD/USB seedha; AIC har ~9 sec; HF apne aap (quota ya background scan). */
     private fun updateCaps(force: Boolean) {
@@ -478,8 +493,16 @@ class HomeActivity : AppCompatActivity() {
         if (hfProbed && hfReason == null) {
             updateHfCap()
             if (force || tickN % 3 == 0) {
-                CapLive.hfTick(applicationContext, force) {
+                CapLive.hfTick(applicationContext, Store.HF, force) {
                     if (!isFinishing && !isDestroyed) updateHfCap()
+                }
+            }
+        }
+        if (hf2Probed && hf2Reason == null) {
+            updateHf2Cap()
+            if (force || tickN % 3 == 0) {
+                CapLive.hfTick(applicationContext, Store.HF2, force) {
+                    if (!isFinishing && !isDestroyed) updateHf2Cap()
                 }
             }
         }
@@ -599,11 +622,14 @@ class HomeActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed || !::hf2Sub.isInitialized) return@runOnUiThread
                 hf2Reason = reason
+                hf2Probed = true
                 if (reason == null) {
                     hf2Sub.text = "Hugging Face Storage Bucket 2 (dusra account)"
+                    updateHf2Cap()
                     hf2Card.alpha = 1f
                 } else {
                     hf2Sub.text = "❌ $reason"
+                    capHf2.set(null)
                     hf2Card.alpha = 0.5f
                 }
             }

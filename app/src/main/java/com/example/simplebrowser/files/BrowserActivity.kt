@@ -118,6 +118,7 @@ class BrowserActivity : AppCompatActivity() {
 
     private var gridMode = false
     private var sortMode = 0
+    private var hideDots = false
     private var videoThumbs = true
 
     // multi-select
@@ -167,6 +168,7 @@ class BrowserActivity : AppCompatActivity() {
         gridMode = Session.bool(this, "grid", false)
         sortMode = Session.int(this, "sort", 0).coerceIn(0, sortNames.size - 1)
         videoThumbs = Session.bool(this, "vthumbs", true)
+        hideDots = Session.bool(this, "hidedots", false)
 
         buildUi()
 
@@ -1467,10 +1469,11 @@ class BrowserActivity : AppCompatActivity() {
     private fun applyFilter() {
         val q = query.trim()
         val filtering = searching && q.isNotEmpty()
+        val base = if (hideDots) entries.filter { !it.name.startsWith(".") } else entries
         shown = when {
-            !filtering -> entries
+            !filtering -> base
             deep -> deepResults
-            else -> entries.filter { it.name.contains(q, ignoreCase = true) }
+            else -> base.filter { it.name.contains(q, ignoreCase = true) }
         }
         adapter.items = shown
         adapter.notifyDataSetChanged()
@@ -1506,6 +1509,7 @@ class BrowserActivity : AppCompatActivity() {
                 val kids = try { Fs.list(d) } catch (e: Exception) { continue }
                 val rel = Uri.decode(d.removePrefix(base)).trim('/')
                 for (k in kids) {
+                    if (hideDots && k.name.startsWith(".")) continue
                     if (k.isDir) dq.add(k.url)
                     if (k.name.contains(q, ignoreCase = true)) found.add(k.copy(sub = rel))
                 }
@@ -1716,15 +1720,14 @@ class BrowserActivity : AppCompatActivity() {
     private fun refreshCap() {
         when (store) {
             Store.LOCAL -> setCap(CapLive.local(localRoot?.let { File(it) } ?: LocalFs.rootDir()))
-            Store.HF -> {
-                val c = CapLive.hfCached(this)
+            Store.HF, Store.HF2 -> {
+                val c = CapLive.hfCached(this, store)
                 if (c != null) setCap(c)
                 else capTv.apply {
                     visibility = View.VISIBLE
                     text = "☁️ capacity " + fmtSize(Analyzer.HF_CAPACITY) + " (Home par use nikalta hai)"
                 }
             }
-            Store.HF2 -> setCap(null)          // HF2 ki capacity yahan nahi dikhti (Home / Analyze me scan se)
             else -> io.execute {
                 val c = CapLive.aic()
                 runOnUiThread { if (!isFinishing && c != null) setCap(c) }
@@ -1785,6 +1788,11 @@ class BrowserActivity : AppCompatActivity() {
             AnalyzeUi(this, store, rootUrl, storeLabel).show(if (currentUrl.isEmpty()) rootUrl else currentUrl)
         })
         acts.add("↕ Sort: ${sortNames[sortMode]}" to { showSort() })
+        acts.add("👁 Hidden (. wale) folders: " + (if (hideDots) "CHHUPE HAIN → dikhao" else "DIKH RAHE HAIN → chhupao") to {
+            hideDots = !hideDots
+            Session.setBool(this, "hidedots", hideDots)
+            applyFilter()
+        })
         acts.add(
             ("🎞 Video thumbnails: " + (if (videoThumbs) "ON" else "OFF") +
                 (if (store.isHf) " (" + store.short + " par hamesha OFF)" else "")) to {

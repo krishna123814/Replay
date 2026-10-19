@@ -53,14 +53,20 @@ object CapLive {
     private const val STALE_MS = 15L * 60 * 1000
     private const val QUOTA_EVERY_MS = 60L * 1000
 
-    @Volatile private var hfQuotaUsed: Long? = null
-    @Volatile private var hfQuotaAt = 0L
-    private val hfBusy = AtomicBoolean(false)
-    @Volatile private var scanCancel = AtomicBoolean(false)
+    /** HF aur HF2 ka alag-alag state (quota, scan, busy). */
+    private class HfState {
+        @Volatile var quotaUsed: Long? = null
+        @Volatile var quotaAt = 0L
+        val busy = AtomicBoolean(false)
+        @Volatile var scanCancel = AtomicBoolean(false)
+        @Volatile var scanning = false
+    }
+
+    private val hfStates = mapOf(Store.HF to HfState(), Store.HF2 to HfState())
+    private fun st(store: Store): HfState = hfStates[store] ?: hfStates.getValue(Store.HF)
 
     /** Scan / quota check chal raha hai? */
-    @Volatile private var scanning = false
-    val hfScanning: Boolean get() = scanning
+    fun hfScanning(store: Store = Store.HF): Boolean = st(store).scanning
 
     private fun ago(ms: Long): String {
         val m = ((System.currentTimeMillis() - ms) / 60000L).coerceAtLeast(0L)
@@ -72,15 +78,15 @@ object CapLive {
     }
 
     /** Network ke bina: server quota ya pichla scan. Dono nahi to null. */
-    fun hfCached(ctx: Context): Cap? {
-        val q = hfQuotaUsed
+    fun hfCached(ctx: Context, store: Store = Store.HF): Cap? {
+        val q = st(store).quotaUsed
         if (q != null) return Cap(q, Analyzer.HF_CAPACITY, " · server se")
-        val c = Analyzer.cachedUsed(ctx, "hf") ?: return null
+        val c = Analyzer.cachedUsed(ctx, store.id) ?: return null
         return Cap(c.first, Analyzer.HF_CAPACITY, " · " + ago(c.second))
     }
 
     fun cancelScan() {
-        scanCancel.set(true)
+        for (s in hfStates.values) s.scanCancel.set(true)
     }
 
     private const val QBODY =
@@ -104,36 +110,37 @@ object CapLive {
     }
 
     /**
-     * HF ka use apne aap taaza rakho. Sasta check har baar; asli scan sirf tab jab pichla 15 min se purana ho
+     * HF / HF2 ka use apne aap taaza rakho. Sasta check har baar; asli scan sirf tab jab pichla 15 min se purana ho
      * (ya force). Pichhle scan ke baad `onDone` main thread par.
      */
-    fun hfTick(ctx: Context, force: Boolean, onDone: () -> Unit) {
-        if (!hfBusy.compareAndSet(false, true)) return
+    fun hfTick(ctx: Context, store: Store, force: Boolean, onDone: () -> Unit) {
+        val state = st(store)
+        if (!state.busy.compareAndSet(false, true)) return
         val app = ctx.applicationContext
         bg.execute {
             try {
                 val now = System.currentTimeMillis()
-                if (force || now - hfQuotaAt > QUOTA_EVERY_MS) {
-                    hfQuotaAt = now
-                    hfQuotaUsed = probeQuota(Storages.root(Store.HF))
+                if (force || now - state.quotaAt > QUOTA_EVERY_MS) {
+                    state.quotaAt = now
+                    state.quotaUsed = probeQuota(Storages.root(store))
                 }
-                if (hfQuotaUsed == null) {
-                    val c = Analyzer.cachedUsed(app, "hf")
+                if (state.quotaUsed == null) {
+                    val c = Analyzer.cachedUsed(app, store.id)
                     val stale = c == null || now - c.second > STALE_MS
                     if (force || stale) {
                         val cancel = AtomicBoolean(false)
-                        scanCancel = cancel
-                        scanning = true
+                        state.scanCancel = cancel
+                        state.scanning = true
                         main.post { onDone() }                  // "scan ho raha hai" dikhane ke liye
-                        val r = Analyzer.analyze(Dav.withSlash(Storages.root(Store.HF)), cancel) { }
-                        if (!r.cancelled && r.failed == 0) Analyzer.saveUsed(app, "hf", r.total)
+                        val r = Analyzer.analyze(Dav.withSlash(Storages.root(store)), cancel) { }
+                        if (!r.cancelled && r.failed == 0) Analyzer.saveUsed(app, store.id, r.total)
                     }
                 }
             } catch (e: Exception) {
                 // network / login dikkat: pichla cache hi dikhta rahega
             } finally {
-                scanning = false
-                hfBusy.set(false)
+                state.scanning = false
+                state.busy.set(false)
                 main.post { onDone() }
             }
         }
