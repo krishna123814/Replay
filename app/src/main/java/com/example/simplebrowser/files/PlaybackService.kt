@@ -6,8 +6,14 @@ import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
@@ -21,7 +27,10 @@ class PlaybackService : MediaSessionService() {
 
     companion object {
         @Volatile var inst: PlaybackService? = null
+        private const val CACHE_MB = 512L
     }
+
+    private var cache: SimpleCache? = null
 
     fun pauseNow() {
         session?.player?.pause()
@@ -31,8 +40,36 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         inst = this
 
-        val dsFactory = DefaultDataSource.Factory(this, OkHttpDataSource.Factory(Dav.client))
-        val player = ExoPlayer.Builder(this)
+        val netFactory = DefaultDataSource.Factory(this, OkHttpDataSource.Factory(Dav.client))
+        // Disk cache: seek / dobara dekhne par wahi bytes server se dobara nahi khinchte; cache fail ho to seedha network.
+        val dsFactory = try {
+            val c = SimpleCache(
+                java.io.File(cacheDir, "media_cache"),
+                LeastRecentlyUsedCacheEvictor(CACHE_MB * 1024 * 1024),
+                StandaloneDatabaseProvider(this)
+            )
+            cache = c
+            CacheDataSource.Factory()
+                .setCache(c)
+                .setUpstreamDataSourceFactory(netFactory)
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        } catch (e: Throwable) {
+            netFactory
+        }
+        // Bada buffer: 1080p high-bitrate me thoda net dheema hote hi video na ruke.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 60_000,
+                /* maxBufferMs = */ 120_000,
+                /* bufferForPlaybackMs = */ 2_500,
+                /* bufferForPlaybackAfterRebufferMs = */ 8_000
+            )
+            .setTargetBufferBytes(64 * 1024 * 1024)
+            .setBackBuffer(15_000, true)
+            .build()
+        val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
+        val player = ExoPlayer.Builder(this, renderers)
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dsFactory))
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
@@ -63,6 +100,8 @@ class PlaybackService : MediaSessionService() {
             it.release()
         }
         session = null
+        try { cache?.release() } catch (e: Throwable) { }
+        cache = null
         super.onDestroy()
     }
 }

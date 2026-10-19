@@ -78,4 +78,5 @@ dependencies {
     implementation("androidx.media3:media3-ui:$media3")
     implementation("androidx.media3:media3-session:$media3")
     implementation("androidx.media3:media3-datasource-okhttp:$media3")
+    implementation("androidx.media3:media3-database:$media3")
 }
