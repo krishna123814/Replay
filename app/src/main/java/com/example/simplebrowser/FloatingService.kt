@@ -39,6 +39,7 @@ import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.RenderProcessGoneDetail
@@ -1986,6 +1987,51 @@ class FloatingService : Service() {
                     } catch (e: Exception) {
                         result.cancel()
                         false
+                    }
+                }
+
+                // JS confirm(): overlay window me default dialog nahi khulta tha, isliye
+                // confirm() hamesha false deta tha (Clear All / Sync All jaise buttons chup-chap
+                // fail hote the). Ab onJsPrompt jaise overlay-type dialog se OK/Cancel milta hai.
+                override fun onJsConfirm(
+                    view: WebView?, url: String?, message: String?, result: JsResult?
+                ): Boolean {
+                    if (result == null) return false
+                    return try {
+                        val themed = ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        val dialog = AlertDialog.Builder(themed)
+                            .setMessage(message)
+                            .setPositiveButton("OK") { _, _ -> result.confirm() }
+                            .setNegativeButton("Cancel") { _, _ -> result.cancel() }
+                            .setOnCancelListener { result.cancel() }
+                            .create()
+                        dialog.window?.setType(overlayType())
+                        dialog.show()
+                        true
+                    } catch (e: Exception) {
+                        result.cancel()
+                        true
+                    }
+                }
+
+                // JS alert(): same reason — overlay me default alert nahi dikhta tha.
+                override fun onJsAlert(
+                    view: WebView?, url: String?, message: String?, result: JsResult?
+                ): Boolean {
+                    if (result == null) return false
+                    return try {
+                        val themed = ContextThemeWrapper(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        val dialog = AlertDialog.Builder(themed)
+                            .setMessage(message)
+                            .setPositiveButton("OK") { _, _ -> result.confirm() }
+                            .setOnCancelListener { result.confirm() }
+                            .create()
+                        dialog.window?.setType(overlayType())
+                        dialog.show()
+                        true
+                    } catch (e: Exception) {
+                        result.confirm()
+                        true
                     }
                 }
 
