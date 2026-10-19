@@ -12,7 +12,9 @@ data class Entry(
     val url: String,
     val isDir: Boolean,
     val size: Long,
-    val modified: Long
+    val modified: Long,
+    /** Search result: current folder se relative parent folder (khaali = isi folder ka). */
+    val sub: String = ""
 ) {
     val kind: Kind = Kinds.of(name, isDir)
 }

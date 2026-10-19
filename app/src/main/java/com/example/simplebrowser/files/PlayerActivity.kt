@@ -2,6 +2,7 @@ package com.example.simplebrowser.files
 
 import android.app.PictureInPictureParams
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -16,16 +17,23 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.Environment
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Rational
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.PixelCopy
+import android.view.SurfaceView
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -51,6 +59,9 @@ import androidx.media3.session.SessionToken
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -60,6 +71,8 @@ import kotlin.math.roundToInt
 /**
  * Video + music player. Video: brightness / volume / seek gestures, double-tap seek, rotate, lock, speed,
  * aspect ratio, audio + subtitle tracks, PiP. Music: shuffle / repeat, album art, sleep timer, queue.
+ * Action row (top bar ke neeche): prev / -10s / +10s / next, repeat, A-B loop, favourite, rename, info,
+ * screenshot, mute, night dim, delete.
  */
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -70,6 +83,13 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var audioIcon: TextView
     private lateinit var hud: TextView
     private lateinit var lockBtn: TextView
+    private lateinit var dimView: View
+    private lateinit var repeatBtn: TextView
+    private lateinit var abBtn: TextView
+    private lateinit var favBtn: TextView
+    private lateinit var shotBtn: TextView
+    private lateinit var muteBtn: TextView
+    private lateinit var dimBtn: TextView
     private var future: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     private var isVideo = true
@@ -103,6 +123,23 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    // A-B repeat / mute / night dim
+    private var abA = -1L
+    private var abB = -1L
+    private var muted = false
+    private var dimIdx = 0
+    private val dimAlphas = floatArrayOf(0f, 0.35f, 0.6f, 0.8f)
+
+    private val abTick = object : Runnable {
+        override fun run() {
+            val c = controller
+            if (c != null && abA >= 0 && abB > abA) {
+                if (c.currentPosition >= abB) c.seekTo(abA)
+                handler.postDelayed(this, 200L)
+            }
+        }
+    }
+
     private val hideHud = Runnable { hud.visibility = View.GONE }
     private val hideLock = Runnable { if (locked) lockBtn.visibility = View.GONE }
 
@@ -113,6 +150,15 @@ class PlayerActivity : AppCompatActivity() {
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (!isVideo) loadArt(mediaItem)
+            // agli / pichli file par jaane par A-B loop band (rename / delete ka apna handling hai)
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK
+            ) clearAb(false)
+            refreshFav()
+        }
+
+        override fun onRepeatModeChanged(repeatMode: Int) {
+            syncRepeat()
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -165,6 +211,14 @@ class PlayerActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
+        // night dim overlay (video ke upar, controls ke neeche; touch nahi rokta)
+        dimView = View(this)
+        dimView.setBackgroundColor(Color.BLACK)
+        dimView.alpha = 0f
+        root.addView(dimView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
         audioIcon = TextView(this)
         audioIcon.text = "🎵"
         audioIcon.textSize = 96f
@@ -174,22 +228,30 @@ class PlayerActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
-        // top bar: ← title 🔒 ⟳ ⋮
+        // top bar: (← title 🔒 ⟳ ⋮) + neeche action row
         topBar = LinearLayout(this)
-        topBar.orientation = LinearLayout.HORIZONTAL
-        topBar.gravity = Gravity.CENTER_VERTICAL
+        topBar.orientation = LinearLayout.VERTICAL
         topBar.setBackgroundColor(0x88000000.toInt())
         topBar.setPadding(dp(6), dp(8), dp(6), dp(4))
+        val topRow = LinearLayout(this)
+        topRow.orientation = LinearLayout.HORIZONTAL
+        topRow.gravity = Gravity.CENTER_VERTICAL
         titleView = TextView(this)
         titleView.setTextColor(Color.WHITE)
         titleView.textSize = 15f
         titleView.maxLines = 2
         titleView.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        topBar.addView(iconBtn("←") { finish() })
-        topBar.addView(titleView)
-        topBar.addView(iconBtn("🔒") { setLocked(true) })
-        topBar.addView(iconBtn("⟳") { cycleOrientation() })
-        topBar.addView(iconBtn("⋮") { showMenu() })
+        topRow.addView(iconBtn("←") { finish() })
+        topRow.addView(titleView)
+        topRow.addView(iconBtn("🔒") { setLocked(true) })
+        topRow.addView(iconBtn("⟳") { cycleOrientation() })
+        topRow.addView(iconBtn("⋮") { showMenu() })
+        topBar.addView(topRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        topBar.addView(buildActionRow(), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
         root.addView(topBar, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP
         ))
@@ -234,6 +296,8 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun applyMode() {
         audioIcon.visibility = if (isVideo) View.GONE else View.VISIBLE
+        shotBtn.visibility = if (isVideo) View.VISIBLE else View.GONE
+        dimBtn.visibility = if (isVideo) View.VISIBLE else View.GONE
         if (isVideo) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             playerView.controllerShowTimeoutMs = 3000
@@ -448,6 +512,501 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    // ───────────────────────── action row (delete / rename / info / ...) ─────────────────────────
+
+    private fun actBtn(t: String, sizeSp: Float = 18f, onClick: () -> Unit): TextView {
+        val b = TextView(this)
+        b.text = t
+        b.textSize = sizeSp
+        b.setTextColor(Color.WHITE)
+        b.gravity = Gravity.CENTER
+        b.minimumWidth = dp(44)
+        b.setPadding(dp(8), 0, dp(8), 0)
+        b.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40))
+        b.setOnClickListener { onClick() }
+        return b
+    }
+
+    /** Button "on" ho to halka gola background. */
+    private fun mark(b: TextView, on: Boolean) {
+        if (on) {
+            val g = GradientDrawable()
+            g.setColor(0x55FFFFFF)
+            g.cornerRadius = dp(10).toFloat()
+            b.background = g
+        } else {
+            b.background = null
+        }
+    }
+
+    private fun buildActionRow(): View {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.addView(actBtn("⏮") { prevItem() })
+        row.addView(actBtn("⏪10", 14f) { controller?.let { seekBy(it, -10_000L) } })
+        row.addView(actBtn("10⏩", 14f) { controller?.let { seekBy(it, 10_000L) } })
+        row.addView(actBtn("⏭") { nextItem() })
+        repeatBtn = actBtn("🔁") { cycleRepeat() }
+        row.addView(repeatBtn)
+        abBtn = actBtn("A-B", 14f) { cycleAb() }
+        row.addView(abBtn)
+        favBtn = actBtn("☆") { toggleFav() }
+        row.addView(favBtn)
+        row.addView(actBtn("✏️") { renameCurrent() })
+        row.addView(actBtn("ℹ️") { showInfo() })
+        shotBtn = actBtn("📸") { screenshot() }
+        row.addView(shotBtn)
+        muteBtn = actBtn("🔊") { toggleMute() }
+        row.addView(muteBtn)
+        dimBtn = actBtn("🌙") { cycleDim() }
+        row.addView(dimBtn)
+        row.addView(actBtn("🗑") { confirmDeleteCurrent() })
+        syncRepeat()
+        syncAb()
+
+        val sv = HorizontalScrollView(this)
+        sv.isHorizontalScrollBarEnabled = false
+        sv.addView(row)
+        // row par haath rakhte hi controls 3 sec ke liye wapas taaza
+        sv.setOnTouchListener { _, ev ->
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN && isVideo && !locked) playerView.showController()
+            false
+        }
+        return sv
+    }
+
+    private fun storeOf(url: String): Store = Storages.storeOfUrl(url)
+
+    private fun entryFor(url: String, name: String): Entry =
+        Queue.media.firstOrNull { it.url == url } ?: Entry(name, url, false, 0L, 0L)
+
+    private fun indexOfUrl(c: MediaController, url: String): Int {
+        for (i in 0 until c.mediaItemCount) if (c.getMediaItemAt(i).mediaId == url) return i
+        return -1
+    }
+
+    // ── prev / next
+    private fun prevItem() {
+        val c = controller ?: return
+        if (c.hasPreviousMediaItem()) c.seekToPreviousMediaItem() else showHud("Pichla koi nahi")
+    }
+
+    private fun nextItem() {
+        val c = controller ?: return
+        if (c.hasNextMediaItem()) c.seekToNextMediaItem() else showHud("Aage koi nahi")
+    }
+
+    // ── repeat
+    private fun cycleRepeat() {
+        val c = controller ?: return
+        val m = when (c.repeatMode) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
+            Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
+        c.repeatMode = m
+        showHud(
+            when (m) {
+                Player.REPEAT_MODE_ONE -> "🔂 Ye file repeat"
+                Player.REPEAT_MODE_ALL -> "🔁 Poori queue repeat"
+                else -> "Repeat band"
+            }
+        )
+    }
+
+    private fun syncRepeat() {
+        val m = controller?.repeatMode ?: Player.REPEAT_MODE_OFF
+        repeatBtn.text = if (m == Player.REPEAT_MODE_ONE) "🔂" else "🔁"
+        mark(repeatBtn, m != Player.REPEAT_MODE_OFF)
+    }
+
+    // ── A-B repeat: 1st tap = A, 2nd tap = B (loop shuru), 3rd tap = band
+    private fun cycleAb() {
+        val c = controller ?: return
+        when {
+            abA < 0 -> {
+                abA = c.currentPosition
+                showHud("🅰 Start: ${fmtTime(abA)}\nAb end point lagao")
+            }
+            abB < 0 -> {
+                val p = c.currentPosition
+                if (p <= abA + 500L) {
+                    showHud("End point start se aage hona chahiye")
+                    return
+                }
+                abB = p
+                handler.removeCallbacks(abTick)
+                handler.post(abTick)
+                showHud("🔁 A-B loop\n${fmtTime(abA)} → ${fmtTime(abB)}")
+            }
+            else -> {
+                clearAb(true)
+                return
+            }
+        }
+        syncAb()
+    }
+
+    private fun clearAb(msg: Boolean) {
+        val was = abA >= 0
+        abA = -1L
+        abB = -1L
+        handler.removeCallbacks(abTick)
+        if (msg && was) showHud("A-B loop band")
+        syncAb()
+    }
+
+    private fun syncAb() {
+        abBtn.text = when {
+            abA < 0 -> "A-B"
+            abB < 0 -> "A-?"
+            else -> "A⇄B"
+        }
+        mark(abBtn, abA >= 0)
+    }
+
+    // ── favourite
+    private fun toggleFav() {
+        val item = controller?.currentMediaItem ?: return
+        val url = item.mediaId
+        val name = item.mediaMetadata.title?.toString() ?: url.substringAfterLast('/')
+        try {
+            val s = storeOf(url)
+            val on = Favs.toggle(this, s, Storages.pathOf(s, url), name, false)
+            showHud(if (on) "⭐ Favourite me joda" else "☆ Favourite se hata diya")
+        } catch (e: Exception) {
+            Toast.makeText(this, "Favourite nahi hua: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+        refreshFav()
+    }
+
+    private fun refreshFav() {
+        if (!::favBtn.isInitialized) return
+        val url = controller?.currentMediaItem?.mediaId
+        val on = try {
+            if (url == null) false else {
+                val s = storeOf(url)
+                Favs.has(this, s, Storages.pathOf(s, url))
+            }
+        } catch (e: Exception) {
+            false
+        }
+        favBtn.text = if (on) "⭐" else "☆"
+        mark(favBtn, on)
+    }
+
+    // ── mute / night dim
+    private fun toggleMute() {
+        val c = controller ?: return
+        muted = !muted
+        c.volume = if (muted) 0f else 1f
+        syncMute()
+        showHud(if (muted) "🔇 Mute" else "🔊 Awaaz on")
+    }
+
+    private fun syncMute() {
+        muteBtn.text = if (muted) "🔇" else "🔊"
+        mark(muteBtn, muted)
+    }
+
+    private fun cycleDim() {
+        dimIdx = (dimIdx + 1) % dimAlphas.size
+        dimView.alpha = dimAlphas[dimIdx]
+        mark(dimBtn, dimIdx != 0)
+        showHud(if (dimIdx == 0) "🌙 Night dim band" else "🌙 Night dim ${(dimAlphas[dimIdx] * 100).roundToInt()}%")
+    }
+
+    // ── info
+    private fun showInfo() {
+        val c = controller ?: return
+        val item = c.currentMediaItem ?: return
+        val url = item.mediaId
+        val name = item.mediaMetadata.title?.toString() ?: url.substringAfterLast('/')
+        val e = entryFor(url, name)
+        val local = LocalFs.isLocal(url)
+        var size = e.size
+        if (size <= 0L && local) size = localInfo(url, true)
+        val where = try {
+            val s = storeOf(url)
+            s.short + ": " + Storages.pathOf(s, url)
+        } catch (x: Exception) {
+            url
+        }
+        val sb = StringBuilder()
+        sb.append("Naam: ").append(name).append('\n')
+        if (size > 0) sb.append("Size: ").append(fmtSize(size)).append('\n')
+        if (c.duration > 0) sb.append("Length: ").append(fmtTime(c.duration)).append('\n')
+        val vs = c.videoSize
+        if (isVideo && vs.width > 0 && vs.height > 0) sb.append("Resolution: ${vs.width}×${vs.height}\n")
+        var mod = e.modified
+        if (mod <= 0L && local) mod = localInfo(url, false)
+        if (mod > 0) sb.append("Badla: ").append(fmtDate(mod)).append('\n')
+        sb.append("\n").append(where)
+        AlertDialog.Builder(this).setTitle("Info").setMessage(sb.toString()).setPositiveButton("OK", null).show()
+    }
+
+    private fun localInfo(url: String, size: Boolean): Long = try {
+        val f = LocalFs.fileOf(url)
+        if (size) f.length() else f.lastModified()
+    } catch (x: Exception) {
+        0L
+    }
+
+    // ── rename
+    private fun renameCurrent() {
+        val item = controller?.currentMediaItem ?: return
+        val url = item.mediaId
+        val oldName = item.mediaMetadata.title?.toString() ?: url.substringAfterLast('/')
+        val et = EditText(this)
+        et.setSingleLine()
+        et.setText(oldName)
+        val dot = oldName.lastIndexOf('.')
+        et.setSelection(0, if (dot > 0) dot else oldName.length)
+        val box = FrameLayout(this)
+        box.setPadding(dp(20), dp(8), dp(20), 0)
+        box.addView(et)
+        AlertDialog.Builder(this)
+            .setTitle("Rename")
+            .setView(box)
+            .setPositiveButton("OK") { _, _ ->
+                val n = et.text.toString().trim()
+                when {
+                    n.isEmpty() || n == oldName -> {}
+                    n.contains('/') -> Toast.makeText(this, "Naam me / nahi chalega", Toast.LENGTH_SHORT).show()
+                    else -> doRename(url, oldName, n)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun doRename(url: String, oldName: String, newName: String) {
+        val e = entryFor(url, oldName)
+        val dirUrl = url.substringBeforeLast('/')
+        val newUrl = if (LocalFs.isLocal(url)) {
+            LocalFs.urlOf(File(LocalFs.fileOf(url).parentFile, newName), false)
+        } else {
+            Dav.withSlash(dirUrl) + Uri.encode(newName)
+        }
+        Thread {
+            val err: String? = try {
+                Fs.rename(e, dirUrl, newName)
+                null
+            } catch (ex: Exception) {
+                ex.message ?: "error"
+            }
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (err != null) {
+                    Toast.makeText(this, "❌ $err", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                applyRenamed(url, newUrl, newName, e)
+            }
+        }.start()
+    }
+
+    private fun applyRenamed(url: String, newUrl: String, newName: String, e: Entry) {
+        // favourite ka path badla: purana hata kar naya jodo
+        try {
+            val s = storeOf(url)
+            val oldPath = Storages.pathOf(s, url)
+            if (Favs.has(this, s, oldPath)) {
+                Favs.remove(this, s, oldPath)
+                Favs.add(this, storeOf(newUrl), Storages.pathOf(storeOf(newUrl), newUrl), newName, false)
+            }
+        } catch (x: Exception) {
+        }
+        // memory queue / subtitle map
+        Queue.media = Queue.media.map { if (it.url == url) Entry(newName, newUrl, false, it.size, it.modified) else it }
+        val subs = Queue.subs.toMutableMap()
+        subs.remove(url)?.let { subs[newUrl] = it }
+        Queue.subs = subs
+        Queue.dirty = true
+
+        val c = controller
+        if (c != null) {
+            val i = indexOfUrl(c, url)
+            if (i >= 0) {
+                val old = c.getMediaItemAt(i)
+                val nu = old.buildUpon()
+                    .setUri(newUrl)
+                    .setMediaId(newUrl)
+                    .setMediaMetadata(old.mediaMetadata.buildUpon().setTitle(newName).build())
+                    .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(newUrl)).build())
+                    .build()
+                val isCur = i == c.currentMediaItemIndex
+                val pos = c.currentPosition
+                val playing = c.playWhenReady
+                c.replaceMediaItem(i, nu)
+                if (isCur) {
+                    c.seekTo(i, pos)
+                    c.playWhenReady = playing
+                    Session.setPos(this, newUrl, pos)
+                }
+                Session.setPos(this, url, 0L)
+            }
+        }
+        titleView.text = newName
+        refreshFav()
+        Toast.makeText(this, "Rename ho gaya", Toast.LENGTH_SHORT).show()
+    }
+
+    // ── delete
+    private fun confirmDeleteCurrent() {
+        val item = controller?.currentMediaItem ?: return
+        val url = item.mediaId
+        val name = item.mediaMetadata.title?.toString() ?: url.substringAfterLast('/')
+        val warn = when (storeOf(url)) {
+            Store.LOCAL -> "\n\n⚠ Phone se PERMANENTLY delete hoga (recycle bin nahi hai)."
+            Store.HF -> "\n\n⚠ HF Bucket se PERMANENTLY delete hoga. Trash nahi hai, wapas nahi aayega."
+            Store.HF2 -> "\n\n⚠ HF2 Bucket se PERMANENTLY delete hoga. Trash nahi hai, wapas nahi aayega."
+            else -> "\n\nWapas nahi aayegi."
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Delete?")
+            .setMessage(name + warn)
+            .setPositiveButton("Delete") { _, _ -> doDelete(url) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun doDelete(url: String) {
+        Thread {
+            val err: String? = try {
+                Fs.delete(url)
+                null
+            } catch (ex: Exception) {
+                ex.message ?: "error"
+            }
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                if (err != null) {
+                    Toast.makeText(this, "❌ $err", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                applyDeleted(url)
+            }
+        }.start()
+    }
+
+    private fun applyDeleted(url: String) {
+        try {
+            val s = storeOf(url)
+            Favs.remove(this, s, Storages.pathOf(s, url))
+        } catch (x: Exception) {
+        }
+        Session.setPos(this, url, 0L)
+        Queue.media = Queue.media.filter { it.url != url }
+        Queue.dirty = true
+        Toast.makeText(this, "Delete ho gayi", Toast.LENGTH_SHORT).show()
+
+        val c = controller
+        if (c == null) {
+            finish()
+            return
+        }
+        val i = indexOfUrl(c, url)
+        if (i < 0) return
+        val wasCurrent = i == c.currentMediaItemIndex
+        if (c.mediaItemCount <= 1) {
+            c.stop()
+            c.clearMediaItems()
+            finish()
+            return
+        }
+        if (wasCurrent) clearAb(false)
+        c.removeMediaItem(i)
+        if (wasCurrent) {
+            // agla item i par aa jata hai; delete hua item aakhri tha to ab ka aakhri item chalao
+            val n = c.mediaItemCount
+            c.seekTo(if (i < n) i else n - 1, 0L)
+            c.play()
+        }
+        refreshFav()
+    }
+
+    // ── screenshot (jo frame abhi dikh raha hai)
+    private fun screenshot() {
+        if (!isVideo) return
+        val v = playerView.videoSurfaceView
+        if (v is SurfaceView && v.width > 0 && v.height > 0) {
+            val bmp = Bitmap.createBitmap(v.width, v.height, Bitmap.Config.ARGB_8888)
+            try {
+                PixelCopy.request(v, bmp, { r ->
+                    if (r == PixelCopy.SUCCESS) saveShot(bmp) else shotFallback()
+                }, handler)
+                return
+            } catch (e: Throwable) {
+            }
+        } else if (v is TextureView) {
+            val b = v.bitmap
+            if (b != null) {
+                saveShot(b)
+                return
+            }
+        }
+        shotFallback()
+    }
+
+    /** PixelCopy na chale to MediaMetadataRetriever se isi position ka frame. */
+    private fun shotFallback() {
+        val c = controller ?: return
+        val url = c.currentMediaItem?.mediaId ?: return
+        val posUs = c.currentPosition * 1000L
+        artPool.execute {
+            var bmp: Bitmap? = null
+            val mmr = MediaMetadataRetriever()
+            try {
+                if (LocalFs.isLocal(url)) mmr.setDataSource(LocalFs.fileOf(url).path)
+                else mmr.setDataSource(url, hashMapOf("Authorization" to Session.auth()))
+                bmp = mmr.getFrameAtTime(posUs, MediaMetadataRetriever.OPTION_CLOSEST)
+            } catch (e: Throwable) {
+            } finally {
+                try {
+                    mmr.release()
+                } catch (e: Throwable) {
+                }
+            }
+            val got = bmp
+            if (got != null) saveShot(got)
+            else handler.post { Toast.makeText(this, "Screenshot nahi ho paya", Toast.LENGTH_SHORT).show() }
+        }
+    }
+
+    private fun saveShot(bmp: Bitmap) {
+        artPool.execute {
+            val name = "Lion_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".jpg"
+            var msg = ""
+            try {
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val cv = ContentValues()
+                    cv.put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    cv.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    cv.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Lion")
+                    cv.put(MediaStore.Images.Media.IS_PENDING, 1)
+                    val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+                        ?: throw java.io.IOException("MediaStore insert fail")
+                    contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                    cv.clear()
+                    cv.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    contentResolver.update(uri, cv, null, null)
+                    msg = "📸 Gallery me save: Pictures/Lion"
+                } else {
+                    val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: filesDir
+                    dir.mkdirs()
+                    val f = File(dir, name)
+                    f.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                    msg = "📸 Save: ${f.absolutePath}"
+                }
+            } catch (e: Throwable) {
+                msg = "Screenshot save nahi hua: ${e.message}"
+            }
+            handler.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+        }
+    }
+
     // ───────────────────────── menu ─────────────────────────
 
     private fun showMenu() {
@@ -641,6 +1200,11 @@ class PlayerActivity : AppCompatActivity() {
             applyPending(c)
             titleView.text = c.mediaMetadata.title ?: ""
             if (!isVideo) loadArt(c.currentMediaItem)
+            muted = c.volume == 0f
+            syncMute()
+            syncRepeat()
+            syncAb()
+            refreshFav()
             handler.postDelayed(ticker, 5000L)
         }, ContextCompat.getMainExecutor(this))
     }
@@ -715,6 +1279,11 @@ class PlayerActivity : AppCompatActivity() {
         if (c != null) {
             // video background me pause; audio chalta rahe (notification se control)
             if (isVideo) c.pause()
+            if (muted) {
+                c.volume = 1f
+                muted = false
+            }
+            handler.removeCallbacks(abTick)
             c.removeListener(listener)
         }
         playerView.player = null

@@ -34,6 +34,9 @@ class FileAdapter(
     var thumbPx: Int = 160
     var videoThumbs: Boolean = true
 
+    /** true = ye item favourite hai (naam ke aage ⭐). */
+    var isFav: (Entry) -> Boolean = { false }
+
     // Multi-select: selecting = mode ON; selected = chuni hui entries ke url (BrowserActivity ka live set)
     var selecting: Boolean = false
     var selected: Set<String> = emptySet()
@@ -68,15 +71,16 @@ class FileAdapter(
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         val e = items[position]
+        val label = if (isFav(e)) "⭐ " + e.name else e.name
         if (holder is ListVH) {
             holder.icon.text = Kinds.emoji(e.kind)
-            holder.name.text = e.name
-            holder.info.text =
-                if (e.isDir) fmtDate(e.modified) else fmtSize(e.size) + "  ·  " + fmtDate(e.modified)
+            holder.name.text = label
+            holder.info.text = (if (e.sub.isNotEmpty()) "📂 " + e.sub + "  ·  " else "") +
+                (if (e.isDir) fmtDate(e.modified) else fmtSize(e.size) + "  ·  " + fmtDate(e.modified))
             bindThumb(holder.thumb, e)
         } else if (holder is GridVH) {
             holder.icon.text = Kinds.emoji(e.kind)
-            holder.name.text = e.name
+            holder.name.text = label
             holder.badge.visibility = if (e.kind == Kind.VIDEO) View.VISIBLE else View.GONE
             bindThumb(holder.thumb, e)
         }

@@ -38,6 +38,13 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import java.io.IOException
 import java.io.File
+import android.os.FileObserver
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.CheckBox
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.max
@@ -75,7 +82,38 @@ class BrowserActivity : AppCompatActivity() {
     private val storeIcon: String get() = if (localRoot != null) (localIcon ?: "💾") else store.icon
     private var currentUrl = ""
     private val stack = ArrayList<String>()
-    private var entries: List<Entry> = emptyList()
+    private var entries: List<Entry> = emptyList()      // folder ki poori listing
+    private var shown: List<Entry> = emptyList()        // jo abhi screen par hai (search ke baad)
+
+    // search
+    private lateinit var searchBar: LinearLayout
+    private lateinit var searchEt: EditText
+    private lateinit var deepCb: CheckBox
+    private lateinit var searchBtn: TextView
+    private var searching = false
+    private var query = ""
+    private var deep = false
+    @Volatile private var deepResults: List<Entry> = emptyList()
+    private var deepRunning = false
+    private var deepCancel = AtomicBoolean(false)
+    private val searchTask = Runnable { onQueryChanged() }
+
+    // favourites
+    private lateinit var favBtn: TextView
+    private var favSet: Set<String> = emptySet()
+
+    // live capacity + live refresh
+    private lateinit var capTv: TextView
+    private var observer: FileObserver? = null
+    private val obsTask = Runnable { silentRefresh() }
+    private var lastSig = 0L
+    private val liveTask = object : Runnable {
+        override fun run() {
+            silentRefresh()
+            refreshCap()
+            ui.postDelayed(this, livePeriod())
+        }
+    }
     private var loadToken = 0
 
     private var gridMode = false
@@ -176,11 +214,21 @@ class BrowserActivity : AppCompatActivity() {
             Queue.dirty = false
             reload()
         }
+        if (::swipe.isInitialized) {
+            favSet = Favs.keys(this)
+            adapter.notifyDataSetChanged()
+            updateFavBtn()
+            startObserver()
+            ui.removeCallbacks(liveTask)
+            ui.postDelayed(liveTask, 800)
+        }
     }
 
     override fun onPause() {
         super.onPause()
         VolumeWatcher.removeListener(volCb)
+        ui.removeCallbacks(liveTask)
+        stopObserver()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -192,6 +240,8 @@ class BrowserActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         ui.removeCallbacksAndMessages(null)
+        deepCancel.set(true)
+        stopObserver()
         closeProgress()
         io.shutdown()
     }
@@ -211,6 +261,7 @@ class BrowserActivity : AppCompatActivity() {
 
     private fun storeColor(): Int = when (store) {
         Store.HF -> 0xFFEF6C00.toInt()
+        Store.HF2 -> 0xFF6A1B9A.toInt()
         Store.LOCAL -> 0xFF2E7D32.toInt()
         else -> 0xFF1565C0.toInt()
     }
@@ -263,15 +314,27 @@ class BrowserActivity : AppCompatActivity() {
         subTv.maxLines = 1
         subTv.ellipsize = TextUtils.TruncateAt.END
 
+        capTv = TextView(this)
+        capTv.setTextColor(Color.BLACK)
+        capTv.textSize = 11f
+        capTv.maxLines = 1
+        capTv.ellipsize = TextUtils.TruncateAt.END
+        capTv.visibility = View.GONE
+
         col.addView(titleTv)
         col.addView(subTv)
+        col.addView(capTv)
 
-        viewBtn = iconBtn(if (gridMode) "☰" else "▦") { toggleView() }
-        val more = iconBtn("⋮") { showMenu() }
+        viewBtn = iconBtn(if (gridMode) "☰" else "▦", 40) { toggleView() }
+        val more = iconBtn("⋮", 40) { showMenu() }
+        searchBtn = iconBtn("🔍", 40) { if (searching) closeSearch() else openSearch() }
+        favBtn = iconBtn("☆", 40) { toggleCurrentFav() }
 
         header.addView(back)
         header.addView(badge)
         header.addView(col)
+        header.addView(searchBtn)
+        header.addView(favBtn)
         header.addView(viewBtn)
         header.addView(more)
 
@@ -306,6 +369,8 @@ class BrowserActivity : AppCompatActivity() {
         rv.layoutManager = gridLm
         rv.adapter = adapter
         adapter.selected = selected.keys
+        favSet = Favs.keys(this)
+        adapter.isFav = { e -> favSet.isNotEmpty() && pathKey(e) in favSet }
 
         swipe = SwipeRefreshLayout(this)
         swipe.setColorSchemeColors(0xFFEF6C00.toInt())
@@ -350,8 +415,10 @@ class BrowserActivity : AppCompatActivity() {
         pasteBar.addView(pasteBtn, LinearLayout.LayoutParams(WRAP, WRAP))
         pasteBar.addView(cancelBtn, LinearLayout.LayoutParams(WRAP, WRAP))
 
+        buildSearchBar()
         root.addView(header, LinearLayout.LayoutParams(MATCH, WRAP))
         root.addView(selBar, LinearLayout.LayoutParams(MATCH, WRAP))
+        root.addView(searchBar, LinearLayout.LayoutParams(MATCH, WRAP))
         if (pickMode) {
             val banner = TextView(this)
             banner.text = if (pickMulti) "📎 Upload ke liye files chuno (ek par tap, phir aur tap karke ✔ Bhejo)"
@@ -372,7 +439,7 @@ class BrowserActivity : AppCompatActivity() {
 
     /** HF par video thumbnails band: MediaMetadataRetriever Authorization header redirect ke baad CDN par bhi bhej sakta hai. */
     private fun applyThumbFlag() {
-        adapter.videoThumbs = videoThumbs && store != Store.HF
+        adapter.videoThumbs = videoThumbs && !store.isHf
     }
 
     private fun spanCount(): Int =
@@ -395,8 +462,12 @@ class BrowserActivity : AppCompatActivity() {
     private fun updateHeader() {
         titleTv.text = if (currentUrl == rootUrl) storeLabel
         else Uri.decode(currentUrl.trimEnd('/').substringAfterLast('/'))
-        val folders = entries.count { it.isDir }
-        subTv.text = "$storeIcon $storeLabel · $folders folders · ${entries.size - folders} files"
+        val src = shown
+        val folders = src.count { it.isDir }
+        subTv.text = if (searching && query.trim().isNotEmpty())
+            "🔍 ${src.size} mile" + (if (deepRunning) " · dhundh raha hu…" else "")
+        else "$storeIcon $storeLabel · $folders folders · ${src.size - folders} files"
+        updateFavBtn()
     }
 
     // ───────────────────────── loading ─────────────────────────
@@ -414,7 +485,7 @@ class BrowserActivity : AppCompatActivity() {
 
     private fun friendly(e: Exception): String {
         val m = e.message ?: "error"
-        return if (store == Store.HF && m.contains("503")) "HF Bucket server par band / configured nahi hai (503)" else m
+        return if (store.isHf && m.contains("503")) store.label + " server par band / configured nahi hai (503)" else m
     }
 
     private fun load(url: String, push: Boolean) {
@@ -431,15 +502,14 @@ class BrowserActivity : AppCompatActivity() {
                     currentUrl = url
                     if (selecting) exitSelect(false)
                     entries = sorted(list)
-                    adapter.items = entries
-                    adapter.notifyDataSetChanged()
+                    lastSig = sigOf(entries)
+                    if (changed && searching) resetSearch()
+                    applyFilter()
                     if (changed) rv.scrollToPosition(0)
                     swipe.isRefreshing = false
                     updateHeader()
-                    if (entries.isEmpty()) {
-                        emptyTv.text = "Folder khaali hai"
-                        emptyTv.visibility = View.VISIBLE
-                    }
+                    startObserver()
+                    refreshCap()
                 }
             } catch (e: DavAuthException) {
                 runOnUiThread {
@@ -464,6 +534,10 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun goBack() {
+        if (searching) {
+            closeSearch()
+            return
+        }
         if (stack.isNotEmpty()) {
             val prev = stack.removeAt(stack.size - 1)
             load(prev, false)
@@ -527,13 +601,13 @@ class BrowserActivity : AppCompatActivity() {
     private fun openInApp(e: Entry) {
         when (e.kind) {
             Kind.IMAGE -> {
-                val imgs = entries.filter { it.kind == Kind.IMAGE }
+                val imgs = shown.filter { it.kind == Kind.IMAGE }
                 Queue.images = imgs
                 val i = imgs.indexOfFirst { it.url == e.url }.coerceAtLeast(0)
                 startActivity(Intent(this, ImageViewerActivity::class.java).putExtra("index", i))
             }
             Kind.VIDEO, Kind.AUDIO -> {
-                val same = entries.filter { it.kind == e.kind }
+                val same = shown.filter { it.kind == e.kind }
                 Queue.media = same
                 Queue.mediaIndex = same.indexOfFirst { it.url == e.url }.coerceAtLeast(0)
                 Queue.subs = if (e.kind == Kind.VIDEO) findSubtitles(same) else emptyMap()
@@ -591,7 +665,7 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun selectAll() {
-        for (e in entries) if (!(pickMode && e.isDir)) selected[e.url] = e
+        for (e in shown) if (!(pickMode && e.isDir)) selected[e.url] = e
         refreshSelUi(null)
     }
 
@@ -606,7 +680,7 @@ class BrowserActivity : AppCompatActivity() {
         applySelVisibility()
         selCount.text = "${selected.size} chune"
         if (changedUrl != null) {
-            val i = entries.indexOfFirst { it.url == changedUrl }
+            val i = shown.indexOfFirst { it.url == changedUrl }
             if (i >= 0) adapter.notifyItemChanged(i) else adapter.notifyDataSetChanged()
         } else {
             adapter.notifyDataSetChanged()
@@ -614,12 +688,20 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun selMore() {
-        if (selected.size != 1) {
-            Toast.makeText(this, "Rename / Download / Info ke liye ek hi item chuno", Toast.LENGTH_SHORT).show()
+        if (selected.isEmpty()) return
+        val list = selected.values.toList()
+        val allFav = list.all { pathKey(it) in favSet }
+        val favLabel = if (allFav) "☆ Favourite se hatao" else "⭐ Favourite me jodo"
+        if (list.size != 1) {
+            AlertDialog.Builder(this)
+                .setTitle("${list.size} item chune")
+                .setItems(arrayOf("$favLabel (${list.size})")) { _, _ -> setFavs(list, !allFav) }
+                .show()
             return
         }
-        val e = selected.values.first()
+        val e = list[0]
         val opts = ArrayList<String>()
+        opts.add(favLabel)
         if (!e.isDir && store != Store.LOCAL) opts.add(optDownload)
         if (!e.isDir) opts.add(optOpenWith)
         opts.add(optRename)
@@ -628,6 +710,7 @@ class BrowserActivity : AppCompatActivity() {
             .setTitle(e.name)
             .setItems(opts.toTypedArray()) { _, i ->
                 when (opts[i]) {
+                    favLabel -> setFavs(list, !allFav)
                     optDownload -> download(e)
                     optOpenWith -> Opener.external(this, e)
                     optRename -> rename(e)
@@ -710,7 +793,7 @@ class BrowserActivity : AppCompatActivity() {
         io.execute {
             var url = e.url
             var withAuth = true
-            if (store == Store.HF) {
+            if (store.isHf) {
                 // CDN link pehle nikaalo: apna Authorization header CDN par nahi jana chahiye
                 val cdn = Storages.cdnTarget(e.url)
                 if (cdn != null) {
@@ -1177,11 +1260,11 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     private fun rename(e: Entry) {
-        if (store == Store.HF && e.isDir) {
+        if (store.isHf && e.isDir) {
             // /xfer folder ko usi naam se hi move karta hai, naya naam nahi de sakta
             AlertDialog.Builder(this)
-                .setTitle("HF folder rename")
-                .setMessage("HF Bucket me folder ka naam badalna abhi supported nahi hai.\n\nFolder ko doosre folder me bhejna ho to Move (✂) use karo.")
+                .setTitle(store.short + " folder rename")
+                .setMessage(store.label + " me folder ka naam badalna abhi supported nahi hai.\n\nFolder ko doosre folder me bhejna ho to Move (✂) use karo.")
                 .setPositiveButton("OK", null)
                 .show()
             return
@@ -1204,9 +1287,9 @@ class BrowserActivity : AppCompatActivity() {
             title = "Phone se delete?"
             msg = what + "\n\n⚠ Phone se PERMANENTLY delete hoga (recycle bin nahi hai)." +
                 (if (hasDir) "\nFolder ho to uske andar ki saari files bhi jayengi." else "")
-        } else if (store == Store.HF) {
-            title = "⚠ HF Bucket se delete?"
-            msg = what + "\n\n⚠ HF Bucket se PERMANENTLY delete hoga. Trash nahi hai, wapas nahi aayega." +
+        } else if (store.isHf) {
+            title = "⚠ " + store.label + " se delete?"
+            msg = what + "\n\n⚠ " + store.label + " se PERMANENTLY delete hoga. Trash nahi hai, wapas nahi aayega." +
                 (if (hasDir) "\nFolder ho to uske andar ki saari files bhi jayengi." else "") +
                 "\n\nDhyan: is bucket me Trading / app ka data bhi ho sakta hai."
         } else {
@@ -1276,6 +1359,379 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
+    // ───────────────────────── search ─────────────────────────
+
+    private fun buildSearchBar() {
+        searchBar = LinearLayout(this)
+        searchBar.orientation = LinearLayout.VERTICAL
+        searchBar.setBackgroundColor(0xFFFFF8E1.toInt())
+        searchBar.setPadding(dp(8), dp(4), dp(8), dp(4))
+        searchBar.visibility = View.GONE
+
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+
+        searchEt = EditText(this)
+        searchEt.hint = "Is folder me naam se dhundo…"
+        searchEt.setSingleLine()
+        searchEt.textSize = 15f
+        searchEt.setTextColor(Color.BLACK)
+        searchEt.setHintTextColor(0xFF777777.toInt())
+        searchEt.imeOptions = EditorInfo.IME_ACTION_SEARCH
+        searchEt.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        searchEt.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                query = s?.toString() ?: ""
+                ui.removeCallbacks(searchTask)
+                ui.postDelayed(searchTask, 250)
+            }
+        })
+        searchEt.setOnEditorActionListener { _, _, _ ->
+            ui.removeCallbacks(searchTask)
+            onQueryChanged()
+            hideKeyboard()
+            true
+        }
+        row.addView(searchEt)
+        row.addView(iconBtn("✕", 44) { closeSearch() })
+
+        deepCb = CheckBox(this)
+        deepCb.text = "Andar ke saare folders me bhi dhundo"
+        deepCb.textSize = 13f
+        deepCb.setTextColor(Color.BLACK)
+        deepCb.setOnCheckedChangeListener { _, c ->
+            deep = c
+            onQueryChanged()
+        }
+
+        searchBar.addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
+        searchBar.addView(deepCb, LinearLayout.LayoutParams(MATCH, WRAP))
+    }
+
+    private fun hideKeyboard() {
+        try {
+            (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(searchEt.windowToken, 0)
+        } catch (e: Exception) { }
+    }
+
+    private fun openSearch() {
+        searching = true
+        searchBar.visibility = View.VISIBLE
+        searchBtn.setTextColor(0xFFEF6C00.toInt())
+        searchEt.requestFocus()
+        searchEt.post {
+            try {
+                (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .showSoftInput(searchEt, InputMethodManager.SHOW_IMPLICIT)
+            } catch (e: Exception) { }
+        }
+    }
+
+    /** Search band, bina list dobara banaye (folder badalte waqt use hota hai). */
+    private fun resetSearch() {
+        deepCancel.set(true)
+        deepRunning = false
+        deepResults = emptyList()
+        searching = false
+        query = ""
+        searchBtn.setTextColor(Color.BLACK)
+        ui.removeCallbacks(searchTask)
+        searchEt.setText("")
+        searchBar.visibility = View.GONE
+        hideKeyboard()
+    }
+
+    private fun closeSearch() {
+        resetSearch()
+        applyFilter()
+        updateHeader()
+    }
+
+    private fun onQueryChanged() {
+        deepCancel.set(true)
+        deepRunning = false
+        val q = query.trim()
+        if (searching && deep && q.isNotEmpty()) {
+            startDeep(q)
+        } else {
+            deepResults = emptyList()
+            applyFilter()
+            updateHeader()
+        }
+    }
+
+    /** Screen par kya dikhana hai: poori listing, naam-filter, ya andar-tak ke search results. */
+    private fun applyFilter() {
+        val q = query.trim()
+        val filtering = searching && q.isNotEmpty()
+        shown = when {
+            !filtering -> entries
+            deep -> deepResults
+            else -> entries.filter { it.name.contains(q, ignoreCase = true) }
+        }
+        adapter.items = shown
+        adapter.notifyDataSetChanged()
+        if (shown.isEmpty()) {
+            emptyTv.text = when {
+                filtering && deep && deepRunning -> "🔍 Dhundh raha hu…"
+                filtering -> "Kuch nahi mila: \"$q\""
+                else -> "Folder khaali hai"
+            }
+            emptyTv.visibility = View.VISIBLE
+        } else {
+            emptyTv.visibility = View.GONE
+        }
+        updateHeader()
+    }
+
+    /** Current folder ke andar saare sub-folders me naam se dhundo (BFS; results aate hi dikhte hain). */
+    private fun startDeep(q: String) {
+        val cancel = AtomicBoolean(false)
+        deepCancel = cancel
+        deepResults = emptyList()
+        deepRunning = true
+        applyFilter()
+        val base = if (currentUrl.isEmpty()) rootUrl else currentUrl
+        io.execute {
+            val found = ArrayList<Entry>()
+            val dq = java.util.ArrayDeque<String>()
+            dq.add(base)
+            var last = 0L
+            val deadline = System.currentTimeMillis() + 90_000L
+            while (dq.isNotEmpty() && !cancel.get() && found.size < 500 && System.currentTimeMillis() < deadline) {
+                val d = dq.poll() ?: break
+                val kids = try { Fs.list(d) } catch (e: Exception) { continue }
+                val rel = Uri.decode(d.removePrefix(base)).trim('/')
+                for (k in kids) {
+                    if (k.isDir) dq.add(k.url)
+                    if (k.name.contains(q, ignoreCase = true)) found.add(k.copy(sub = rel))
+                }
+                val now = System.currentTimeMillis()
+                if (now - last > 400) {
+                    last = now
+                    val snap = sorted(ArrayList(found))
+                    runOnUiThread {
+                        if (!cancel.get() && !isFinishing) {
+                            deepResults = snap
+                            applyFilter()
+                        }
+                    }
+                }
+            }
+            val snap = sorted(found)
+            runOnUiThread {
+                if (!cancel.get() && !isFinishing) {
+                    deepResults = snap
+                    deepRunning = false
+                    applyFilter()
+                }
+            }
+        }
+    }
+
+    // ───────────────────────── favourites ─────────────────────────
+
+    private fun pathKey(e: Entry): String = try {
+        Favs.key(store, Storages.pathOf(store, e.url))
+    } catch (x: Exception) {
+        ""
+    }
+
+    private fun curPath(): String = Storages.pathOf(store, currentUrl)
+
+    private fun updateFavBtn() {
+        if (!::favBtn.isInitialized || currentUrl.isEmpty()) return
+        val on = try { Favs.key(store, curPath()) in favSet } catch (e: Exception) { false }
+        favBtn.text = if (on) "★" else "☆"
+        favBtn.setTextColor(if (on) 0xFFF9A825.toInt() else Color.BLACK)
+    }
+
+    /** Header ka ☆: abhi khula folder favourite karo / hatao. */
+    private fun toggleCurrentFav() {
+        if (currentUrl.isEmpty() || currentUrl == rootUrl) {
+            Toast.makeText(this, "Poora storage favourite karne ki zarurat nahi — koi folder kholo", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val name = Uri.decode(currentUrl.trimEnd('/').substringAfterLast('/'))
+        val now = Favs.toggle(this, store, curPath(), name, true)
+        favSet = Favs.keys(this)
+        updateFavBtn()
+        Toast.makeText(this, if (now) "⭐ Favourite me jodi: $name" else "Favourite se hata di", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun setFavs(list: List<Entry>, add: Boolean) {
+        for (e in list) {
+            val p = Storages.pathOf(store, e.url)
+            if (add) Favs.add(this, store, p, e.name, e.isDir) else Favs.remove(this, store, p)
+        }
+        favSet = Favs.keys(this)
+        exitSelect()
+        adapter.notifyDataSetChanged()
+        updateFavBtn()
+        Toast.makeText(
+            this,
+            if (add) "⭐ ${list.size} item favourite me jode" else "${list.size} item favourite se hataye",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun showFavs() {
+        val list = Favs.list(this)
+        if (list.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Abhi koi favourite nahi. Folder kholo aur upar ☆ dabao, ya item chuno → ⋮ → Favourite",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        val labels = list.map {
+            (if (it.isDir) "📁 " else Kinds.emoji(Kinds.of(it.name, false)) + " ") + it.name + "   ·   " + it.store.short
+        }.toTypedArray()
+        val dlg = AlertDialog.Builder(this)
+            .setTitle("⭐ Favourites (lamba dabao = hatao)")
+            .setItems(labels) { _, i -> openFav(list[i]) }
+            .setNegativeButton("Band", null)
+            .create()
+        dlg.show()
+        dlg.listView.setOnItemLongClickListener { _, _, pos, _ ->
+            val f = list[pos]
+            Favs.remove(this, f.store, f.path)
+            favSet = Favs.keys(this)
+            adapter.notifyDataSetChanged()
+            updateFavBtn()
+            dlg.dismiss()
+            Toast.makeText(this, "Favourite se hata di: ${f.name}", Toast.LENGTH_SHORT).show()
+            true
+        }
+    }
+
+    private fun openFav(f: Favs.Fav) {
+        val dirPath = if (f.isDir) f.path else f.path.trimEnd('/').substringBeforeLast('/', "").ifEmpty { "/" }
+        val url = Storages.urlOf(f.store, dirPath, true)
+        if (url.startsWith(rootUrl)) {            // isi storage ke andar: yahin khol do
+            load(url, true)
+            return
+        }
+        if (pickMode) {
+            Toast.makeText(this, "File chunte waqt dusre storage ki favourite nahi khulegi", Toast.LENGTH_LONG).show()
+            return
+        }
+        val i = Intent(this, BrowserActivity::class.java).putExtra("store", f.store.id).putExtra("start", url)
+        if (f.store == Store.LOCAL) {
+            if (!LocalFs.hasAccess(this)) {
+                Toast.makeText(this, "Pehle Home se Phone Storage kholo (permission ke liye)", Toast.LENGTH_LONG).show()
+                return
+            }
+            val file = File(f.path)
+            if (LocalFs.underMissingVolume(this, file)) {
+                Toast.makeText(this, "💾 Ye drive abhi lagi nahi hai", Toast.LENGTH_LONG).show()
+                return
+            }
+            val vol = LocalFs.volumeFor(this, file)
+            if (vol != null) {
+                i.putExtra("local_root", vol.root.absolutePath).putExtra("local_label", vol.label).putExtra("local_icon", vol.icon)
+            }
+        }
+        startActivity(i)
+    }
+
+    // ───────────────────────── live refresh + live capacity ─────────────────────────
+
+    private fun livePeriod(): Long = when (store) {
+        Store.LOCAL -> 3000L
+        Store.HF, Store.HF2 -> 10000L
+        else -> 6000L
+    }
+
+    private fun sigOf(l: List<Entry>): Long {
+        var h = 17L
+        for (e in l) {
+            h = h * 31 + e.url.hashCode()
+            h = h * 31 + e.size
+            h = h * 31 + e.modified
+        }
+        return h
+    }
+
+    /** Folder me kuch badla ho to chupchap list taaza karo (spinner nahi, scroll wahin rehta hai). */
+    private fun silentRefresh() {
+        if (!::swipe.isInitialized || selecting || swipe.isRefreshing || currentUrl.isEmpty() || progDlg != null) return
+        val url = currentUrl
+        val token = loadToken
+        io.execute {
+            val list = try { Fs.list(url) } catch (e: Exception) { return@execute }
+            runOnUiThread {
+                if (isFinishing || token != loadToken || url != currentUrl || selecting) return@runOnUiThread
+                val s = sorted(list)
+                val sig = sigOf(s)
+                if (sig == lastSig) return@runOnUiThread
+                lastSig = sig
+                entries = s
+                applyFilter()
+            }
+        }
+    }
+
+    /** Phone / SD par folder me file aate-jaate hi turant pata chal jata hai. */
+    private fun startObserver() {
+        stopObserver()
+        if (store != Store.LOCAL || currentUrl.isEmpty()) return
+        val path = try { LocalFs.fileOf(currentUrl).absolutePath } catch (e: Exception) { return }
+        val mask = FileObserver.CREATE or FileObserver.DELETE or FileObserver.MOVED_FROM or
+            FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE or FileObserver.DELETE_SELF
+        @Suppress("DEPRECATION")
+        val o = object : FileObserver(path, mask) {
+            override fun onEvent(event: Int, p: String?) {
+                ui.removeCallbacks(obsTask)
+                ui.postDelayed(obsTask, 500)
+            }
+        }
+        try {
+            o.startWatching()
+            observer = o
+        } catch (e: Exception) { }
+    }
+
+    private fun stopObserver() {
+        try { observer?.stopWatching() } catch (e: Exception) { }
+        observer = null
+    }
+
+    private fun setCap(c: CapLive.Cap?) {
+        if (!::capTv.isInitialized) return
+        if (c == null) {
+            capTv.visibility = View.GONE
+            return
+        }
+        capTv.visibility = View.VISIBLE
+        capTv.text = "💽 " + c.oneLine()
+        capTv.setTextColor(if (c.usedFrac > 0.92f) 0xFFC62828.toInt() else Color.BLACK)
+    }
+
+    /** Header me is storage ki capacity (kitna % khaali / kitna free), live. */
+    private fun refreshCap() {
+        when (store) {
+            Store.LOCAL -> setCap(CapLive.local(localRoot?.let { File(it) } ?: LocalFs.rootDir()))
+            Store.HF -> {
+                val c = CapLive.hfCached(this)
+                if (c != null) setCap(c)
+                else capTv.apply {
+                    visibility = View.VISIBLE
+                    text = "☁️ capacity " + fmtSize(Analyzer.HF_CAPACITY) + " (Home par use nikalta hai)"
+                }
+            }
+            Store.HF2 -> setCap(null)          // HF2 ki capacity yahan nahi dikhti (Home / Analyze me scan se)
+            else -> io.execute {
+                val c = CapLive.aic()
+                runOnUiThread { if (!isFinishing && c != null) setCap(c) }
+            }
+        }
+    }
+
     // ───────────────────────── menu / storage / update / logout ─────────────────────────
 
     private fun switchStorage() {
@@ -1314,6 +1770,8 @@ class BrowserActivity : AppCompatActivity() {
     private fun showMenu() {
         val acts = ArrayList<Pair<String, () -> Unit>>()
         acts.add("📁 Naya folder" to { newFolder() })
+        acts.add("🔍 Search (is folder me)" to { openSearch() })
+        acts.add("⭐ Favourites dekho (${Favs.list(this).size})" to { showFavs() })
         if (store != Store.LOCAL) acts.add("⬆ Upload (files chuno)" to { pickFiles.launch(arrayOf("*/*")) })
         acts.add("🔁 Storage badlo" to { switchStorage() })
         val drive = localRoot?.let { lr -> VolumeWatcher.snapshot.firstOrNull { it.root.absolutePath == lr } }
@@ -1329,7 +1787,7 @@ class BrowserActivity : AppCompatActivity() {
         acts.add("↕ Sort: ${sortNames[sortMode]}" to { showSort() })
         acts.add(
             ("🎞 Video thumbnails: " + (if (videoThumbs) "ON" else "OFF") +
-                (if (store == Store.HF) " (HF par hamesha OFF)" else "")) to {
+                (if (store.isHf) " (" + store.short + " par hamesha OFF)" else "")) to {
                 videoThumbs = !videoThumbs
                 Session.setBool(this, "vthumbs", videoThumbs)
                 applyThumbFlag()
@@ -1364,8 +1822,8 @@ class BrowserActivity : AppCompatActivity() {
                 sortMode = which
                 Session.setInt(this, "sort", which)
                 entries = sorted(entries)
-                adapter.items = entries
-                adapter.notifyDataSetChanged()
+                deepResults = sorted(deepResults)
+                applyFilter()
                 d.dismiss()
             }
             .show()

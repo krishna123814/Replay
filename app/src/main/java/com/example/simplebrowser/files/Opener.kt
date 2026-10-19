@@ -84,7 +84,7 @@ object Opener {
         Thread {
             var url = e.url
             var withAuth = true
-            if (e.url.startsWith(Storages.root(Store.HF))) {
+            if (Storages.storeOfUrl(e.url).isHf) {
                 val cdn = Storages.cdnTarget(e.url)
                 if (cdn != null) {
                     url = cdn

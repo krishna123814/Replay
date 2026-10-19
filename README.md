@@ -125,3 +125,17 @@ Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LIO
 - **Safe eject**: Android app ko seedha unmount nahi karne deta. App check karti hai ki is drive par Lion ka koi transfer to nahi chal raha; phir Android Settings kholti hai jahan Eject dabate hain.
 - **Safe copy**: shuru se pehle likhne ki permission aur jagah check; FAT32 par 4 GB se badi file pehle hi roki jati hai (saaf message); har file `.lionpart` naam se banti hai, fsync hota hai, size verify hota hai, tabhi asli naam me badalti hai. Drive beech me nikal jaye to poori job "Drive nikal gayi" bolkar ruk jati hai; purani adhoori `.lionpart` files agli baar apne aap saaf. Drive par File Manager khula ho aur drive nikle to wo screen band ho jati hai.
 - Zaroori: Android 11+ par "All files access" ON ho.
+
+## 📁 File Manager: search, favourites, live capacity (v4.2)
+- **🔍 Search**: File Manager ke header me 🔍 (ya ⋮ → Search). Type karte hi usi folder ki list filter hoti hai. "Andar ke saare folders me bhi dhundo" tick karo to sab sub-folders me dhundta hai (results aate hi dikhte hain, har result ke neeche uska folder). Back / ✕ se band.
+- **⭐ Favourites**: folder kholo aur header ka ☆ dabao. Kisi file / folder ko lamba dabao → ⋮ → "Favourite me jodo" (kai item ek saath bhi). Favourite ke naam ke aage ⭐ dikhta hai. ⋮ → "Favourites dekho" aur Home screen par "⭐ Favourites" section (tap = seedha wahin khulta hai; lamba dabao = hatao). AIC / HF / Phone / SD / USB sab par kaam karta hai.
+- **Live capacity**: Home ke har card (AIC, HF, Phone, SD / USB) par "NN% khaali · X GB free" + use/total + rang wali patti, apne aap har ~3 sec me badalti hai. File Manager ke header me bhi. HF ke liye pehle server ka WebDAV quota dekhta hai; na mile to har 15 min me background me apne aap scan (Analyze dabana nahi padta). Home par neeche kheench kar refresh = sab abhi dobara (HF scan bhi).
+- **Live list refresh**: folder ki list ab manual refresh ke bina badalti hai. Phone / SD par file aate-jaate turant (FileObserver + 3 sec check); AIC / HF par 6 / 10 sec me chupchap check, sirf badlav hone par list badalti hai (scroll nahi hilta).
+
+## ⛅ HF2 Bucket (dusra HF account) — 2026-10-19
+- Server par `/hf2/` (HF2_TOKEN + HF2_BUCKET). File Manager me teesra storage: **⛅ HF2 Bucket** (Home card, storage switcher, Analyze, Favourites, Paste/Copy/Move, player, image viewer — sab HF jaisa).
+- HF ↔ HF2 copy/move server par hi hota hai (`/xfer`, store id `hf2`); alag account hone se file server ke temp se guzarti hai, isliye thoda slow.
+- ⚙ Downloads → Server settings me ab "⛅ HF2 Bucket" bhi chun sakte ho (download seedha HF2 me).
+- Login URL `/dav/`, `/hf/` ya `/hf2/` — kisi se bhi karo, teeno storage apne aap milte hain.
+- HF2 card par abhi live capacity bar nahi hai (HF jaisa quota/scan sirf HF1 ke liye). Capacity dekhni ho to 🔍 Analyze → HF2.
+- Is change ko Android Studio / Gradle me build karke dekhna baaki hai (ye zip bina compile ke banaya gaya).

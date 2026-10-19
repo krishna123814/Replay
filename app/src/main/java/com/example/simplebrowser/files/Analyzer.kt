@@ -117,18 +117,18 @@ object Analyzer {
     /** Storage ki capacity ki line. Network use kar sakta hai (AIC), isliye background thread se bulao. */
     fun capacity(ctx: Context, store: Store, url: String, rootUrl: String, total: Long, complete: Boolean): CapInfo? {
         return when (store) {
-            Store.HF -> {
+            Store.HF, Store.HF2 -> {
                 val used: Long? = if (url == rootUrl) (if (complete) total else null)
-                else cachedUsed(ctx, "hf")?.first
+                else cachedUsed(ctx, store.id)?.first
                 val cap = HF_CAPACITY
                 if (used == null) {
-                    CapInfo("☁️ HF capacity: " + fmtSize(cap), null)
+                    CapInfo("☁️ " + store.short + " capacity: " + fmtSize(cap), null)
                 } else {
                     val left = cap - used
                     val pct = used.toDouble() * 100 / cap
                     val tail = if (left >= 0) "khaali " + fmtSize(left) else "⚠ limit se " + fmtSize(-left) + " zyada"
                     CapInfo(
-                        "☁️ HF: " + fmtSize(used) + " / " + fmtSize(cap) + String.format(Locale.US, " (%.1f%%) · ", pct) + tail,
+                        "☁️ " + store.short + ": " + fmtSize(used) + " / " + fmtSize(cap) + String.format(Locale.US, " (%.1f%%) · ", pct) + tail,
                         (used.toDouble() / cap).toFloat().coerceIn(0f, 1f)
                     )
                 }

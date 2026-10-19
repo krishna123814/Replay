@@ -235,7 +235,7 @@ class ImageViewerActivity : AppCompatActivity() {
 
     private fun info() {
         val e = curEntry()
-        val where = if (LocalFs.isLocal(e.url)) LocalFs.fileOf(e.url).absolutePath else Storages.pathOf(if (e.url.startsWith(Storages.root(Store.HF))) Store.HF else Store.AIC, e.url)
+        val where = if (LocalFs.isLocal(e.url)) LocalFs.fileOf(e.url).absolutePath else Storages.pathOf(Storages.storeOfUrl(e.url), e.url)
         val msg = "Naam: ${e.name}\n" +
             (if (e.size > 0) "Size: ${fmtSize(e.size)}\n" else "") +
             "Badla: ${fmtDate(e.modified)}\n\n$where"

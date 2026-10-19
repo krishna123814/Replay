@@ -6,11 +6,15 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
-/** Do storage: VPS ki disk (WebDAV /dav/) aur HF Bucket (WebDAV /hf/). Dono ek hi login se. */
+/** Storage: VPS ki disk (WebDAV /dav/), HF Bucket (/hf/), HF2 Bucket (/hf2/, dusra HF account). Sab ek hi login se. */
 enum class Store(val id: String, val label: String, val short: String, val icon: String) {
     AIC("aic", "AIC Disk", "AIC", "💽"),
     HF("hf", "HF Bucket", "HF", "☁️"),
+    HF2("hf2", "HF2 Bucket", "HF2", "⛅"),
     LOCAL("local", "Phone Storage", "PHONE", "📱");
+
+    /** HF ya HF2 (dono Hugging Face bucket hain: delete wapas nahi aata, video thumbnails band, CDN redirect). */
+    val isHf: Boolean get() = this == HF || this == HF2
 
     companion object {
         fun from(id: String?): Store = values().firstOrNull { it.id == id } ?: AIC
@@ -27,7 +31,7 @@ object Storages {
     /** Login URL se ek level upar (".../dav/" -> "https://host/"), hamesha "/" par khatam. */
     private fun parent(): String {
         val b = base()
-        for (s in arrayOf("dav/", "hf/")) {
+        for (s in arrayOf("dav/", "hf/", "hf2/")) {
             if (b.endsWith("/$s")) return b.dropLast(s.length)
         }
         val u = b.toHttpUrlOrNull() ?: return b
@@ -42,9 +46,18 @@ object Storages {
         val b = base()
         return when (store) {
             Store.LOCAL -> LocalFs.rootUrl()
-            Store.AIC -> if (b.endsWith("/hf/")) parent() + "dav/" else b
+            Store.AIC -> if (b.endsWith("/hf/") || b.endsWith("/hf2/")) parent() + "dav/" else b
             Store.HF -> if (b.endsWith("/hf/")) b else parent() + "hf/"
+            Store.HF2 -> if (b.endsWith("/hf2/")) b else parent() + "hf2/"
         }
+    }
+
+    /** URL kis storage ka hai: phone / HF2 / HF / baaki AIC. (/hf2/ aur /hf/ alag prefix hain, mix nahi hote.) */
+    fun storeOfUrl(url: String): Store = when {
+        LocalFs.isLocal(url) -> Store.LOCAL
+        url.startsWith(root(Store.HF2)) -> Store.HF2
+        url.startsWith(root(Store.HF)) -> Store.HF
+        else -> Store.AIC
     }
 
     /** Storage path -> URL. Phone ke liye path absolute hota hai (\"/storage/emulated/0/DCIM\"). */
@@ -73,16 +86,18 @@ object Storages {
      * HF band hai to uska sabab (sirf server ke 503 / 404 par). Network error ya baaki kuch ho to null
      * (card khula rahe; browser khud saaf error dikhayega). Depth 0 hai, isliye HF ki listing nahi laata.
      */
-    fun hfDisabledReason(): String? {
+    fun hfDisabledReason(store: Store = Store.HF): String? {
         return try {
-            val req = Request.Builder().url(root(Store.HF))
+            val req = Request.Builder().url(root(store))
                 .method("PROPFIND", "".toRequestBody(null))
                 .header("Depth", "0")
                 .build()
             Dav.client.newCall(req).execute().use { r ->
                 when (r.code) {
-                    503 -> "HF Bucket server par configured nahi hai (HF_TOKEN / MEDIA_BUCKET)"
-                    404 -> "Server par /hf/ nahi mila (server update / nginx check karo)"
+                    503 -> if (store == Store.HF2) "HF2 Bucket server par configured nahi hai (HF2_TOKEN / HF2_BUCKET)"
+                           else "HF Bucket server par configured nahi hai (HF_TOKEN / MEDIA_BUCKET)"
+                    404 -> if (store == Store.HF2) "Server par /hf2/ nahi mila (server update / nginx check karo)"
+                           else "Server par /hf/ nahi mila (server update / nginx check karo)"
                     else -> null
                 }
             }

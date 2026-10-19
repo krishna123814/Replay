@@ -169,8 +169,9 @@ object DlUi {
             val rOff = RadioButton(t); rOff.text = "Sirf phone par (server nahi)"; rOff.id = 1001
             val rAic = RadioButton(t); rAic.text = "💽 AIC Disk (VPS)"; rAic.id = 1002
             val rHf = RadioButton(t); rHf.text = "☁️ HF Bucket"; rHf.id = 1003
-            for (r in listOf(rOff, rAic, rHf)) { r.setTextColor(Color.parseColor(LIGHT)); rg.addView(r) }
-            when (ServerSync.store(ctx)) { "aic" -> rAic.isChecked = true; "hf" -> rHf.isChecked = true; else -> rOff.isChecked = true }
+            val rHf2 = RadioButton(t); rHf2.text = "⛅ HF2 Bucket"; rHf2.id = 1004
+            for (r in listOf(rOff, rAic, rHf, rHf2)) { r.setTextColor(Color.parseColor(LIGHT)); rg.addView(r) }
+            when (ServerSync.store(ctx)) { "aic" -> rAic.isChecked = true; "hf" -> rHf.isChecked = true; "hf2" -> rHf2.isChecked = true; else -> rOff.isChecked = true }
             col.addView(rg)
 
             col.addView(label("Server URL (MyFiles wala login)"))
@@ -190,12 +191,12 @@ object DlUi {
             refreshFolder()
             col.addView(folderTv)
 
-            fun curStore(): String = when (rg.checkedRadioButtonId) { 1003 -> "hf"; 1002 -> "aic"; else -> "aic" }
+            fun curStore(): String = when (rg.checkedRadioButtonId) { 1004 -> "hf2"; 1003 -> "hf"; 1002 -> "aic"; else -> "aic" }
             fun saveLogin() {
                 DlSettings.setStr(ctx, ServerSync.K_URL, eUrl.text.toString().trim())
                 DlSettings.setStr(ctx, ServerSync.K_USER, eUser.text.toString().trim())
                 DlSettings.setStr(ctx, ServerSync.K_PASS, ePass.text.toString())
-                DlSettings.setStr(ctx, ServerSync.K_STORE, when (rg.checkedRadioButtonId) { 1003 -> "hf"; 1002 -> "aic"; else -> "off" })
+                DlSettings.setStr(ctx, ServerSync.K_STORE, when (rg.checkedRadioButtonId) { 1004 -> "hf2"; 1003 -> "hf"; 1002 -> "aic"; else -> "off" })
             }
 
             val pick = Button(t)
@@ -265,7 +266,7 @@ object DlUi {
                     if (!isRoot) labels.add("⬆  .. (upar)")
                     for (n in names) labels.add("📁  $n")
                     val b = AlertDialog.Builder(t)
-                        .setTitle((if (store == "hf") "☁️ HF " else "💽 AIC ") + path)
+                        .setTitle((when (store) { "hf" -> "☁️ HF "; "hf2" -> "⛅ HF2 "; else -> "💽 AIC " }) + path)
                         .setPositiveButton("Yahan chuno") { _, _ -> onChosen(path) }
                         .setNeutralButton("➕ Naya folder") { _, _ -> newFolderDialog(ctx, overlay, store, path, onChosen) }
                         .setNegativeButton("Cancel", null)

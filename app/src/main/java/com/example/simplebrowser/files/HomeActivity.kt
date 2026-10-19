@@ -25,7 +25,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.StyleSpan
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -37,12 +42,60 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var aicSub: TextView
     private lateinit var hfSub: TextView
     private lateinit var hfCard: LinearLayout
-    private lateinit var hfBarBox: LinearLayout
+    private lateinit var hf2Sub: TextView
+    private lateinit var hf2Card: LinearLayout
     private lateinit var clipTv: TextView
     private lateinit var localSub: TextView
     private lateinit var volBox: LinearLayout
     private val uiHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val volCb: () -> Unit = { refreshSd() }
+
+    // live capacity (har card par % khaali + free + patti)
+    private lateinit var capAic: CapHolder
+    private lateinit var capHf: CapHolder
+    private lateinit var capLocal: CapHolder
+    private val volCaps = HashMap<String, CapHolder>()
+    private lateinit var favBox: LinearLayout
+    private lateinit var homeSwipe: SwipeRefreshLayout
+    private var hfProbed = false
+    private var tickN = 0
+    private val liveTask = object : Runnable {
+        override fun run() {
+            updateCaps(false)
+            uiHandler.postDelayed(this, 3000)
+        }
+    }
+
+    private inner class CapHolder(val tv: TextView, val barBox: LinearLayout) {
+        fun set(c: CapLive.Cap?, extra: String = "") {
+            barBox.removeAllViews()
+            if (c == null) {
+                tv.text = extra
+                tv.visibility = if (extra.isEmpty()) View.GONE else View.VISIBLE
+                return
+            }
+            val head = c.head()
+            val sp = SpannableString(head + "\n" + c.detail() + extra)
+            sp.setSpan(StyleSpan(Typeface.BOLD), 0, head.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            tv.text = sp
+            tv.visibility = View.VISIBLE
+            barBox.addView(usageBar(c.usedFrac))
+        }
+    }
+
+    private fun addCap(card: LinearLayout): CapHolder {
+        val col = card.getChildAt(1) as LinearLayout
+        val tv = TextView(this)
+        tv.setTextColor(Color.BLACK)
+        tv.textSize = 13f
+        tv.setPadding(0, dp(6), 0, 0)
+        tv.visibility = View.GONE
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        col.addView(tv)
+        col.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
+        return CapHolder(tv, box)
+    }
 
     private val storagePerm =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -52,6 +105,9 @@ class HomeActivity : AppCompatActivity() {
 
     /** null = HF theek (ya abhi pata nahi); String = HF band hai, ye sabab. */
     private var hfReason: String? = null
+
+    /** HF2 ke liye bhi wahi: null = theek ya pata nahi; String = band hai, ye sabab. */
+    private var hf2Reason: String? = null
 
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
@@ -73,16 +129,22 @@ class HomeActivity : AppCompatActivity() {
         if (!::hfSub.isInitialized) return
         refreshClip()
         refreshLocal()
+        refreshFavs()
         probeHf()
-        refreshHfCap()
+        probeHf2()
+        updateHfCap()
         VolumeWatcher.addListener(volCb)
         VolumeWatcher.rescanSoon()
+        tickN = 0
+        uiHandler.removeCallbacks(liveTask)
+        uiHandler.post(liveTask)
     }
 
     override fun onPause() {
         super.onPause()
         VolumeWatcher.removeListener(volCb)
         uiHandler.removeCallbacksAndMessages(null)
+        CapLive.cancelScan()
     }
 
     override fun onDestroy() {
@@ -120,6 +182,7 @@ class HomeActivity : AppCompatActivity() {
         aicSub = TextView(this)
         val aicCard = card(Store.AIC, aicSub) { open(Store.AIC) }
         aicSub.text = "VPS ki disk (/data) · $host"
+        capAic = addCap(aicCard)
 
         hfSub = TextView(this)
         hfCard = card(Store.HF, hfSub) {
@@ -131,20 +194,35 @@ class HomeActivity : AppCompatActivity() {
             }
         }
         hfSub.text = "Check ho raha hai…"
-        hfBarBox = LinearLayout(this)                      // HF capacity ki patti (pichle Analyze ke hisaab se)
-        hfBarBox.orientation = LinearLayout.VERTICAL
-        (hfCard.getChildAt(1) as LinearLayout).addView(hfBarBox, LinearLayout.LayoutParams(MATCH, WRAP))
+        capHf = addCap(hfCard)
+
+        hf2Sub = TextView(this)
+        hf2Card = card(Store.HF2, hf2Sub) {
+            val r = hf2Reason
+            if (r != null) {
+                Toast.makeText(this, "❌ $r", Toast.LENGTH_LONG).show()
+            } else {
+                open(Store.HF2)
+            }
+        }
+        hf2Sub.text = "Check ho raha hai…"
 
         localSub = TextView(this)
         val localCard = card(Store.LOCAL, localSub) { openLocal() }
+        capLocal = addCap(localCard)
 
         col.addView(aicCard)
         col.addView(hfCard)
+        col.addView(hf2Card)
         col.addView(localCard)
 
         volBox = LinearLayout(this)                        // SD card / pendrive lagi ho tabhi cards dikhte hain
         volBox.orientation = LinearLayout.VERTICAL
         col.addView(volBox, LinearLayout.LayoutParams(MATCH, WRAP))
+
+        favBox = LinearLayout(this)                        // ⭐ Favourites (koi ho tabhi dikhta hai)
+        favBox.orientation = LinearLayout.VERTICAL
+        col.addView(favBox, LinearLayout.LayoutParams(MATCH, WRAP))
 
         clipTv = TextView(this)
         clipTv.setTextColor(0xFFE65100.toInt())
@@ -166,7 +244,10 @@ class HomeActivity : AppCompatActivity() {
         scroll.setBackgroundColor(Color.WHITE)
         scroll.isFillViewport = true
         scroll.addView(col)
-        setContentView(scroll)
+        homeSwipe = SwipeRefreshLayout(this)
+        homeSwipe.addView(scroll, ViewGroup.LayoutParams(MATCH, MATCH))
+        homeSwipe.setOnRefreshListener { forceRefresh() }
+        setContentView(homeSwipe)
     }
 
     private fun card(store: Store, sub: TextView, onClick: () -> Unit): LinearLayout =
@@ -212,30 +293,27 @@ class HomeActivity : AppCompatActivity() {
     private fun refreshSd() {
         if (!::volBox.isInitialized) return
         volBox.removeAllViews()
+        volCaps.clear()
         val vols = VolumeWatcher.snapshot
+        val hasAccess = LocalFs.hasAccess(this)
         for (v in vols) {
             val sub = TextView(this)
-            val hasAccess = LocalFs.hasAccess(this)
-            var bar: View? = null
             if (!v.mounted) {
                 sub.text = v.kind + " · " + v.stateText()
             } else if (!hasAccess) {
                 sub.text = "${v.kind} · permission chahiye (dabao)"
             } else {
                 var line = v.kind + (if (v.fs == "?") "" else " · " + v.fs)
-                try {
-                    val sf = StatFs(v.root.path)
-                    val total = sf.totalBytes
-                    val free = sf.availableBytes
-                    line += " · " + fmtSize(free) + " khaali / " + fmtSize(total)
-                    if (total > 0) bar = usageBar(((total - free).toFloat() / total.toFloat()).coerceIn(0f, 1f))
-                } catch (e: Exception) { }
                 if (v.readOnly) line += " · sirf padh sakte hain"
                 else if (!v.writable) line += " · likhna band (Android restriction)"
                 sub.text = line
             }
             val c = card(v.icon, v.label, sub) { openVol(v) }
-            if (bar != null) (c.getChildAt(1) as LinearLayout).addView(bar)
+            if (v.mounted && hasAccess) {
+                val h = addCap(c)
+                volCaps[v.root.absolutePath] = h
+                h.set(CapLive.local(v.root))
+            }
             c.setOnLongClickListener { volMenu(v); true }
             volBox.addView(c)
         }
@@ -303,16 +381,8 @@ class HomeActivity : AppCompatActivity() {
     private fun refreshLocal() {
         if (!::localSub.isInitialized) return
         refreshSd()
-        localSub.text = if (LocalFs.hasAccess(this)) {
-            try {
-                val sf = StatFs(LocalFs.rootDir().path)
-                "Phone ki files · " + fmtSize(sf.availableBytes) + " khaali"
-            } catch (e: Exception) {
-                "Phone ki files"
-            }
-        } else {
-            "Phone ki files · permission chahiye (dabao)"
-        }
+        localSub.text = if (LocalFs.hasAccess(this)) "Phone ki files" else "Phone ki files · permission chahiye (dabao)"
+        capLocal.set(CapLive.local(LocalFs.rootDir()))
     }
 
     private fun openLocal() {
@@ -358,11 +428,12 @@ class HomeActivity : AppCompatActivity() {
             }
         }
 
-    private fun open(store: Store, localRoot: String? = null, label: String? = null, icon: String? = null) {
+    private fun open(store: Store, localRoot: String? = null, label: String? = null, icon: String? = null, start: String? = null) {
         val i = Intent(this, BrowserActivity::class.java).putExtra("store", store.id)
         if (localRoot != null) i.putExtra("local_root", localRoot)
         if (label != null) i.putExtra("local_label", label)
         if (icon != null) i.putExtra("local_icon", icon)
+        if (start != null) i.putExtra("start", start)
         if (pickMode) {
             i.putExtra("pick", true).putExtra("pick_multi", intent.getBooleanExtra("pick_multi", false))
             pickBrowser.launch(i)
@@ -377,25 +448,121 @@ class HomeActivity : AppCompatActivity() {
             "📋 ${c.size} item clipboard me (${if (Session.clipMove) "Move" else "Copy"}) — storage kholo, folder me jao aur 'Paste here' dabao"
     }
 
-    /** HF card ki line: 100 GB capacity + (pichla Analyze ho chuka ho to) kitna use hua. */
-    private fun hfCapText(): String {
-        val cap = fmtSize(Analyzer.HF_CAPACITY)
-        val c = Analyzer.cachedUsed(this, "hf")
-        return if (c == null) {
-            "Hugging Face Storage Bucket · $cap capacity · 🔍 Analyze se use dekho"
+    /** HF card ki capacity: server quota ya apne aap hua scan; kuch nahi to sirf 100 GB limit. */
+    private fun updateHfCap() {
+        if (!::capHf.isInitialized || hfReason != null) return
+        val c = CapLive.hfCached(this)
+        val scanning = CapLive.hfScanning
+        if (c == null) {
+            capHf.set(null, "Capacity " + fmtSize(Analyzer.HF_CAPACITY) + (if (scanning) " · ⟳ use nikaal raha hu…" else ""))
         } else {
-            val pct = c.first.toDouble() * 100 / Analyzer.HF_CAPACITY
-            "Hugging Face Storage Bucket · " + fmtSize(c.first) + " / " + cap +
-                String.format(java.util.Locale.US, " (%.1f%%)", pct)
+            capHf.set(c, if (scanning) " · ⟳ refresh ho raha hai…" else "")
         }
     }
 
-    private fun refreshHfCap() {
-        if (!::hfBarBox.isInitialized) return
-        hfBarBox.removeAllViews()
-        val c = Analyzer.cachedUsed(this, "hf") ?: return
-        hfBarBox.addView(usageBar((c.first.toDouble() / Analyzer.HF_CAPACITY).toFloat().coerceIn(0f, 1f)))
-        if (hfReason == null) hfSub.text = hfCapText()
+    private fun refreshHfCap() = updateHfCap()
+
+    /** Har ~3 sec: phone + SD/USB seedha; AIC har ~9 sec; HF apne aap (quota ya background scan). */
+    private fun updateCaps(force: Boolean) {
+        if (!::capLocal.isInitialized) return
+        capLocal.set(CapLive.local(LocalFs.rootDir()))
+        for ((root, h) in volCaps) h.set(CapLive.local(File(root)))
+        if (force || tickN % 3 == 0) {
+            io.execute {
+                val c = CapLive.aic()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed && c != null) capAic.set(c)
+                }
+            }
+        }
+        if (hfProbed && hfReason == null) {
+            updateHfCap()
+            if (force || tickN % 3 == 0) {
+                CapLive.hfTick(applicationContext, force) {
+                    if (!isFinishing && !isDestroyed) updateHfCap()
+                }
+            }
+        }
+        tickN++
+    }
+
+    /** Neeche kheench kar refresh: sab kuch abhi dobara (HF ka scan bhi). */
+    private fun forceRefresh() {
+        VolumeWatcher.rescanSoon()
+        refreshLocal()
+        probeHf()
+        probeHf2()
+        updateCaps(true)
+        uiHandler.postDelayed({ if (::homeSwipe.isInitialized) homeSwipe.isRefreshing = false }, 900)
+    }
+
+    // ───────────────────────── favourites ─────────────────────────
+
+    private fun refreshFavs() {
+        if (!::favBox.isInitialized) return
+        favBox.removeAllViews()
+        val list = Favs.list(this)
+        if (list.isEmpty()) return
+        val h = TextView(this)
+        h.text = "⭐ Favourites"
+        h.textSize = 16f
+        h.setTextColor(Color.BLACK)
+        h.typeface = Typeface.DEFAULT_BOLD
+        h.setPadding(dp(4), dp(18), 0, dp(2))
+        favBox.addView(h)
+        for (f in list) {
+            val sub = TextView(this)
+            sub.text = f.store.short + " · " + f.path
+            sub.maxLines = 1
+            sub.ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            val icon = if (f.isDir) "📁" else Kinds.emoji(Kinds.of(f.name, false))
+            val c = card(icon, f.name, sub) { openFav(f) }
+            c.setPadding(dp(16), dp(12), dp(16), dp(12))
+            (c.getChildAt(0) as TextView).textSize = 26f
+            ((c.getChildAt(1) as LinearLayout).getChildAt(0) as TextView).textSize = 16f
+            c.setOnLongClickListener {
+                AlertDialog.Builder(this)
+                    .setTitle(f.name)
+                    .setMessage("Favourite se hatayein?")
+                    .setPositiveButton("Hatao") { _, _ ->
+                        Favs.remove(this, f.store, f.path)
+                        refreshFavs()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+                true
+            }
+            favBox.addView(c)
+        }
+    }
+
+    private fun openFav(f: Favs.Fav) {
+        if (f.store == Store.LOCAL) {
+            if (!LocalFs.hasAccess(this)) {
+                openLocal()
+                return
+            }
+            val file = File(f.path)
+            if (LocalFs.underMissingVolume(this, file)) {
+                Toast.makeText(this, "💾 Ye drive abhi lagi nahi hai", Toast.LENGTH_LONG).show()
+                return
+            }
+            val dir = if (f.isDir) file else (file.parentFile ?: file)
+            val vol = LocalFs.volumeFor(this, file)
+            if (vol != null) open(Store.LOCAL, vol.root.absolutePath, vol.label, vol.icon, LocalFs.urlOf(dir, true))
+            else open(Store.LOCAL, null, null, null, LocalFs.urlOf(dir, true))
+            return
+        }
+        if (f.store == Store.HF && hfReason != null) {
+            Toast.makeText(this, "❌ $hfReason", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (f.store == Store.HF2 && hf2Reason != null) {
+            Toast.makeText(this, "❌ $hf2Reason", Toast.LENGTH_LONG).show()
+            return
+        }
+        val dirPath = if (f.isDir) f.path else f.path.trimEnd('/').substringBeforeLast('/', "").ifEmpty { "/" }
+        open(f.store, null, null, null, Storages.urlOf(f.store, dirPath, true))
     }
 
     /** Kis storage ka analyze karna hai: AIC / HF / Phone / SD / USB. */
@@ -404,6 +571,7 @@ class HomeActivity : AppCompatActivity() {
         val opts = ArrayList<Opt>()
         opts.add(Opt(Store.AIC.icon + " " + Store.AIC.label, Store.AIC, Dav.withSlash(Storages.root(Store.AIC))))
         opts.add(Opt(Store.HF.icon + " " + Store.HF.label, Store.HF, Dav.withSlash(Storages.root(Store.HF))))
+        opts.add(Opt(Store.HF2.icon + " " + Store.HF2.label, Store.HF2, Dav.withSlash(Storages.root(Store.HF2))))
         if (LocalFs.hasAccess(this)) {
             opts.add(Opt(Store.LOCAL.icon + " " + Store.LOCAL.label, Store.LOCAL, Dav.withSlash(LocalFs.rootUrl())))
             for (v in VolumeWatcher.snapshot) {
@@ -416,11 +584,30 @@ class HomeActivity : AppCompatActivity() {
                 val o = opts[i]
                 if (o.store == Store.HF && hfReason != null) {
                     Toast.makeText(this, "❌ " + hfReason, Toast.LENGTH_LONG).show()
+                } else if (o.store == Store.HF2 && hf2Reason != null) {
+                    Toast.makeText(this, "❌ " + hf2Reason, Toast.LENGTH_LONG).show()
                 } else {
                     AnalyzeUi(this, o.store, o.root, o.label) { refreshHfCap() }.show()
                 }
             }
             .show()
+    }
+
+    private fun probeHf2() {
+        io.execute {
+            val reason = Storages.hfDisabledReason(Store.HF2)
+            runOnUiThread {
+                if (isFinishing || isDestroyed || !::hf2Sub.isInitialized) return@runOnUiThread
+                hf2Reason = reason
+                if (reason == null) {
+                    hf2Sub.text = "Hugging Face Storage Bucket 2 (dusra account)"
+                    hf2Card.alpha = 1f
+                } else {
+                    hf2Sub.text = "❌ $reason"
+                    hf2Card.alpha = 0.5f
+                }
+            }
+        }
     }
 
     private fun probeHf() {
@@ -429,12 +616,14 @@ class HomeActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 hfReason = reason
+                hfProbed = true
                 if (reason == null) {
-                    hfSub.text = hfCapText()
-                    refreshHfCap()
+                    hfSub.text = "Hugging Face Storage Bucket"
+                    updateHfCap()
                     hfCard.alpha = 1f
                 } else {
                     hfSub.text = "❌ $reason"
+                    capHf.set(null)
                     hfCard.alpha = 0.5f
                 }
             }

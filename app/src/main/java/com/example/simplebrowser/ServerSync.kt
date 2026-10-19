@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
  */
 object ServerSync {
 
-    const val K_STORE = "ss_store"      // off | aic | hf
+    const val K_STORE = "ss_store"      // off | aic | hf | hf2
     const val K_URL = "ss_url"
     const val K_USER = "ss_user"
     const val K_PASS = "ss_pass"
@@ -66,13 +66,21 @@ object ServerSync {
         val b = baseUrl(ctx)
         val parent = when {
             b.endsWith("/dav/") -> b.dropLast(4)
+            b.endsWith("/hf2/") -> b.dropLast(4)
             b.endsWith("/hf/") -> b.dropLast(3)
             else -> {
                 val u = b.toHttpUrlOrNull()
                 if (u == null) b else u.newBuilder().encodedPath("/").query(null).fragment(null).build().toString()
             }
         }
-        return parent + if (store == "hf") "hf/" else "dav/"
+        return parent + rootSuffix(store)
+    }
+
+    /** store ("aic" | "hf" | "hf2") -> root ka aakhri hissa. */
+    private fun rootSuffix(store: String): String = when (store) {
+        "hf" -> "hf/"
+        "hf2" -> "hf2/"
+        else -> "dav/"
     }
 
     private fun urlOf(ctx: Context, store: String, path: String): String {
@@ -87,7 +95,7 @@ object ServerSync {
 
     private fun xferBase(ctx: Context, store: String): String {
         val r = root(ctx, store)
-        return r.substring(0, r.length - (if (store == "hf") 3 else 4)) + "xfer/"
+        return r.substring(0, r.length - rootSuffix(store).length) + "xfer/"
     }
 
     private fun jsonBody(o: JSONObject) = o.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
@@ -419,7 +427,7 @@ object ServerSync {
                 val res = row.result
                 val st = res.substringBefore(":/")
                 val p = res.substringAfter(":/", "")
-                if (st != "aic" && st != "hf" || p.isEmpty()) {
+                if (st != "aic" && st != "hf" && st != "hf2" || p.isEmpty()) {
                     "Server ne file ka path nahi diya"
                 } else {
                     val sb = StringBuilder(root(app, st))
@@ -974,7 +982,7 @@ object ServerSync {
                     if (r.code == 401) throw IOException("Username / password galat")
                     if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
                 }
-                val label = (if (store == "hf") "HF" else "AIC") + ":" + (if (path.startsWith("/")) path else "/$path")
+                val label = (when (store) { "hf" -> "HF"; "hf2" -> "HF2"; else -> "AIC" }) + ":" + (if (path.startsWith("/")) path else "/$path")
                 if (DlSettings.getBool(app, K_DELETE, true)) {
                     try {
                         if (src.startsWith("content://")) app.contentResolver.delete(Uri.parse(src), null, null)
