@@ -133,6 +133,32 @@ object LocalFs {
         return dir
     }
 
+    private fun canon(f: File): String = try { f.canonicalPath } catch (e: Exception) { f.absolutePath }
+
+    private fun statOf(f: File): Pair<Long, Long>? = try {
+        val sf = StatFs(f.path)
+        if (sf.totalBytes > 0L) Pair(sf.totalBytes, sf.availableBytes) else null
+    } catch (e: Exception) { null }
+
+    /** Ye wahi drive pehle se list me hai? (same UUID / same path / same size+free: ek hi card do naam se na dikhe) */
+    private fun isDuplicate(list: List<Vol>, dir: File, uuid: String?, mounted: Boolean): Boolean {
+        val c = canon(dir)
+        val name = dir.name
+        val st = if (mounted) statOf(dir) else null
+        for (o in list) {
+            if (canon(o.root) == c) return true
+            val ou = o.uuid
+            if (uuid != null && ou != null && uuid.equals(ou, ignoreCase = true)) return true
+            if (ou != null && ou.equals(name, ignoreCase = true)) return true
+            if (uuid != null && o.root.name.equals(uuid, ignoreCase = true)) return true
+            if (st != null && o.mounted) {
+                val os = statOf(o.root)
+                if (os != null && os == st) return true
+            }
+        }
+        return false
+    }
+
     /**
      * Saari removable storages, kisi bhi halat me (mounted + check ho rahi + khul nahi rahi...).
      * Khaali slot (MEDIA_REMOVED) shamil nahi.
@@ -155,6 +181,7 @@ object LocalFs {
                     dir = File("/storage/" + (uuid ?: "unknown"))
                 }
                 if (!seen.add(uuid ?: dir.absolutePath)) continue
+                if (isDuplicate(out, dir, uuid, mounted)) continue
                 val desc = try { v.getDescription(ctx) ?: "" } catch (e: Exception) { "" }
                 val usb = isUsbVolume(desc, usbMsc)
                 val ro = st == Environment.MEDIA_MOUNTED_READ_ONLY
@@ -174,7 +201,9 @@ object LocalFs {
                 val i = p.indexOf("/Android/data")
                 if (i <= 0) continue
                 val root = File(p.substring(0, i))
-                if (root.absolutePath != prim && Environment.isExternalStorageRemovable(d) && seen.add(root.absolutePath)) {
+                if (root.absolutePath != prim && Environment.isExternalStorageRemovable(d) && seen.add(root.absolutePath) &&
+                    !isDuplicate(out, root, null, true)
+                ) {
                     val usb = usbMsc > 0
                     out.add(
                         Vol(

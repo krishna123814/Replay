@@ -68,18 +68,22 @@ class HomeActivity : AppCompatActivity() {
         }
     }
 
-    private inner class CapHolder(val tv: TextView, val barBox: LinearLayout) {
+    private inner class CapHolder(val tv: TextView, val barBox: LinearLayout, val headTv: TextView?) {
         fun set(c: CapLive.Cap?, extra: String = "") {
             barBox.removeAllViews()
             if (c == null) {
+                headTv?.visibility = View.GONE
                 tv.text = extra
                 tv.visibility = if (extra.isEmpty()) View.GONE else View.VISIBLE
                 return
             }
-            val head = c.head()
-            val sp = SpannableString(head + "\n" + c.detail() + extra)
-            sp.setSpan(StyleSpan(Typeface.BOLD), 0, head.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            tv.text = sp
+            if (headTv != null) {
+                headTv.text = c.head()
+                headTv.visibility = View.VISIBLE
+                tv.text = c.detail() + extra
+            } else {
+                tv.text = c.head() + " · " + c.detail() + extra
+            }
             tv.visibility = View.VISIBLE
             barBox.addView(usageBar(c.usedFrac))
         }
@@ -88,15 +92,17 @@ class HomeActivity : AppCompatActivity() {
     private fun addCap(card: LinearLayout): CapHolder {
         val col = card.getChildAt(1) as LinearLayout
         val tv = TextView(this)
-        tv.setTextColor(Color.BLACK)
-        tv.textSize = 13f
-        tv.setPadding(0, dp(6), 0, 0)
+        tv.setTextColor(0xFF444444.toInt())
+        tv.textSize = 10.5f
+        tv.maxLines = 2
+        tv.ellipsize = android.text.TextUtils.TruncateAt.END
+        tv.setPadding(0, dp(1), 0, dp(2))
         tv.visibility = View.GONE
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         col.addView(tv)
         col.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
-        return CapHolder(tv, box)
+        return CapHolder(tv, box, card.tag as? TextView)
     }
 
     private val storagePerm =
@@ -157,14 +163,14 @@ class HomeActivity : AppCompatActivity() {
     private fun buildUi() {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(16), dp(16), dp(16), dp(16))
+        col.setPadding(dp(12), dp(4), dp(12), dp(8))
 
         val top = LinearLayout(this)
         top.orientation = LinearLayout.HORIZONTAL
         top.gravity = Gravity.CENTER_VERTICAL
         val title = TextView(this)
         title.text = if (intent.getBooleanExtra("pick", false)) "📎 File chuno" else "📁 File Manager"
-        title.textSize = 26f
+        title.textSize = 20f
         title.setTextColor(Color.BLACK)
         title.typeface = Typeface.DEFAULT_BOLD
         title.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
@@ -173,7 +179,7 @@ class HomeActivity : AppCompatActivity() {
         more.textSize = 24f
         more.setTextColor(Color.BLACK)
         more.gravity = Gravity.CENTER
-        more.layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+        more.layoutParams = LinearLayout.LayoutParams(dp(44), dp(40))
         more.setOnClickListener { showMenu() }
         top.addView(title)
         top.addView(more)
@@ -233,15 +239,19 @@ class HomeActivity : AppCompatActivity() {
         clipTv.setPadding(dp(4), dp(8), dp(4), dp(8))
         col.addView(clipTv, LinearLayout.LayoutParams(MATCH, WRAP))
 
+        val btnRow = LinearLayout(this)
+        btnRow.orientation = LinearLayout.HORIZONTAL
         val tr = Button(this)
         tr.text = "📊 Transfers"
+        tr.textSize = 12f
         tr.setOnClickListener { startActivity(Intent(this, TransfersActivity::class.java)) }
-        col.addView(tr, LinearLayout.LayoutParams(MATCH, WRAP))
-
+        btnRow.addView(tr, LinearLayout.LayoutParams(0, dp(44), 1f))
         val an = Button(this)
-        an.text = "🔍 Analyze: kaun si folder kitni jagah le rahi"
+        an.text = "🔍 Analyze (kaun si folder kitni jagah)"
+        an.textSize = 12f
         an.setOnClickListener { pickAnalyze() }
-        col.addView(an, LinearLayout.LayoutParams(MATCH, WRAP))
+        btnRow.addView(an, LinearLayout.LayoutParams(0, dp(44), 1.6f))
+        col.addView(btnRow, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val scroll = ScrollView(this)
         scroll.setBackgroundColor(Color.WHITE)
@@ -260,31 +270,50 @@ class HomeActivity : AppCompatActivity() {
         val c = LinearLayout(this)
         c.orientation = LinearLayout.HORIZONTAL
         c.gravity = Gravity.CENTER_VERTICAL
-        c.setPadding(dp(20), dp(24), dp(20), dp(24))
+        c.setPadding(dp(12), dp(7), dp(12), dp(7))
         val bg = GradientDrawable()
         bg.setColor(0xFFF0F0F0.toInt())
-        bg.cornerRadius = dp(16).toFloat()
+        bg.cornerRadius = dp(12).toFloat()
         c.background = bg
         val lp = LinearLayout.LayoutParams(MATCH, WRAP)
-        lp.topMargin = dp(14)
+        lp.topMargin = dp(5)
         c.layoutParams = lp
 
         val icon = TextView(this)
         icon.text = iconText
-        icon.textSize = 40f
-        icon.setPadding(0, 0, dp(16), 0)
+        icon.textSize = 26f
+        icon.setPadding(0, 0, dp(10), 0)
 
         val txt = LinearLayout(this)
         txt.orientation = LinearLayout.VERTICAL
         txt.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
         val name = TextView(this)
         name.text = labelText
-        name.textSize = 20f
+        name.textSize = 14.5f
         name.setTextColor(Color.BLACK)
         name.typeface = Typeface.DEFAULT_BOLD
-        sub.setTextColor(Color.BLACK)
-        sub.textSize = 13f
-        txt.addView(name)
+        name.maxLines = 1
+        name.ellipsize = android.text.TextUtils.TruncateAt.END
+        name.layoutParams = LinearLayout.LayoutParams(0, WRAP, 1f)
+        val headTv = TextView(this)
+        headTv.textSize = 11f
+        headTv.setTextColor(Color.BLACK)
+        headTv.typeface = Typeface.DEFAULT_BOLD
+        headTv.maxLines = 1
+        headTv.gravity = Gravity.END
+        headTv.setPadding(dp(6), 0, 0, 0)
+        headTv.visibility = View.GONE
+        c.tag = headTv
+        val nameRow = LinearLayout(this)
+        nameRow.orientation = LinearLayout.HORIZONTAL
+        nameRow.gravity = Gravity.CENTER_VERTICAL
+        nameRow.addView(name)
+        nameRow.addView(headTv)
+        sub.setTextColor(0xFF333333.toInt())
+        sub.textSize = 10.5f
+        sub.maxLines = 1
+        sub.ellipsize = android.text.TextUtils.TruncateAt.END
+        txt.addView(nameRow, LinearLayout.LayoutParams(MATCH, WRAP))
         txt.addView(sub)
 
         c.addView(icon)
@@ -344,8 +373,8 @@ class HomeActivity : AppCompatActivity() {
         u.setBackgroundColor(color)
         bar.addView(u, LinearLayout.LayoutParams(0, MATCH, used.coerceAtLeast(0.01f)))
         bar.addView(View(this), LinearLayout.LayoutParams(0, MATCH, (1f - used).coerceAtLeast(0.01f)))
-        val lp = LinearLayout.LayoutParams(MATCH, dp(6))
-        lp.topMargin = dp(8)
+        val lp = LinearLayout.LayoutParams(MATCH, dp(4))
+        lp.topMargin = dp(3)
         bar.layoutParams = lp
         return bar
     }
@@ -540,7 +569,7 @@ class HomeActivity : AppCompatActivity() {
             sub.ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
             val icon = if (f.isDir) "📁" else Kinds.emoji(Kinds.of(f.name, false))
             val c = card(icon, f.name, sub) { openFav(f) }
-            c.setPadding(dp(16), dp(12), dp(16), dp(12))
+            c.setPadding(dp(12), dp(7), dp(12), dp(7))
             (c.getChildAt(0) as TextView).textSize = 26f
             ((c.getChildAt(1) as LinearLayout).getChildAt(0) as TextView).textSize = 16f
             c.setOnLongClickListener {
