@@ -64,12 +64,12 @@ class DupUi(
     private var groups: List<Group> = emptyList()
     private val hashes = ConcurrentHashMap<String, String>()
 
-    private val modeNames = arrayOf("Naam + Size", "Sirf Size", "Sirf Naam", "Milta-julta naam", "Content (phone)")
+    private val modeNames = arrayOf("Naam + Size", "Sirf Size", "Sirf Naam", "Smart milta-julta naam", "Content (phone)")
     private val modeHints = arrayOf(
         "Naam aur size dono same = pakki copy.",
         "Size bilkul same (naam alag bhi) = rename hui copy ho sakti hai.",
         "Naam same par size alag = alag file bhi ho sakti hai, dhyan se chuno.",
-        "(1), copy jaise hisse hata kar naam milaya. Size alag ho sakta hai.",
+        "Smart: shabd milaye jate hain. _1080p / _720p, xHamster jaise site naam, feat., (1), copy, capital-small, punctuation sab ignore. Alag quality / size wali copy bhi milegi.",
         "Phone / SD par file ke andar ka data (shuru, beech, ant) milaya = sabse pakka."
     )
     private val typeNames = arrayOf("Sab", "🖼 Image", "🎬 Video", "🎵 Music")
@@ -380,24 +380,95 @@ class DupUi(
         else -> files
     }
 
-    private val copyRe1 = Regex("\\s*\\(\\d+\\)\\z")
-    private val copyRe2 = Regex("[\\s_-]*(copy|copy\\s*\\d+|duplicate)\\z", RegexOption.IGNORE_CASE)
+    // ───────────── smart milta-julta naam (word-based fuzzy match) ─────────────
 
-    private fun norm(name: String): String {
-        val ext = name.substringAfterLast('.', "").lowercase()
-        var b = name.substringBeforeLast('.', name).trim()
-        var prev: String
-        do {
-            prev = b
-            b = copyRe1.replace(b, "")
-            b = copyRe2.replace(b, "").trim()
-        } while (b != prev)
-        if (b.lowercase().startsWith("copy of ")) b = b.substring(8)
-        return b.lowercase() + "." + ext
+    // quality / codec / site / faltu shabd: inhe naam se hata kar compare hota hai
+    private val noiseRe = Regex(
+        "^(\\d{3,4}p|\\d{3,4}x\\d{3,4}|[248]k|hd|fhd|uhd|sd|hq|lq|hdr|" +
+            "mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|3gp|mp3|jpg|jpeg|png|webp|" +
+            "h264|h265|x264|x265|hevc|aac|ac3|web|dl|webrip|bluray|hdrip|" +
+            "copy|duplicate|of|feat|ft|featuring|www|com|net|org|" +
+            "video|videos|vid|clip|download|downloaded|full|" +
+            "xhamster|xhamster2|xvideos|xnxx|pornhub|redtube|youporn|spankbang|eporner|" +
+            "tnaflix|txxx|hclips|beeg|tube8|porn|sex)$"
+    )
+    private val parenNumRe = Regex("\\(\\d+\\)|\\[[^\\]]*]")
+    private val splitRe = Regex("[^\\p{L}\\p{N}]+")
+
+    private fun tokens(name: String): Set<String> {
+        var b = name.substringBeforeLast('.', name)
+        b = java.text.Normalizer.normalize(b, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+        b = parenNumRe.replace(b, " ").lowercase()
+        val out = LinkedHashSet<String>()
+        for (t in b.split(splitRe)) {
+            if (t.isEmpty() || noiseRe.matches(t)) continue
+            out.add(t)
+        }
+        return out
+    }
+
+    private fun similar(a: Set<String>, b: Set<String>): Boolean {
+        val small = if (a.size <= b.size) a else b
+        val big = if (a.size <= b.size) b else a
+        var inter = 0
+        for (t in small) if (t in big) inter++
+        if (inter == 0) return false
+        val uni = a.size + b.size - inter
+        val jac = inter.toDouble() / uni
+        val cont = inter.toDouble() / small.size
+        if (small.size < 2) return a == b                  // 1 shabd ka naam: sirf exact
+        if (small.size < 4) return jac >= 0.99              // chhote naam: bilkul wahi shabd
+        return jac >= 0.75 || (cont >= 0.9 && jac >= 0.5)
+    }
+
+    /** Milte-julte naam wali files ke groups (union-find). Quality / site / feat. / case / punctuation ignore. */
+    private fun fuzzyGroups(src: List<DupFile>): List<List<DupFile>> {
+        val n = src.size
+        val toks = ArrayList<Set<String>>(n)
+        for (d in src) toks.add(tokens(d.e.name))
+        val parent = IntArray(n) { it }
+        fun find(x: Int): Int {
+            var r = x
+            while (parent[r] != r) r = parent[r]
+            var c = x
+            while (parent[c] != r) { val nx = parent[c]; parent[c] = r; c = nx }
+            return r
+        }
+        // inverted index: token -> files (bahut aam shabd chhod do taaki tez rahe)
+        val post = HashMap<String, MutableList<Int>>()
+        for (i in 0 until n) for (t in toks[i]) post.getOrPut(t) { ArrayList() }.add(i)
+        for (i in 0 until n) {
+            if (toks[i].isEmpty()) continue
+            val shared = HashMap<Int, Int>()
+            for (t in toks[i]) {
+                val l = post[t] ?: continue
+                if (l.size > 400) continue
+                for (j in l) if (j > i) shared[j] = (shared[j] ?: 0) + 1
+            }
+            for ((j, c) in shared) {
+                if (c < 1) continue
+                if (src[i].e.kind != src[j].e.kind) continue
+                if (find(i) == find(j)) continue
+                if (similar(toks[i], toks[j])) parent[find(j)] = find(i)
+            }
+        }
+        val map = LinkedHashMap<Int, MutableList<DupFile>>()
+        for (i in 0 until n) map.getOrPut(find(i)) { ArrayList() }.add(src[i])
+        return map.values.filter { it.size >= 2 }
     }
 
     private fun computeGroups(): List<Group> {
         val src = filtered()
+        if (mode == 3) {
+            val out3 = ArrayList<Group>()
+            for (v in fuzzyGroups(src)) {
+                val sorted = v.sortedBy { it.e.modified }
+                out3.add(Group(sorted[0].e.name, sorted, true))
+            }
+            out3.sortByDescending { it.extra }
+            return out3
+        }
         val map = LinkedHashMap<String, MutableList<DupFile>>()
         for (d in src) {
             val e = d.e
@@ -405,7 +476,7 @@ class DupUi(
                 0 -> e.name.lowercase() + "|" + e.size
                 1 -> if (e.size > 0) e.size.toString() else continue
                 2 -> e.name.lowercase()
-                3 -> norm(e.name)
+                3 -> e.name.lowercase()
                 else -> {
                     val h = hashes[d.e.url] ?: continue
                     if (e.size <= 0 || h.startsWith("err:")) continue
