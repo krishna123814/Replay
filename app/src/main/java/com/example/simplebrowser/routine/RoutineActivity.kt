@@ -31,7 +31,7 @@ import java.io.File
  * ⏰ Routine / Tasks — server wale chart.html ke ⏰ panel ka same page (assets/routine/index.html).
  * 13 tab: Routine, To-Do, Habit, Practice, Sunday, Holiday, Dipanshu, Rough, Info, Travel, Accounts, Reports, Email, Ekadashi.
  *
- * STEP 2: server sync. Local copy: filesDir/routine/*.json. Server: GET dav/app_state/{routine,accounts}.json,
+ * STEP 2: server sync. Local copy: filesDir/routine/ ke andar <key>.json files. Server: GET dav/app_state/{routine,accounts}.json,
  * save = POST api/local_state_save (RoutineNet). Reports / Email / Ekadashi / Holiday = server WebSocket /ws (wsCall).
  * Sync ka logic page ke JS me hai (assets/routine/index.html), yahan sirf network + file bridge.
  */
