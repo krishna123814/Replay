@@ -39,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        showLastCrash()
 
         findViewById<Button>(R.id.btnBrowser).setOnClickListener {
             startActivity(Intent(this, BrowserActivity::class.java))
@@ -128,5 +129,32 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Toast.makeText(this, "Service start error: " + e.message, Toast.LENGTH_LONG).show()
         }
+    }
+
+    /** Pichli baar crash hua tha to uska error dikhao (copy karke bhej sakte ho). */
+    private fun showLastCrash() {
+        try {
+            val f = java.io.File(filesDir, "last_crash.txt")
+            if (!f.exists()) return
+            val txt = f.readText()
+            f.delete()
+            val tv = android.widget.TextView(this)
+            tv.text = txt
+            tv.textSize = 10f
+            tv.setTextIsSelectable(true)
+            tv.setPadding(32, 16, 32, 16)
+            val sv = android.widget.ScrollView(this)
+            sv.addView(tv)
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Pichla crash")
+                .setView(sv)
+                .setPositiveButton("Copy") { _, _ ->
+                    val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", txt))
+                    Toast.makeText(this, "Copy ho gaya", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Band", null)
+                .show()
+        } catch (_: Throwable) { }
     }
 }
