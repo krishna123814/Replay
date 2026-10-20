@@ -13,17 +13,22 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 import android.provider.Settings
 import android.view.ContextThemeWrapper
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -117,10 +122,16 @@ class FloatAppService : Service() {
             val nw = AppWindow(this, app)
             windows[app] = nw
             nw.start()
+            bringDotsToFront()
         } else {
             w.restore()     // pehle se khuli hai: minimized ho to kholo, warna upar le aao
         }
         return START_STICKY
+    }
+
+    /** Sab dots ko windows ke upar rakho taaki hamesha dikhen. */
+    fun bringDotsToFront() {
+        for (w in windows.values) w.reAddDot()
     }
 
     /** Ek app ki window band (baaki chalti rahein); koi na bache to service band. */
@@ -178,8 +189,11 @@ class FloatAppService : Service() {
 }
 
 /**
- * Floating app ki window (File Manager / Money / Routine): title bar (drag), ⋮ menu (Main menu...), — minimize (bubble), ✕ band,
- * neeche-right kone se resize. Andar Home / Browser screens ka stack chalta hai.
+ * Floating app ki window (File Manager / Money / Routine) — floating browser jaisa DOT system:
+ *  - dot tap -> window show/hide
+ *  - dot long-press -> pill menu (back, maximize, show/hide, main menu, [files home], settings, close)
+ *  - dot drag -> move; neeche ❌ zone me chhodo to window band
+ *  - window me alag title bar / minimize / close button nahi: sirf upar patla drag handle aur ◢ resize
  */
 class AppWindow(private val svc: FloatAppService, private val kind: String) : OvlScreen.Host {
 
@@ -188,29 +202,58 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
     private val prefs = svc.getSharedPreferences("FloatAppPrefs", Context.MODE_PRIVATE)
     private val idx = FloatApps.index(kind)
     private val density = svc.resources.displayMetrics.density
+    private val handler = Handler(Looper.getMainLooper())
 
     private fun dp(v: Int): Int = (v * density + 0.5f).toInt()
     private fun screenW(): Int = svc.resources.displayMetrics.widthPixels
     private fun screenH(): Int = svc.resources.displayMetrics.heightPixels
 
+    // ── Window B: app window ──────────────────────────────────────────
     private lateinit var root: FrameLayout
     private lateinit var panel: LinearLayout
+    private lateinit var dragHandle: FrameLayout
     private lateinit var body: FrameLayout
     private lateinit var grip: TextView
     private lateinit var params: WindowManager.LayoutParams
-    private var bubble: TextView? = null
+
+    // ── Window A: dot + pill ──────────────────────────────────────────
+    private lateinit var dotRoot: LinearLayout
+    private lateinit var dotWrapper: FrameLayout
+    private lateinit var dotView: View
+    private lateinit var pill: LinearLayout
+    private lateinit var dotParams: WindowManager.LayoutParams
+    private lateinit var btnWindow: TextView
+    private lateinit var btnMaximize: TextView
+    private val pillButtons = ArrayList<TextView>()
+
+    // ── close zone (dot drag ke waqt) ─────────────────────────────────
+    private lateinit var closeZone: FrameLayout
+    private lateinit var closeParams: WindowManager.LayoutParams
+    private var isCloseZoneVisible = false
 
     private val stack = ArrayList<OvlScreen>()
-    private var minimized = false
+    private var hidden = false          // window chhupi hai (sirf dot dikhta hai)
     private var maximized = false
     private var destroyed = false
+    private var isPillOpen = false
+    private var pillOnLeft = false
     private var winX = 0
     private var winY = 0
     private var winW = 0
     private var winH = 0
+    private var dotCX = 0
+    private var dotCY = 0
 
     private val normalFlags =
         WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+
+    private val collapseRunnable = Runnable { closePill() }
+    private var longPressed = false
+    private val longPressRunnable = Runnable {
+        longPressed = true
+        dotWrapper.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        if (isPillOpen) scheduleAutoCollapse() else openPill()
+    }
 
     // ── start / destroy ───────────────────────────────────────────────
     fun start() {
@@ -218,6 +261,9 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         winH = prefs.getInt("${kind}_h", minOf(dp(520), screenH() - dp(120))).coerceIn(dp(280), screenH())
         winX = prefs.getInt("${kind}_x", dp(8) + idx * dp(24)).coerceIn(-dp(40), maxOf(0, screenW() - dp(60)))
         winY = prefs.getInt("${kind}_y", dp(70) + idx * dp(24)).coerceIn(0, maxOf(0, screenH() - dp(60)))
+        // dot default: right edge (har app ka dot thoda alag neeche)
+        dotCX = prefs.getInt("${kind}_dx", screenW() - dp(24)).coerceIn(0, screenW())
+        dotCY = prefs.getInt("${kind}_dy", screenH() / 4 + dp(200) + idx * dp(56)).coerceIn(0, screenH())
 
         buildUi()
 
@@ -226,11 +272,28 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         params.x = winX
         params.y = winY
         params.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        // Window A (dot + pill): kabhi focus nahi leta
+        dotParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or normalFlags,
+            PixelFormat.TRANSLUCENT
+        )
+        dotParams.gravity = Gravity.TOP or Gravity.START
+        dotParams.x = dotCX - dp(20)
+        dotParams.y = dotCY - dp(20)
         if (Build.VERSION.SDK_INT >= 28) {
             params.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            dotParams.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
+
+        // pehle window, phir dot -> dot hamesha upar rahe
         wm.addView(root, params)
+        wm.addView(dotRoot, dotParams)
+        applyDotTheme()
 
         push(FloatApps.root(kind, ctx, this))
     }
@@ -238,26 +301,41 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
     fun destroy() {
         if (destroyed) return
         destroyed = true
+        handler.removeCallbacksAndMessages(null)
         val list = ArrayList(stack)
         stack.clear()
         for ((i, s) in list.withIndex()) {
             s.isFinishing = true
-            try { if (i == list.size - 1 && !minimized) s.onPause() } catch (e: Exception) { }
+            try { if (i == list.size - 1 && !hidden) s.onPause() } catch (e: Exception) { }
             try { s.onDestroy() } catch (e: Exception) { }
         }
-        hideBubble()
+        if (isCloseZoneVisible) {
+            try { wm.removeView(closeZone) } catch (e: Exception) { }
+            isCloseZoneVisible = false
+        }
+        try { wm.removeView(dotRoot) } catch (e: Exception) { }
         try { wm.removeView(root) } catch (e: Exception) { }
     }
 
+    /** Dot ko window ke upar rakho (remove+add). */
+    fun reAddDot() {
+        if (destroyed || !::dotRoot.isInitialized) return
+        try {
+            wm.removeViewImmediate(dotRoot)
+            wm.addView(dotRoot, dotParams)
+        } catch (e: Exception) { }
+    }
+
     // ── UI ────────────────────────────────────────────────────────────
-    private fun barBtn(label: String, onClick: () -> Unit): TextView {
+    private fun mkBtn(label: String, onClick: () -> Unit): TextView {
         val t = TextView(ctx)
         t.text = label
         t.setTextColor(Color.WHITE)
-        t.textSize = 16f
         t.gravity = Gravity.CENTER
-        t.layoutParams = LinearLayout.LayoutParams(dp(40), ViewGroup.LayoutParams.MATCH_PARENT)
+        t.textSize = 14f
+        t.layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
         t.setOnClickListener { onClick() }
+        pillButtons.add(t)
         return t
     }
 
@@ -280,29 +358,21 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         pbg.setStroke(dp(1), 0xFF37474F.toInt())
         panel.background = pbg
 
-        val titleBar = LinearLayout(ctx)
-        titleBar.orientation = LinearLayout.HORIZONTAL
-        titleBar.gravity = Gravity.CENTER_VERTICAL
-        titleBar.setBackgroundColor(0xFF37474F.toInt())
-        val titleTv = TextView(ctx)
-        titleTv.text = FloatApps.title(kind)
-        titleTv.setTextColor(Color.WHITE)
-        titleTv.textSize = 13f
-        titleTv.typeface = Typeface.DEFAULT_BOLD
-        titleTv.maxLines = 1
-        titleTv.gravity = Gravity.CENTER_VERTICAL
-        titleTv.setPadding(dp(10), 0, dp(4), 0)
-        titleBar.addView(titleTv, LinearLayout.LayoutParams(0, MATCH, 1f))
-        titleBar.addView(barBtn("⋮") { showWindowMenu() })
-        titleBar.addView(barBtn("—") { minimize() })
-        titleBar.addView(barBtn("✕") { svc.closeWindow(kind) })
-        attachDrag(titleBar)
-        panel.addView(titleBar, LinearLayout.LayoutParams(MATCH, dp(34)))
+        // patla drag handle (browser jaisa) — koi button nahi
+        dragHandle = FrameLayout(ctx)
+        dragHandle.setBackgroundColor(Color.parseColor("#1e222d"))
+        val bar = View(ctx)
+        val barShape = GradientDrawable()
+        barShape.cornerRadius = dp(2).toFloat()
+        barShape.setColor(Color.parseColor("#66FFFFFF"))
+        bar.background = barShape
+        dragHandle.addView(bar, FrameLayout.LayoutParams(dp(36), dp(4), Gravity.CENTER))
+        attachDrag(dragHandle)
+        panel.addView(dragHandle, LinearLayout.LayoutParams(MATCH, dp(18)))
 
         body = FrameLayout(ctx)
         body.setBackgroundColor(Color.WHITE)
         panel.addView(body, LinearLayout.LayoutParams(MATCH, 0, 1f))
-
         root.addView(panel, FrameLayout.LayoutParams(MATCH, MATCH))
 
         grip = TextView(ctx)
@@ -313,30 +383,236 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         grip.alpha = 0.8f
         root.addView(grip, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.BOTTOM or Gravity.END))
         attachResize(grip)
+
+        buildDot()
     }
 
-    private fun attachDrag(v: View) {
-        var sx = 0f
-        var sy = 0f
-        var ox = 0
-        var oy = 0
-        v.setOnTouchListener { _, e ->
-            if (!maximized && !minimized) {
-                when (e.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        sx = e.rawX
-                        sy = e.rawY
-                        ox = params.x
-                        oy = params.y
+    private fun buildDot() {
+        dotRoot = LinearLayout(ctx)
+        dotRoot.orientation = LinearLayout.HORIZONTAL
+        dotRoot.gravity = Gravity.CENTER_VERTICAL
+
+        dotWrapper = FrameLayout(ctx)
+        dotView = View(ctx)
+        val dotShape = GradientDrawable()
+        dotShape.shape = GradientDrawable.OVAL
+        val dotColors = arrayOf("#F5A623", "#66BB6A", "#AB47BC") // files, money, routine
+        dotShape.setColor(Color.parseColor(dotColors[idx % dotColors.size]))
+        dotShape.setStroke(maxOf(1, (1.5f * density).toInt()), Color.parseColor("#B3FFFFFF"))
+        dotView.background = dotShape
+        dotWrapper.addView(dotView, FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+        dotRoot.addView(dotWrapper, LinearLayout.LayoutParams(dp(40), dp(40)))
+        attachDot()
+
+        // pill: dark rounded row, dot ke paas khulta hai
+        pill = LinearLayout(ctx)
+        pill.orientation = LinearLayout.HORIZONTAL
+        pill.gravity = Gravity.CENTER
+        pill.setPadding(dp(4), dp(4), dp(4), dp(4))
+        val pillShape = GradientDrawable()
+        pillShape.cornerRadius = dp(20).toFloat()
+        pillShape.setColor(Color.parseColor("#F21e222d"))
+        pill.background = pillShape
+
+        mkBtn("◀") { scheduleAutoCollapse(); showWindow(); backStep() }
+        btnMaximize = mkBtn("⛶") { scheduleAutoCollapse(); showWindow(); toggleMaximize() }
+        btnWindow = mkBtn("—") { scheduleAutoCollapse(); toggleWindow() }
+        mkBtn("🏠") { scheduleAutoCollapse(); openMainMenu() }
+        if (kind == FloatApps.FILES) mkBtn("📁") { scheduleAutoCollapse(); showWindow(); goHome() }
+        mkBtn("⚙") { scheduleAutoCollapse(); showSettings() }
+        mkBtn("✕") { svc.closeWindow(kind) }
+        for (b in pillButtons) pill.addView(b)
+
+        // close zone (alag overlay window, dot drag ke waqt dikhta hai)
+        closeZone = FrameLayout(ctx)
+        val cross = TextView(ctx)
+        cross.text = "❌"
+        cross.textSize = 26f
+        cross.gravity = Gravity.CENTER
+        val bg = GradientDrawable()
+        bg.shape = GradientDrawable.OVAL
+        bg.setColor(Color.parseColor("#CCFF3333"))
+        closeZone.background = bg
+        closeZone.addView(cross, FrameLayout.LayoutParams(dp(65), dp(65), Gravity.CENTER))
+        closeParams = WindowManager.LayoutParams(
+            dp(65), dp(65), overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+        )
+        closeParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        closeParams.y = dp(40)
+    }
+
+    // ── dot gestures: tap = show/hide, long-press = pill, drag = move, ❌ = band ──
+    private fun attachDot() {
+        var sX = 0; var sY = 0; var sTX = 0f; var sTY = 0f; var dragging = false
+        dotWrapper.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    sX = dotCX; sY = dotCY; sTX = e.rawX; sTY = e.rawY
+                    dragging = false
+                    longPressed = false
+                    handler.removeCallbacks(longPressRunnable)
+                    handler.postDelayed(longPressRunnable, ViewConfiguration.getLongPressTimeout().toLong())
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val slop = if (longPressed) 30 else 10
+                    if (dragging || abs(e.rawX - sTX) > slop || abs(e.rawY - sTY) > slop) {
+                        if (!dragging) {
+                            dragging = true
+                            handler.removeCallbacks(longPressRunnable)
+                            if (isPillOpen) closePill()
+                            showCloseZone()
+                        }
+                        dotCX = (sX + (e.rawX - sTX).toInt()).coerceIn(0, screenW())
+                        dotCY = (sY + (e.rawY - sTY).toInt()).coerceIn(0, screenH())
+                        placeDotWindow()
+                        val over = isOverCloseZone(e.rawX, e.rawY)
+                        closeZone.scaleX = if (over) 1.3f else 1.0f
+                        closeZone.scaleY = if (over) 1.3f else 1.0f
                     }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    handler.removeCallbacks(longPressRunnable)
+                    if (dragging) {
+                        hideCloseZone()
+                        if (isOverCloseZone(e.rawX, e.rawY)) svc.closeWindow(kind)
+                        else prefs.edit().putInt("${kind}_dx", dotCX).putInt("${kind}_dy", dotCY).apply()
+                    } else if (!longPressed) {
+                        if (isPillOpen) closePill() else toggleWindow()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(longPressRunnable)
+                    if (dragging) hideCloseZone()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    private fun showCloseZone() {
+        if (isCloseZoneVisible) return
+        try { wm.addView(closeZone, closeParams); isCloseZoneVisible = true } catch (e: Exception) { }
+    }
+
+    private fun hideCloseZone() {
+        if (!isCloseZoneVisible) return
+        try { wm.removeView(closeZone) } catch (e: Exception) { }
+        isCloseZoneVisible = false
+    }
+
+    private fun isOverCloseZone(x: Float, y: Float): Boolean =
+        y > screenH() - dp(140) && x > screenW() / 3 && x < (screenW() * 2) / 3
+
+    // ── pill ──────────────────────────────────────────────────────────
+    private fun pillW(): Int = dp(32) * pillButtons.count { it.visibility != View.GONE } + dp(8)
+
+    private fun placeDotWindow() {
+        if (destroyed) return
+        var x = dotCX - dp(20)
+        if (isPillOpen) {
+            if (pillOnLeft) x -= pillW()
+            val totalW = dp(40) + pillW()
+            x = x.coerceIn(0, maxOf(0, screenW() - totalW))
+        }
+        dotParams.x = x
+        dotParams.y = dotCY - dp(20)
+        try { wm.updateViewLayout(dotRoot, dotParams) } catch (e: Exception) { }
+    }
+
+    private fun scheduleAutoCollapse() {
+        handler.removeCallbacks(collapseRunnable)
+        handler.postDelayed(collapseRunnable, 4000L)
+    }
+
+    private fun openPill() {
+        if (isPillOpen) return
+        val sw = screenW()
+        val pw = pillW()
+        val fitsLeft = dotCX - dp(20) - pw >= 0
+        val fitsRight = dotCX + dp(20) + pw <= sw
+        val preferLeft = dotCX > sw / 2
+        pillOnLeft = when {
+            preferLeft && fitsLeft -> true
+            !preferLeft && fitsRight -> false
+            fitsLeft -> true
+            fitsRight -> false
+            else -> preferLeft
+        }
+        val plp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        if (pillOnLeft) dotRoot.addView(pill, 0, plp) else dotRoot.addView(pill, plp)
+        isPillOpen = true
+        placeDotWindow()
+        scheduleAutoCollapse()
+    }
+
+    private fun closePill() {
+        handler.removeCallbacks(collapseRunnable)
+        if (!isPillOpen) return
+        dotRoot.removeView(pill)
+        isPillOpen = false
+        placeDotWindow()
+    }
+
+    // ── dot theme (size / opacity) ────────────────────────────────────
+    private fun applyDotTheme() {
+        val size = prefs.getInt("dot_size", 16).coerceIn(10, 28)
+        val lp = dotView.layoutParams as FrameLayout.LayoutParams
+        lp.width = dp(size)
+        lp.height = dp(size)
+        dotView.layoutParams = lp
+        dotView.alpha = maxOf(prefs.getInt("dot_opacity", 100), 25) / 100f
+    }
+
+    private fun showSettings() {
+        val col = LinearLayout(ctx)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(20), dp(12), dp(20), dp(4))
+        fun label(t: String) = TextView(ctx).apply { text = t; textSize = 13f }
+        fun seek(max: Int, cur: Int, onChange: (Int) -> Unit) = SeekBar(ctx).also { sb ->
+            sb.max = max
+            sb.progress = cur
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) onChange(p) }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        col.addView(label("Dot size (10–28dp)"))
+        col.addView(seek(18, prefs.getInt("dot_size", 16).coerceIn(10, 28) - 10) {
+            prefs.edit().putInt("dot_size", it + 10).apply(); applyDotTheme()
+        })
+        col.addView(label("Dot opacity"))
+        col.addView(seek(100, prefs.getInt("dot_opacity", 100)) {
+            prefs.edit().putInt("dot_opacity", it).apply(); applyDotTheme()
+        })
+        OvlBuilder(ctx)
+            .setTitle(FloatApps.title(kind) + " — dot settings")
+            .setView(col)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    // ── drag / resize ─────────────────────────────────────────────────
+    private fun attachDrag(v: View) {
+        var sx = 0f; var sy = 0f; var ox = 0; var oy = 0
+        v.setOnTouchListener { _, e ->
+            if (!maximized && !hidden) {
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; ox = params.x; oy = params.y }
                     MotionEvent.ACTION_MOVE -> {
                         params.x = (ox + (e.rawX - sx).toInt()).coerceIn(-dp(40), maxOf(0, screenW() - dp(60)))
                         params.y = (oy + (e.rawY - sy).toInt()).coerceIn(0, maxOf(0, screenH() - dp(60)))
                         updateWin()
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        winX = params.x
-                        winY = params.y
+                        winX = params.x; winY = params.y
                         saveGeometry()
                     }
                 }
@@ -346,27 +622,18 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
     }
 
     private fun attachResize(v: View) {
-        var sx = 0f
-        var sy = 0f
-        var ow = 0
-        var oh = 0
+        var sx = 0f; var sy = 0f; var ow = 0; var oh = 0
         v.setOnTouchListener { _, e ->
-            if (!maximized && !minimized) {
+            if (!maximized && !hidden) {
                 when (e.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        sx = e.rawX
-                        sy = e.rawY
-                        ow = params.width
-                        oh = params.height
-                    }
+                    MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; ow = params.width; oh = params.height }
                     MotionEvent.ACTION_MOVE -> {
                         params.width = (ow + (e.rawX - sx).toInt()).coerceIn(dp(220), screenW())
                         params.height = (oh + (e.rawY - sy).toInt()).coerceIn(dp(280), screenH())
                         updateWin()
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        winW = params.width
-                        winH = params.height
+                        winW = params.width; winH = params.height
                         saveGeometry()
                         notifyResized()
                     }
@@ -394,10 +661,10 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         return if (id > 0) svc.resources.getDimensionPixelSize(id) else 0
     }
 
-    /** minimized / maximized / normal ke hisaab se window ka size aur flags. */
+    /** hidden / maximized / normal ke hisaab se window ka size aur flags. */
     private fun applyParams() {
         if (destroyed || !::params.isInitialized) return
-        if (minimized) {
+        if (hidden) {
             params.x = 0
             params.y = 0
             params.width = 1
@@ -418,110 +685,58 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
             params.flags = normalFlags
         }
         val lp = panel.layoutParams as FrameLayout.LayoutParams
-        if (maximized && !minimized) lp.setMargins(0, sysDim("status_bar_height"), 0, sysDim("navigation_bar_height"))
+        if (maximized && !hidden) lp.setMargins(0, sysDim("status_bar_height"), 0, sysDim("navigation_bar_height"))
         else lp.setMargins(0, 0, 0, 0)
         panel.layoutParams = lp
-        grip.visibility = if (maximized || minimized) View.GONE else View.VISIBLE
-        root.visibility = if (minimized) View.GONE else View.VISIBLE
+        dragHandle.visibility = if (maximized) View.GONE else View.VISIBLE
+        grip.visibility = if (maximized || hidden) View.GONE else View.VISIBLE
+        root.visibility = if (hidden) View.GONE else View.VISIBLE
+        btnWindow.text = if (hidden) "🪟" else "—"
         updateWin()
     }
 
-    // ── minimize / maximize / bubble ──────────────────────────────────
-    fun minimize() {
-        if (minimized || destroyed) return
+    // ── show / hide / maximize ────────────────────────────────────────
+    private fun hideWindow() {
+        if (hidden || destroyed) return
         try { stack.lastOrNull()?.onPause() } catch (e: Exception) { }
-        minimized = true
+        hidden = true
         applyParams()
-        showBubble()
     }
 
-    /** Minimized ho to wapas kholo; khuli ho to bas upar le aao. */
+    private fun showWindow() {
+        if (!hidden || destroyed) return
+        hidden = false
+        // is window ko baaki windows ke upar lao, phir dot ko uske upar
+        try { wm.removeViewImmediate(root); wm.addView(root, params) } catch (e: Exception) { }
+        applyParams()
+        svc.bringDotsToFront()
+        notifyResized()
+        try { stack.lastOrNull()?.onResume() } catch (e: Exception) { }
+    }
+
+    private fun toggleWindow() {
+        if (hidden) showWindow() else hideWindow()
+    }
+
+    /** Service se: hidden ho to kholo; khuli ho to bas upar le aao. */
     fun restore() {
         if (destroyed) return
-        if (minimized) {
-            minimized = false
-            hideBubble()
-            applyParams()
-            notifyResized()
-            try { stack.lastOrNull()?.onResume() } catch (e: Exception) { }
+        if (hidden) {
+            showWindow()
         } else {
-            try {
-                wm.removeViewImmediate(root)
-                wm.addView(root, params)
-            } catch (e: Exception) { }
+            try { wm.removeViewImmediate(root); wm.addView(root, params) } catch (e: Exception) { }
+            svc.bringDotsToFront()
         }
     }
 
     private fun toggleMaximize() {
         maximized = !maximized
         applyParams()
+        btnMaximize.text = if (maximized) "🗗" else "⛶"
         root.post { notifyResized() }
     }
 
-    private fun showBubble() {
-        if (bubble != null) return
-        val size = dp(48)
-        val b = TextView(ctx)
-        b.text = FloatApps.icon(kind)
-        b.textSize = 22f
-        b.gravity = Gravity.CENTER
-        val bg = GradientDrawable()
-        bg.shape = GradientDrawable.OVAL
-        bg.setColor(0xDDEF6C00.toInt())
-        b.background = bg
-        val bp = WindowManager.LayoutParams(
-            size, size, overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or normalFlags,
-            PixelFormat.TRANSLUCENT
-        )
-        bp.gravity = Gravity.TOP or Gravity.START
-        bp.x = prefs.getInt("${kind}_bx", screenW() - size - dp(4)).coerceIn(0, maxOf(0, screenW() - size))
-        bp.y = prefs.getInt("${kind}_by", screenH() / 3 + idx * dp(56)).coerceIn(0, maxOf(0, screenH() - size))
-
-        var sx = 0f
-        var sy = 0f
-        var ox = 0
-        var oy = 0
-        var moved = false
-        b.setOnTouchListener { _, e ->
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    sx = e.rawX
-                    sy = e.rawY
-                    ox = bp.x
-                    oy = bp.y
-                    moved = false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = (e.rawX - sx).toInt()
-                    val dy = (e.rawY - sy).toInt()
-                    if (abs(dx) > dp(6) || abs(dy) > dp(6)) moved = true
-                    if (moved) {
-                        bp.x = (ox + dx).coerceIn(0, maxOf(0, screenW() - size))
-                        bp.y = (oy + dy).coerceIn(0, maxOf(0, screenH() - size))
-                        try { wm.updateViewLayout(b, bp) } catch (ex: Exception) { }
-                    }
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (!moved) restore()
-                    else prefs.edit().putInt("${kind}_bx", bp.x).putInt("${kind}_by", bp.y).apply()
-                }
-            }
-            true
-        }
-        try {
-            wm.addView(b, bp)
-            bubble = b
-        } catch (e: Exception) { }
-    }
-
-    private fun hideBubble() {
-        val b = bubble ?: return
-        bubble = null
-        try { wm.removeView(b) } catch (e: Exception) { }
-    }
-
-    // ── menu ──────────────────────────────────────────────────────────
+    // ── menu / navigation ─────────────────────────────────────────────
     private fun openMainMenu() {
         try {
             svc.startActivity(
@@ -537,30 +752,18 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         while (stack.size > 1) finishScreen(stack[stack.size - 1])
     }
 
-    private fun showWindowMenu() {
-        val labels = ArrayList<String>()
-        val acts = ArrayList<() -> Unit>()
-        labels.add("🏠 Main menu"); acts.add { openMainMenu() }
-        labels.add(if (maximized) "🗗 Chhota karo (restore)" else "🗖 Poori screen (maximize)"); acts.add { toggleMaximize() }
-        if (kind == FloatApps.FILES) {
-            labels.add("📁 File Manager Home (storages)"); acts.add { goHome() }
-        }
-        labels.add("➖ Minimize"); acts.add { minimize() }
-        labels.add("✕ " + FloatApps.title(kind) + " band karo"); acts.add { svc.closeWindow(kind) }
-        OvlBuilder(ctx)
-            .setItems(labels.toTypedArray()) { _, i -> acts[i]() }
-            .show()
+    /** pill ka ◀: andar ki screen ka back; sabse pehli screen par kuch nahi. */
+    private fun backStep() {
+        val top = stack.lastOrNull() ?: return
+        if (top.onBack()) return
+        if (stack.size > 1) finishScreen(top)
     }
 
     private fun onBackInWindow() {
         val top = stack.lastOrNull() ?: return
         if (top.onBack()) return
-        if (stack.size == 1) {
-            // sabse pehli screen par back: window band nahi, bas minimize
-            minimize()
-        } else {
-            finishScreen(top)
-        }
+        if (stack.size == 1) hideWindow() // sabse pehli screen par back: window band nahi, bas hide
+        else finishScreen(top)
     }
 
     // ── screen stack (OvlScreen.Host) ─────────────────────────────────
@@ -572,12 +775,12 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
 
     private fun push(s: OvlScreen) {
         val prev = stack.lastOrNull()
-        if (prev != null && !minimized) {
+        if (prev != null && !hidden) {
             try { prev.onPause() } catch (e: Exception) { }
         }
         stack.add(s)
         s.onCreate(null)
-        if (!s.isFinishing && !minimized) s.onResume()
+        if (!s.isFinishing && !hidden) s.onResume()
     }
 
     override fun setContent(s: OvlScreen, v: View) {
@@ -586,13 +789,13 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
 
     override fun finishScreen(s: OvlScreen) {
         if (destroyed) return
-        val idx = stack.indexOf(s)
-        if (idx < 0) return
-        val wasTop = idx == stack.size - 1
-        if (wasTop && !minimized) {
+        val i = stack.indexOf(s)
+        if (i < 0) return
+        val wasTop = i == stack.size - 1
+        if (wasTop && !hidden) {
             try { s.onPause() } catch (e: Exception) { }
         }
-        stack.removeAt(idx)
+        stack.removeAt(i)
         try { s.onDestroy() } catch (e: Exception) { }
         if (stack.isEmpty()) {
             svc.closeWindow(kind)
@@ -601,7 +804,7 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         if (wasTop) {
             val t = stack[stack.size - 1]
             t.screenView?.let { mount(it) }
-            if (!minimized) {
+            if (!hidden) {
                 try { t.onResume() } catch (e: Exception) { }
             }
         }
