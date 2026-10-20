@@ -64,6 +64,14 @@
             android:theme="@style/DarkTheme"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- ⏰ Routine / Tasks (server wale chart.html ka ⏰ panel) -->
+        <activity
+            android:name=".routine.RoutineActivity"
+            android:exported="false"
+            android:theme="@style/DarkTheme"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- ═══ File Manager (MyFiles se merge): AIC Disk / HF Bucket / Phone Storage ═══ -->
         <activity
             android:name=".files.HomeActivity"

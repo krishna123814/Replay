@@ -139,3 +139,17 @@ Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LIO
 - Login URL `/dav/`, `/hf/` ya `/hf2/` — kisi se bhi karo, teeno storage apne aap milte hain.
 - HF2 card par abhi live capacity bar nahi hai (HF jaisa quota/scan sirf HF1 ke liye). Capacity dekhni ho to 🔍 Analyze → HF2.
 - Is change ko Android Studio / Gradle me build karke dekhna baaki hai (ye zip bina compile ke banaya gaya).
+
+## ⏰ Routine / Tasks (v4.3 — Step 1 + Step 2)
+- Home par **⏰ Routine / Tasks** (Money Manager ke neeche). Server wale chart.html ke ⏰ panel ka **wahi page** (assets/routine/index.html), poori screen par. Server app me ⏰ waisa hi rahega (copy).
+- 14 tab: 🌅 Routine, ✅ To-Do, 🔁 Habit, 🎯 Practice, 🗓 Sunday, 🏖 Holiday, 👦 Dipanshu, 📝 Rough, ℹ️ Info, ✈️ Travel, 💰 Accounts, 📊 Reports, 📧 Email, 🕉️ Ekadashi.
+- **Login**: File Manager / Money Manager wala hi (⚙ Downloads → Server settings ya File Manager login). Login na ho to chip "⚠ offline" dikhata hai aur data phone me safe rehta hai.
+
+### ☁ Server sync (Step 2)
+- Upar header me chip: `☁ ✓` synced · `☁ …` sync chal raha · `⏳ baki` save baki · `⚠ offline` server nahi mila (data phone me safe, 30 sec me retry) · `⚠ stale` Accounts me doosre device par naya data. Chip dabao = abhi sync.
+- **Load**: `GET dav/app_state/routine.json` aur `accounts.json` (Money Manager jaisa). **Save**: `POST api/local_state_save` (kind routine / accounts), edit ke ~1.2 sec baad. ✕ / back dabane par pending save pehle poora hota hai (max 4 sec).
+- **Pehle sync me SERVER jeetta hai.** Phone ka purana (Step 1 test / offline) data `filesDir/routine/bak_routine_YYYYMMDD.json` / `bak_accounts_*.json` me backup ho jata hai. Uske baad local edit pending ho to server par push, warna server ka naya data (Telegram/doosre device ke changes) aa jata hai (app khulne par, background se wapas aane par, aur idle me har ~2 min).
+- **Accounts rev/stale** server jaisa: save sirf tab jab local rev server ke rev se match kare; server "STALE" bole to push ruk jata hai, banner me **Naya data lo** (local backup me jata hai). Stale flag app restart ke baad bhi yaad rehta hai. Ack kho jaye (net toota) aur data server jaisa hi ho to bina stale ke rev le leta hai.
+- **Server ke WebSocket (/ws) wale tab** ab chalte hain: 🏖 Holiday, 📊 Reports, 📧 Email (abhi bhejo / plan / bina link), 🕉️ Ekadashi, aur ⏰ kholte hi email se aaye ✅/❌ jawab (`routine_pull`). Kotlin `RoutineNet` page ke `wsCall` ko seedha server ke `/ws` se jodta hai.
+- Export JSON (Accounts / Info / Travel / Rough) `Downloads/Lion/` me save hota hai. Back: pehle Accounts statement / Info "All entries" band, phir screen.
+- Code: `routine/RoutineActivity.kt` (WebView + `LionRt` bridge), `routine/RoutineNet.kt` (HTTP + WebSocket), `assets/routine/index.html` (chart.html se nikala panel + sync logic).

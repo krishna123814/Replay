@@ -44,6 +44,13 @@
         android:text="💵  Money Manager" />
 
     <Button
+        android:id="@+id/btnRoutine"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="⏰  Routine / Tasks" />
+
+    <Button
         android:id="@+id/btnStopFloating"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
