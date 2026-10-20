@@ -252,6 +252,12 @@ class FloatHome(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlScree
         btnRow.addView(an, LinearLayout.LayoutParams(0, dp(44), 1.6f))
         col.addView(btnRow, LinearLayout.LayoutParams(MATCH, WRAP))
 
+        val dupBtn = Button(this)
+        dupBtn.text = "🧬 Duplicate dhundo (video / music / image)"
+        dupBtn.textSize = 12f
+        dupBtn.setOnClickListener { pickDup() }
+        col.addView(dupBtn, LinearLayout.LayoutParams(MATCH, dp(44)))
+
         val scroll = ScrollView(this)
         scroll.setBackgroundColor(Color.WHITE)
         scroll.isFillViewport = true
@@ -639,6 +645,33 @@ class FloatHome(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlScree
                     Toast.makeText(this, "❌ " + hf2Reason, Toast.LENGTH_LONG).show()
                 } else {
                     AnalyzeUi(this, o.store, o.root, o.label) { refreshHfCap() }.show()
+                }
+            }
+            .show()
+    }
+
+    private fun pickDup() {
+        class Opt(val label: String, val store: Store, val root: String)
+        val opts = ArrayList<Opt>()
+        opts.add(Opt(Store.AIC.icon + " " + Store.AIC.label, Store.AIC, Dav.withSlash(Storages.root(Store.AIC))))
+        opts.add(Opt(Store.HF.icon + " " + Store.HF.label, Store.HF, Dav.withSlash(Storages.root(Store.HF))))
+        opts.add(Opt(Store.HF2.icon + " " + Store.HF2.label, Store.HF2, Dav.withSlash(Storages.root(Store.HF2))))
+        if (LocalFs.hasAccess(this)) {
+            opts.add(Opt(Store.LOCAL.icon + " " + Store.LOCAL.label, Store.LOCAL, Dav.withSlash(LocalFs.rootUrl())))
+            for (v in VolumeWatcher.snapshot) {
+                if (v.mounted) opts.add(Opt(v.icon + " " + v.label, Store.LOCAL, LocalFs.urlOf(v.root, true)))
+            }
+        }
+        OvlBuilder(this)
+            .setTitle("Kis storage me Duplicate dhundein?")
+            .setItems(opts.map { it.label }.toTypedArray()) { _, i ->
+                val o = opts[i]
+                if (o.store == Store.HF && hfReason != null) {
+                    Toast.makeText(this, "❌ " + hfReason, Toast.LENGTH_LONG).show()
+                } else if (o.store == Store.HF2 && hf2Reason != null) {
+                    Toast.makeText(this, "❌ " + hf2Reason, Toast.LENGTH_LONG).show()
+                } else {
+                    DupUi(this, o.store, o.label) { refreshHfCap() }.show(o.root)
                 }
             }
             .show()

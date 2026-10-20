@@ -1784,6 +1784,9 @@ class FloatBrowser(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlSc
         acts.add("🔍 Analyze: kaun si folder kitni jagah le rahi" to {
             AnalyzeUi(this, store, rootUrl, storeLabel).show(if (currentUrl.isEmpty()) rootUrl else currentUrl)
         })
+        acts.add("🧬 Duplicate dhundo (video / music / image)" to {
+            DupUi(this, store, storeLabel) { reload() }.show(if (currentUrl.isEmpty()) rootUrl else currentUrl)
+        })
         acts.add("↕ Sort: ${sortNames[sortMode]}" to { showSort() })
         acts.add("👁 Hidden (. wale) folders: " + (if (hideDots) "CHHUPE HAIN → dikhao" else "DIKH RAHE HAIN → chhupao") to {
             hideDots = !hideDots
