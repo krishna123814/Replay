@@ -13,6 +13,7 @@ import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
@@ -42,33 +43,36 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnBrowser).setOnClickListener {
             startActivity(Intent(this, BrowserActivity::class.java))
         }
-        // File Manager ab floating window me khulta hai (browser se alag). Lamba dabao = purana poori-screen wala.
-        findViewById<Button>(R.id.btnFiles).setOnClickListener {
-            runFloating { startFloatingApp(FloatApps.FILES) }
-        }
-        findViewById<Button>(R.id.btnFiles).setOnLongClickListener {
-            startActivity(Intent(this, com.example.simplebrowser.files.HomeActivity::class.java))
-            true
-        }
-        // Money aur Routine bhi floating (alag window). Lamba dabao = purana poori-screen wala.
-        findViewById<Button>(R.id.btnMoney).setOnClickListener {
-            runFloating { startFloatingApp(FloatApps.MONEY) }
-        }
-        findViewById<Button>(R.id.btnMoney).setOnLongClickListener {
-            startActivity(Intent(this, com.example.simplebrowser.money.MoneyActivity::class.java))
-            true
-        }
-        findViewById<Button>(R.id.btnRoutine).setOnClickListener {
-            runFloating { startFloatingApp(FloatApps.ROUTINE) }
-        }
-        findViewById<Button>(R.id.btnRoutine).setOnLongClickListener {
-            startActivity(Intent(this, com.example.simplebrowser.routine.RoutineActivity::class.java))
-            true
-        }
+        // File Manager / Money / Routine: har ek ke saath "Float" toggle.
+        // ON = floating window, OFF = normal poori screen. Choice yaad rahti hai.
+        setupApp(
+            R.id.btnFiles, R.id.swFiles, FloatApps.FILES,
+            com.example.simplebrowser.files.HomeActivity::class.java
+        )
+        setupApp(
+            R.id.btnMoney, R.id.swMoney, FloatApps.MONEY,
+            com.example.simplebrowser.money.MoneyActivity::class.java
+        )
+        setupApp(
+            R.id.btnRoutine, R.id.swRoutine, FloatApps.ROUTINE,
+            com.example.simplebrowser.routine.RoutineActivity::class.java
+        )
         findViewById<Button>(R.id.btnFloating).setOnClickListener { runFloating { startFloating() } }
         findViewById<Button>(R.id.btnStopFloating).setOnClickListener {
             stopService(Intent(this, FloatingService::class.java))
             Toast.makeText(this, "Floating band", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun setupApp(btnId: Int, swId: Int, app: String, normal: Class<*>) {
+        val prefs = getSharedPreferences("MainPrefs", MODE_PRIVATE)
+        val key = "float_$app"
+        val sw = findViewById<SwitchCompat>(swId)
+        sw.isChecked = prefs.getBoolean(key, true)
+        sw.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(key, on).apply() }
+        findViewById<Button>(btnId).setOnClickListener {
+            if (sw.isChecked) runFloating { startFloatingApp(app) }
+            else startActivity(Intent(this, normal))
         }
     }
 
