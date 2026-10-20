@@ -600,7 +600,7 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         }
         if (wasTop) {
             val t = stack[stack.size - 1]
-            t.contentView?.let { mount(it) }
+            t.screenView?.let { mount(it) }
             if (!minimized) {
                 try { t.onResume() } catch (e: Exception) { }
             }

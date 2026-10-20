@@ -36,7 +36,7 @@ open class OvlScreen(base: Context, val intent: Intent, val host: Host) :
     val RESULT_OK: Int = -1
     var isFinishing: Boolean = false
     val isDestroyed: Boolean get() = isFinishing
-    var contentView: View? = null
+    var screenView: View? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -50,7 +50,7 @@ open class OvlScreen(base: Context, val intent: Intent, val host: Host) :
     open fun onHostResized() {}
 
     fun setContentView(v: View) {
-        contentView = v
+        screenView = v
         host.setContent(this, v)
     }
 
