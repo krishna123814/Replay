@@ -576,7 +576,7 @@ class FloatHome(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlScree
             val c = card(icon, f.name, sub) { openFav(f) }
             c.setPadding(dp(12), dp(7), dp(12), dp(7))
             (c.getChildAt(0) as TextView).textSize = 26f
-            ((c.getChildAt(1) as LinearLayout).getChildAt(0) as TextView).textSize = 16f
+            (((c.getChildAt(1) as LinearLayout).getChildAt(0) as LinearLayout).getChildAt(0) as TextView).textSize = 16f
             c.setOnLongClickListener {
                 OvlBuilder(this)
                     .setTitle(f.name)
