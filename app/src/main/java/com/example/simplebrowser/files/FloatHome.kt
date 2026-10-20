@@ -124,7 +124,7 @@ class FloatHome(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlScree
         Session.load(this)
 
         if (!Session.hasCreds()) {
-            startActivity(Intent(this, LoginActivity::class.java))
+            Toast.makeText(this, "Pehle Lion main menu se server login karo", Toast.LENGTH_LONG).show()
             finish()
             return
         }

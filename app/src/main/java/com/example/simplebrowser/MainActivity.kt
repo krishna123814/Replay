@@ -71,8 +71,22 @@ class MainActivity : AppCompatActivity() {
         sw.isChecked = prefs.getBoolean(key, true)
         sw.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(key, on).apply() }
         findViewById<Button>(btnId).setOnClickListener {
-            if (sw.isChecked) runFloating { startFloatingApp(app) }
-            else startActivity(Intent(this, normal))
+            try {
+                // File Manager ko server login chahiye. Login nahi hai to seedha Login screen kholo
+                // (floating window se Login kholne par window band ho jaati thi aur kuch dikhta nahi tha).
+                if (app == FloatApps.FILES) {
+                    com.example.simplebrowser.files.Session.load(this)
+                    if (!com.example.simplebrowser.files.Session.hasCreds()) {
+                        Toast.makeText(this, "Pehle server login karo", Toast.LENGTH_SHORT).show()
+                        startActivity(Intent(this, com.example.simplebrowser.files.LoginActivity::class.java))
+                        return@setOnClickListener
+                    }
+                }
+                if (sw.isChecked) runFloating { startFloatingApp(app) }
+                else startActivity(Intent(this, normal))
+            } catch (e: Exception) {
+                Toast.makeText(this, "Error: " + e.message, Toast.LENGTH_LONG).show()
+            }
         }
     }
 
