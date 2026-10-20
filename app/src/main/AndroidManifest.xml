@@ -122,6 +122,24 @@
                 android:value="floating_browser_overlay" />
         </service>
 
+        <!-- 📁💵⏰ Floating File Manager / Money / Routine: browser wali floating window se alag service -->
+        <service
+            android:name=".files.FloatAppService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="floating_apps_overlay" />
+        </service>
+
+        <!-- Floating window ke liye file picker / permission ka result lene wali transparent Activity -->
+        <activity
+            android:name=".files.OvlProxyActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Fast download engine: downloads ke dauran process zinda rakhta hai -->
         <service
             android:name=".DlService"

@@ -1,6 +1,8 @@
 package com.example.simplebrowser
 
 import android.Manifest
+import com.example.simplebrowser.files.FloatAppService
+import com.example.simplebrowser.files.FloatApps
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -18,7 +20,7 @@ class MainActivity : AppCompatActivity() {
     private val overlayLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
             if (Settings.canDrawOverlays(this)) {
-                startFloating()
+                afterPerm?.invoke()
             } else {
                 Toast.makeText(this, "Permission nahi mili, floating nahi chalega", Toast.LENGTH_LONG).show()
             }
@@ -30,6 +32,9 @@ class MainActivity : AppCompatActivity() {
             ensureOverlayThenStart()
         }
 
+    // permission milne ke baad jo floating chalana hai (browser ya file manager)
+    private var afterPerm: (() -> Unit)? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -37,23 +42,38 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnBrowser).setOnClickListener {
             startActivity(Intent(this, BrowserActivity::class.java))
         }
+        // File Manager ab floating window me khulta hai (browser se alag). Lamba dabao = purana poori-screen wala.
         findViewById<Button>(R.id.btnFiles).setOnClickListener {
-            startActivity(Intent(this, com.example.simplebrowser.files.HomeActivity::class.java))
+            runFloating { startFloatingApp(FloatApps.FILES) }
         }
+        findViewById<Button>(R.id.btnFiles).setOnLongClickListener {
+            startActivity(Intent(this, com.example.simplebrowser.files.HomeActivity::class.java))
+            true
+        }
+        // Money aur Routine bhi floating (alag window). Lamba dabao = purana poori-screen wala.
         findViewById<Button>(R.id.btnMoney).setOnClickListener {
+            runFloating { startFloatingApp(FloatApps.MONEY) }
+        }
+        findViewById<Button>(R.id.btnMoney).setOnLongClickListener {
             startActivity(Intent(this, com.example.simplebrowser.money.MoneyActivity::class.java))
+            true
         }
         findViewById<Button>(R.id.btnRoutine).setOnClickListener {
-            startActivity(Intent(this, com.example.simplebrowser.routine.RoutineActivity::class.java))
+            runFloating { startFloatingApp(FloatApps.ROUTINE) }
         }
-        findViewById<Button>(R.id.btnFloating).setOnClickListener { onFloatingClicked() }
+        findViewById<Button>(R.id.btnRoutine).setOnLongClickListener {
+            startActivity(Intent(this, com.example.simplebrowser.routine.RoutineActivity::class.java))
+            true
+        }
+        findViewById<Button>(R.id.btnFloating).setOnClickListener { runFloating { startFloating() } }
         findViewById<Button>(R.id.btnStopFloating).setOnClickListener {
             stopService(Intent(this, FloatingService::class.java))
             Toast.makeText(this, "Floating band", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun onFloatingClicked() {
+    private fun runFloating(action: () -> Unit) {
+        afterPerm = action
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
@@ -70,7 +90,16 @@ class MainActivity : AppCompatActivity() {
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
         } else {
-            startFloating()
+            afterPerm?.invoke()
+        }
+    }
+
+    private fun startFloatingApp(app: String) {
+        try {
+            FloatAppService.start(this, app)
+            finish() // main menu band, floating window dikhe (Main menu wapas floating window ke ⋮ se)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Service start error: " + e.message, Toast.LENGTH_LONG).show()
         }
     }
 

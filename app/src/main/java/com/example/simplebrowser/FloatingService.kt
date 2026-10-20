@@ -1209,6 +1209,22 @@ class FloatingService : Service() {
             col.setPadding(dp(14), dp(14), dp(14), dp(14))
             val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 
+            // 🏠 Main menu: ye floating window band nahi hoti, bas main menu upar aa jata hai
+            val mainMenuBtn = blueButton("🏠 Main menu")
+            mainMenuBtn.setOnClickListener {
+                try {
+                    ctx.startActivity(
+                        Intent(ctx, MainActivity::class.java).addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                        )
+                    )
+                    layoutSettings.visibility = View.GONE
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "Main menu nahi khula: " + e.message, Toast.LENGTH_LONG).show()
+                }
+            }
+            col.addView(mainMenuBtn, lp)
+
             col.addView(label("Website URL"), lp)
             inputUrl = EditText(ctx)
             inputUrl.setTextColor(Color.WHITE)

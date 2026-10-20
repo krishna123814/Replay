@@ -1,14 +1,13 @@
 package com.example.simplebrowser.files
 
-import android.app.Activity
+import android.content.Context
 import android.content.Intent
-import androidx.appcompat.app.AlertDialog
 
 /** SD card / USB drive ke chhote dialogs (Home aur File Manager dono me use hote hain). */
 object DriveUi {
 
-    fun info(act: Activity, v: LocalFs.Vol) {
-        AlertDialog.Builder(act)
+    fun info(act: Context, v: LocalFs.Vol) {
+        OvlBuilder(act)
             .setTitle(v.icon + " " + v.label)
             .setMessage(LocalFs.infoText(v))
             .setPositiveButton("OK", null)
@@ -19,9 +18,9 @@ object DriveUi {
      * Android apps ko seedha unmount karne nahi deta, isliye: pehle dekho Lion ka koi transfer is drive par
      * to nahi chal raha; nahi to Settings kholte hain jahan se Eject hota hai.
      */
-    fun safeEject(act: Activity, v: LocalFs.Vol) {
+    fun safeEject(act: Context, v: LocalFs.Vol) {
         if (LocalJobs.busyOn(v.root.absolutePath)) {
-            AlertDialog.Builder(act)
+            OvlBuilder(act)
                 .setTitle("⏏ Abhi eject mat karo")
                 .setMessage("Is drive par copy / move chal raha hai. Beech me nikalne se file kharab ho sakti hai.\n\nPehle transfer poora hone do, ya Transfers me jaake cancel karo.")
                 .setPositiveButton("Transfers dekho") { _, _ -> act.startActivity(Intent(act, TransfersActivity::class.java)) }
@@ -29,7 +28,7 @@ object DriveUi {
                 .show()
             return
         }
-        AlertDialog.Builder(act)
+        OvlBuilder(act)
             .setTitle("⏏ Safe eject")
             .setMessage(
                 "Lion ka koi transfer is drive par nahi chal raha.\n\n" +

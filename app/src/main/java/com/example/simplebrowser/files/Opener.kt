@@ -1,6 +1,5 @@
 package com.example.simplebrowser.files
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -42,7 +41,7 @@ object Opener {
     }
 
     /** Phone ki file ko FileProvider se dusre app me kholo. */
-    fun viewFile(act: Activity, f: File, name: String) {
+    fun viewFile(act: Context, f: File, name: String) {
         try {
             val uri = FileProvider.getUriForFile(act, act.packageName + ".fileprovider", f)
             val i = Intent(Intent.ACTION_VIEW)
@@ -57,7 +56,7 @@ object Opener {
     }
 
     /** Kisi bhi entry (phone ya server) ko dusre app me kholo. */
-    fun external(act: Activity, e: Entry) {
+    fun external(act: Context, e: Entry) {
         if (LocalFs.isLocal(e.url)) {
             viewFile(act, LocalFs.fileOf(e.url), e.name)
             return
@@ -70,9 +69,9 @@ object Opener {
         Thread {
             try {
                 val f = downloadToCache(act, e)
-                act.runOnUiThread { if (!act.isFinishing) viewFile(act, f, e.name) }
+                Ui.post(act) { viewFile(act, f, e.name) }
             } catch (ex: Exception) {
-                act.runOnUiThread {
+                Ui.post(act) {
                     Toast.makeText(act, "Download nahi hua: ${ex.message}", Toast.LENGTH_LONG).show()
                 }
             }
@@ -80,7 +79,7 @@ object Opener {
     }
 
     /** Server ki video / audio: player seedha URL se stream kare (login URL me, aur MX ke liye header bhi). */
-    private fun streamExternal(act: Activity, e: Entry) {
+    private fun streamExternal(act: Context, e: Entry) {
         Thread {
             var url = e.url
             var withAuth = true
@@ -97,8 +96,7 @@ object Opener {
             } else {
                 url
             }
-            act.runOnUiThread {
-                if (act.isFinishing) return@runOnUiThread
+            Ui.post(act) {
                 try {
                     val i = Intent(Intent.ACTION_VIEW)
                         .setDataAndType(Uri.parse(shown), mimeFor(e.name, e.kind))

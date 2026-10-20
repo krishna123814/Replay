@@ -1,5 +1,6 @@
 package com.example.simplebrowser.files
 
+import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.text.TextUtils
@@ -11,7 +12,6 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Folder par dabao to uske andar ka hisaab khulta hai, "⬆ Upar" se wapas.
  */
 class AnalyzeUi(
-    private val act: AppCompatActivity,
+    private val act: Context,
     private val store: Store,
     private val rootUrl: String,
     private val rootLabel: String,
@@ -96,7 +96,7 @@ class AnalyzeUi(
         val scroll = ScrollView(act)
         scroll.addView(col)
 
-        dlg = AlertDialog.Builder(act)
+        dlg = OvlBuilder(act)
             .setView(scroll)
             .setNegativeButton("Band", null)
             .create()
@@ -114,8 +114,8 @@ class AnalyzeUi(
     }
 
     private fun ui(g: Int, f: () -> Unit) {
-        act.runOnUiThread {
-            if (g == gen && !act.isFinishing && !act.isDestroyed && dlg.isShowing) f()
+        Ui.post(act) {
+            if (g == gen && dlg.isShowing) f()
         }
     }
 
