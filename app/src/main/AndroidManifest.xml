@@ -57,6 +57,13 @@
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- 💵 Money Manager (server wale chart.html ka native version) -->
+        <activity
+            android:name=".money.MoneyActivity"
+            android:exported="false"
+            android:theme="@style/DarkTheme"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- ═══ File Manager (MyFiles se merge): AIC Disk / HF Bucket / Phone Storage ═══ -->
         <activity
             android:name=".files.HomeActivity"

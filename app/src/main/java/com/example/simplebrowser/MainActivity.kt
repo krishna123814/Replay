@@ -40,6 +40,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnFiles).setOnClickListener {
             startActivity(Intent(this, com.example.simplebrowser.files.HomeActivity::class.java))
         }
+        findViewById<Button>(R.id.btnMoney).setOnClickListener {
+            startActivity(Intent(this, com.example.simplebrowser.money.MoneyActivity::class.java))
+        }
         findViewById<Button>(R.id.btnFloating).setOnClickListener { onFloatingClicked() }
         findViewById<Button>(R.id.btnStopFloating).setOnClickListener {
             stopService(Intent(this, FloatingService::class.java))
