@@ -55,12 +55,18 @@ class FloatRoutine(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlSc
             builtInZoomControls = false
         }
         web.addJavascriptInterface(Bridge(), "LionRt")
+        // floating window me native <select> / date / time / colour picker nahi khulte -> overlay picker (SelectFix)
+        com.example.simplebrowser.SelectFix.install(web, this, true)
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val u = request.url
                 if (u.scheme == "file") return false
                 try { startActivity(Intent(Intent.ACTION_VIEW, u)) } catch (_: Exception) {}
                 return true
+            }
+            override fun onPageFinished(view: WebView?, url: String?) {
+                // document-start script na chale (file:// page) to fallback inject
+                com.example.simplebrowser.SelectFix.inject(view)
             }
         }
         // confirm() / prompt() / alert() WebView me apne aap nahi chalte — dialog yahan banate hain

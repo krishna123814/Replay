@@ -1,6 +1,12 @@
 package com.example.simplebrowser
 
 import android.app.AlertDialog
+import android.app.DatePickerDialog
+import android.app.TimePickerDialog
+import android.content.res.ColorStateList
+import android.text.Editable
+import android.text.TextWatcher
+import android.text.format.DateFormat
 import android.content.Context
 import android.graphics.Color
 import android.os.Build
@@ -378,6 +384,145 @@ object DlUi {
             if (checked > 2) d.listView.setSelection(checked - 2)
         } catch (e: Exception) {
             Toast.makeText(ctx, "List khul nahi payi", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Floating window me <input type=date>: native picker nahi khulta, isliye overlay DatePickerDialog. */
+    fun datePick(
+        ctx: Context, overlay: Boolean, y: Int, m: Int, d: Int, minMs: Long, maxMs: Long,
+        onPick: (Int, Int, Int) -> Unit
+    ) {
+        try {
+            val dlg = DatePickerDialog(themed(ctx), { _, yy, mm, dd -> onPick(yy, mm, dd) }, y, m, d)
+            try {
+                if (minMs > 0) dlg.datePicker.minDate = minMs
+                if (maxMs > 0 && maxMs >= minMs) dlg.datePicker.maxDate = maxMs
+            } catch (e: Exception) {
+            }
+            if (overlay) dlg.window?.setType(overlayType())
+            dlg.show()
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Date picker khul nahi paya", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Floating window me <input type=time>: overlay TimePickerDialog. */
+    fun timePick(ctx: Context, overlay: Boolean, h: Int, mi: Int, onPick: (Int, Int) -> Unit) {
+        try {
+            val dlg = TimePickerDialog(
+                themed(ctx), { _, hh, mm -> onPick(hh, mm) }, h, mi, DateFormat.is24HourFormat(ctx)
+            )
+            if (overlay) dlg.window?.setType(overlayType())
+            dlg.show()
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Time picker khul nahi paya", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Floating window me <input type=color>: simple RGB sliders + hex + kuch ready colours. */
+    fun colorPick(ctx: Context, overlay: Boolean, title: String, initial: Int, onPick: (Int) -> Unit) {
+        try {
+            val t = themed(ctx)
+            var cur = initial and 0xFFFFFF
+            var busy = false
+            val col = LinearLayout(t)
+            col.orientation = LinearLayout.VERTICAL
+            col.setPadding(dp(ctx, 16), dp(ctx, 8), dp(ctx, 16), dp(ctx, 4))
+
+            val preview = View(t)
+            col.addView(preview, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(ctx, 44)))
+
+            val hex = EditText(t)
+            hex.setSingleLine(true)
+            hex.inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            hex.setTextColor(Color.parseColor(LIGHT))
+            col.addView(hex, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+            val tints = intArrayOf(Color.parseColor("#ef5350"), Color.parseColor("#26a69a"), Color.parseColor("#2962ff"))
+            val bars = Array(3) { i ->
+                val sb = SeekBar(t)
+                sb.max = 255
+                sb.progressTintList = ColorStateList.valueOf(tints[i])
+                sb.thumbTintList = ColorStateList.valueOf(tints[i])
+                col.addView(sb, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                sb
+            }
+
+            fun refresh(setHex: Boolean, setBars: Boolean) {
+                busy = true
+                preview.setBackgroundColor(0xFF000000.toInt() or cur)
+                if (setHex) {
+                    val txt = String.format(java.util.Locale.US, "#%06x", cur)
+                    hex.setText(txt)
+                    hex.setSelection(txt.length)
+                }
+                if (setBars) {
+                    bars[0].progress = (cur shr 16) and 255
+                    bars[1].progress = (cur shr 8) and 255
+                    bars[2].progress = cur and 255
+                }
+                busy = false
+            }
+
+            val sbl = object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (busy || !fromUser) return
+                    cur = (bars[0].progress shl 16) or (bars[1].progress shl 8) or bars[2].progress
+                    refresh(true, false)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            }
+            bars.forEach { it.setOnSeekBarChangeListener(sbl) }
+
+            hex.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: Editable?) {
+                    if (busy) return
+                    var x = (e?.toString() ?: "").trim()
+                    if (!x.startsWith("#")) x = "#$x"
+                    if (x.length != 7) return
+                    try {
+                        cur = Color.parseColor(x) and 0xFFFFFF
+                        refresh(false, true)
+                    } catch (ex: Exception) {
+                    }
+                }
+            })
+
+            val sw = LinearLayout(t)
+            sw.orientation = LinearLayout.HORIZONTAL
+            sw.setPadding(0, dp(ctx, 10), 0, 0)
+            val ready = arrayOf(
+                "#ffffff", "#000000", "#787b86", "#ef5350", "#ff9800", "#f0b429",
+                "#26a69a", "#2962ff", "#9c27b0"
+            )
+            for (c in ready) {
+                val v = View(t)
+                v.setBackgroundColor(Color.parseColor(c))
+                v.setOnClickListener {
+                    cur = Color.parseColor(c) and 0xFFFFFF
+                    refresh(true, true)
+                }
+                val lp = LinearLayout.LayoutParams(0, dp(ctx, 30), 1f)
+                lp.setMargins(dp(ctx, 2), 0, dp(ctx, 2), 0)
+                sw.addView(v, lp)
+            }
+            col.addView(sw, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+            refresh(true, true)
+            show(
+                AlertDialog.Builder(t)
+                    .setTitle(if (title.isBlank()) "Colour chuno" else title.take(60))
+                    .setView(col)
+                    .setPositiveButton("OK") { _, _ -> onPick(cur) }
+                    .setNegativeButton("Cancel", null),
+                overlay
+            )
+        } catch (e: Exception) {
+            Toast.makeText(ctx, "Colour picker khul nahi paya", Toast.LENGTH_SHORT).show()
         }
     }
 

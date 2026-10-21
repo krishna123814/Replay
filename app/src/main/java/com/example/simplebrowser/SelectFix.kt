@@ -10,6 +10,7 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 
 /**
+ * <input type=date/time/datetime-local/color> bhi isi tarah: tap pakad ke overlay picker (DlUi.datePick/timePick/colorPick).
  * <select> dropdown fix: floating (overlay) window me native popup nahi khulta.
  * Tap pakad ke apni list dikhate hain; chunne par value set + input/change event.
  *
@@ -96,6 +97,55 @@ object SelectFix {
       if (n === 'click') openSel(s);
     }, true);
   });
+  // ---- <input type=date|time|datetime-local|color>: native picker overlay me nahi khulta ----
+  var DT = { 'date': 1, 'time': 1, 'datetime-local': 1, 'color': 1 };
+  var curI = null, tokI = '', lastOpenI = 0;
+  function inpOf(ev) {
+    var p = pathOf(ev);
+    for (var i = 0; i < p.length; i++) {
+      var n = p[i];
+      if (n && n.tagName === 'INPUT') {
+        var t = String(n.type || '').toLowerCase();
+        if (DT[t] && !n.disabled && !n.readOnly) return n;
+        return null;
+      }
+    }
+    return null;
+  }
+  function openInp(n) {
+    var now = Date.now();
+    if (now - lastOpenI < 500) return;
+    lastOpenI = now;
+    curI = n;
+    tokI = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+    try { n.blur(); } catch (e) {}
+    try {
+      LionSel.pickInput(JSON.stringify({
+        k: String(n.type).toLowerCase(), v: n.value || '', min: n.min || '', max: n.max || '',
+        title: label(n), tok: tokI
+      }));
+    } catch (e) {}
+  }
+  window.addEventListener('message', function (ev) {
+    var d = ev.data;
+    if (!d || typeof d !== 'object' || !tokI || d.__lionInpTok !== tokI || !curI) return;
+    var val = d.val;
+    tokI = '';
+    if (typeof val !== 'string') return;
+    try {
+      var desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      if (desc && desc.set) desc.set.call(curI, val); else curI.value = val;
+    } catch (e) { curI.value = val; }
+    curI.dispatchEvent(new Event('input', { bubbles: true }));
+    curI.dispatchEvent(new Event('change', { bubbles: true }));
+  }, false);
+  // click: asli tap aur JS ka el.click() (jaise hidden colour input) dono pakde jaate hain
+  document.addEventListener('click', function (ev) {
+    var n = inpOf(ev);
+    if (!n) return;
+    ev.preventDefault();
+    openInp(n);
+  }, true);
 })();
 """.trimIndent()
 
@@ -126,6 +176,74 @@ object SelectFix {
                                 "if(d>8)return;try{for(var i=0;i<w.frames.length;i++)b(w.frames[i],d+1);}catch(e){}}" +
                                 "b(window,0);})()"
                             web.evaluateJavascript(code, null)
+                        }
+                    }
+                } catch (e: Exception) {
+                }
+            }
+        }
+        @JavascriptInterface
+        fun pickInput(json: String?) {
+            ui.post {
+                try {
+                    val o = JSONObject(json ?: return@post)
+                    val tok = o.optString("tok")
+                    if (!Regex("[a-z0-9]{1,40}").matches(tok)) return@post
+                    val kind = o.optString("k")
+                    val v = o.optString("v")
+                    val title = o.optString("title")
+
+                    fun send(value: String) {
+                        val code = "(function(){var m={__lionInpTok:'" + tok + "',val:" + JSONObject.quote(value) + "};" +
+                            "function b(w,d){try{w.postMessage(m,'*');}catch(e){}" +
+                            "if(d>8)return;try{for(var i=0;i<w.frames.length;i++)b(w.frames[i],d+1);}catch(e){}}" +
+                            "b(window,0);})()"
+                        web.evaluateJavascript(code, null)
+                    }
+
+                    val now = java.util.Calendar.getInstance()
+                    var y = now.get(java.util.Calendar.YEAR)
+                    var mo = now.get(java.util.Calendar.MONTH)
+                    var d = now.get(java.util.Calendar.DAY_OF_MONTH)
+                    var h = now.get(java.util.Calendar.HOUR_OF_DAY)
+                    var mi = now.get(java.util.Calendar.MINUTE)
+                    Regex("(\\d{4})-(\\d{2})-(\\d{2})").find(v)?.let {
+                        y = it.groupValues[1].toInt(); mo = it.groupValues[2].toInt() - 1; d = it.groupValues[3].toInt()
+                    }
+                    Regex("(\\d{1,2}):(\\d{2})").find(v)?.let {
+                        h = it.groupValues[1].toInt(); mi = it.groupValues[2].toInt()
+                    }
+                    fun dayMs(s: String, end: Boolean): Long {
+                        val r = Regex("(\\d{4})-(\\d{2})-(\\d{2})").find(s) ?: return 0L
+                        val c = java.util.Calendar.getInstance()
+                        c.clear()
+                        c.set(r.groupValues[1].toInt(), r.groupValues[2].toInt() - 1, r.groupValues[3].toInt(),
+                            if (end) 23 else 0, if (end) 59 else 0, if (end) 59 else 0)
+                        return c.timeInMillis
+                    }
+                    val minMs = dayMs(o.optString("min"), false)
+                    val maxMs = dayMs(o.optString("max"), true)
+                    fun f2(n: Int) = String.format(java.util.Locale.US, "%02d", n)
+                    fun dateStr(yy: Int, mm: Int, dd: Int) =
+                        String.format(java.util.Locale.US, "%04d-%02d-%02d", yy, mm + 1, dd)
+
+                    when (kind) {
+                        "date" -> DlUi.datePick(ctx, overlay, y, mo, d, minMs, maxMs) { yy, mm, dd ->
+                            send(dateStr(yy, mm, dd))
+                        }
+                        "time" -> DlUi.timePick(ctx, overlay, h, mi) { hh, mm ->
+                            send(f2(hh) + ":" + f2(mm) + (if (Regex("\\d{1,2}:\\d{2}:\\d{2}").containsMatchIn(v)) ":00" else ""))
+                        }
+                        "datetime-local" -> DlUi.datePick(ctx, overlay, y, mo, d, minMs, maxMs) { yy, mm, dd ->
+                            DlUi.timePick(ctx, overlay, h, mi) { hh, mn ->
+                                send(dateStr(yy, mm, dd) + "T" + f2(hh) + ":" + f2(mn))
+                            }
+                        }
+                        "color" -> {
+                            val init = try { android.graphics.Color.parseColor(if (v.startsWith("#") && v.length == 7) v else "#000000") } catch (e: Exception) { 0 }
+                            DlUi.colorPick(ctx, overlay, title, init) { c ->
+                                send(String.format(java.util.Locale.US, "#%06x", c and 0xFFFFFF))
+                            }
                         }
                     }
                 } catch (e: Exception) {
