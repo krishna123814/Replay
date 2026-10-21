@@ -333,7 +333,6 @@ class FloatBrowser(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlSc
         header.addView(badge)
         header.addView(col)
         header.addView(searchBtn)
-        header.addView(favBtn)
         header.addView(viewBtn)
         header.addView(more)
 
@@ -1579,22 +1578,37 @@ class FloatBrowser(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlSc
         ).show()
     }
 
+    /** Sirf abhi khule folder ke favourites (is folder se ⋮ → Favourite se chune hue). */
+    private fun folderFavs(): List<Favs.Fav> = try {
+        if (currentUrl.isEmpty()) emptyList() else Favs.inFolder(this, store, curPath())
+    } catch (e: Exception) {
+        emptyList()
+    }
+
+    private fun openFolderFav(f: Favs.Fav) {
+        val k = Favs.key(f.store, f.path)
+        val e = shown.firstOrNull { pathKey(it) == k }
+        if (e != null) { onOpen(e); return }
+        if (f.isDir) openFav(f)
+        else Toast.makeText(this, "Ye file abhi list me nahi dikh rahi (search/filter band karo)", Toast.LENGTH_SHORT).show()
+    }
+
     private fun showFavs() {
-        val list = Favs.list(this)
+        val list = folderFavs()
         if (list.isEmpty()) {
             Toast.makeText(
                 this,
-                "Abhi koi favourite nahi. Folder kholo aur upar ☆ dabao, ya item chuno → ⋮ → Favourite",
+                "Is folder me koi favourite nahi. Item chuno → ⋮ → Favourite me jodo",
                 Toast.LENGTH_LONG
             ).show()
             return
         }
         val labels = list.map {
-            (if (it.isDir) "📁 " else Kinds.emoji(Kinds.of(it.name, false)) + " ") + it.name + "   ·   " + it.store.short
+            (if (it.isDir) "📁 " else Kinds.emoji(Kinds.of(it.name, false)) + " ") + it.name
         }.toTypedArray()
         val dlg = OvlBuilder(this)
-            .setTitle("⭐ Favourites (lamba dabao = hatao)")
-            .setItems(labels) { _, i -> openFav(list[i]) }
+            .setTitle("⭐ Is folder ke Favourites (lamba dabao = hatao)")
+            .setItems(labels) { _, i -> openFolderFav(list[i]) }
             .setNegativeButton("Band", null)
             .create()
         dlg.show()
@@ -1771,7 +1785,7 @@ class FloatBrowser(base: Context, intent0: Intent, host: OvlScreen.Host) : OvlSc
         val acts = ArrayList<Pair<String, () -> Unit>>()
         acts.add("📁 Naya folder" to { newFolder() })
         acts.add("🔍 Search (is folder me)" to { openSearch() })
-        acts.add("⭐ Favourites dekho (${Favs.list(this).size})" to { showFavs() })
+        acts.add("⭐ Is folder ke Favourites (${folderFavs().size})" to { showFavs() })
         if (store != Store.LOCAL) acts.add("⬆ Upload (files chuno)" to { pickFiles.launch(arrayOf("*/*")) })
         acts.add("🔁 Storage badlo" to { switchStorage() })
         val drive = localRoot?.let { lr -> VolumeWatcher.snapshot.firstOrNull { it.root.absolutePath == lr } }

@@ -52,6 +52,18 @@ object Favs {
 
     fun has(ctx: Context, store: Store, path: String): Boolean = key(store, path) in keys(ctx)
 
+    /** Is path ka parent folder ("/a/b/c" -> "/a/b"). */
+    fun parentOf(path: String): String {
+        val t = norm(path)
+        return t.substringBeforeLast('/', "").ifEmpty { "/" }
+    }
+
+    /** Sirf wahi favourites jo isi folder (seedhe is folder ke andar) se chune gaye the. */
+    fun inFolder(ctx: Context, store: Store, folderPath: String): List<Fav> {
+        val fp = norm(folderPath)
+        return list(ctx).filter { it.store == store && parentOf(it.path) == fp }
+    }
+
     @Synchronized
     fun add(ctx: Context, store: Store, path: String, name: String, isDir: Boolean) {
         val l = list(ctx).toMutableList()

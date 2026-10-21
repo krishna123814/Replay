@@ -56,7 +56,6 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var capHf2: CapHolder
     private lateinit var capLocal: CapHolder
     private val volCaps = HashMap<String, CapHolder>()
-    private lateinit var favBox: LinearLayout
     private lateinit var homeSwipe: SwipeRefreshLayout
     private var hfProbed = false
     private var hf2Probed = false
@@ -137,7 +136,6 @@ class HomeActivity : AppCompatActivity() {
         if (!::hfSub.isInitialized) return
         refreshClip()
         refreshLocal()
-        refreshFavs()
         probeHf()
         probeHf2()
         updateHfCap()
@@ -228,10 +226,6 @@ class HomeActivity : AppCompatActivity() {
         volBox = LinearLayout(this)                        // SD card / pendrive lagi ho tabhi cards dikhte hain
         volBox.orientation = LinearLayout.VERTICAL
         col.addView(volBox, LinearLayout.LayoutParams(MATCH, WRAP))
-
-        favBox = LinearLayout(this)                        // ⭐ Favourites (koi ho tabhi dikhta hai)
-        favBox.orientation = LinearLayout.VERTICAL
-        col.addView(favBox, LinearLayout.LayoutParams(MATCH, WRAP))
 
         clipTv = TextView(this)
         clipTv.setTextColor(0xFFE65100.toInt())
@@ -554,74 +548,8 @@ class HomeActivity : AppCompatActivity() {
         uiHandler.postDelayed({ if (::homeSwipe.isInitialized) homeSwipe.isRefreshing = false }, 900)
     }
 
-    // ───────────────────────── favourites ─────────────────────────
-
-    private fun refreshFavs() {
-        if (!::favBox.isInitialized) return
-        favBox.removeAllViews()
-        val list = Favs.list(this)
-        if (list.isEmpty()) return
-        val h = TextView(this)
-        h.text = "⭐ Favourites"
-        h.textSize = 16f
-        h.setTextColor(Color.BLACK)
-        h.typeface = Typeface.DEFAULT_BOLD
-        h.setPadding(dp(4), dp(18), 0, dp(2))
-        favBox.addView(h)
-        for (f in list) {
-            val sub = TextView(this)
-            sub.text = f.store.short + " · " + f.path
-            sub.maxLines = 1
-            sub.ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            val icon = if (f.isDir) "📁" else Kinds.emoji(Kinds.of(f.name, false))
-            val c = card(icon, f.name, sub) { openFav(f) }
-            c.setPadding(dp(12), dp(7), dp(12), dp(7))
-            (c.getChildAt(0) as TextView).textSize = 26f
-            (((c.getChildAt(1) as LinearLayout).getChildAt(0) as LinearLayout).getChildAt(0) as TextView).textSize = 16f
-            c.setOnLongClickListener {
-                AlertDialog.Builder(this)
-                    .setTitle(f.name)
-                    .setMessage("Favourite se hatayein?")
-                    .setPositiveButton("Hatao") { _, _ ->
-                        Favs.remove(this, f.store, f.path)
-                        refreshFavs()
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
-                true
-            }
-            favBox.addView(c)
-        }
-    }
-
-    private fun openFav(f: Favs.Fav) {
-        if (f.store == Store.LOCAL) {
-            if (!LocalFs.hasAccess(this)) {
-                openLocal()
-                return
-            }
-            val file = File(f.path)
-            if (LocalFs.underMissingVolume(this, file)) {
-                Toast.makeText(this, "💾 Ye drive abhi lagi nahi hai", Toast.LENGTH_LONG).show()
-                return
-            }
-            val dir = if (f.isDir) file else (file.parentFile ?: file)
-            val vol = LocalFs.volumeFor(this, file)
-            if (vol != null) open(Store.LOCAL, vol.root.absolutePath, vol.label, vol.icon, LocalFs.urlOf(dir, true))
-            else open(Store.LOCAL, null, null, null, LocalFs.urlOf(dir, true))
-            return
-        }
-        if (f.store == Store.HF && hfReason != null) {
-            Toast.makeText(this, "❌ $hfReason", Toast.LENGTH_LONG).show()
-            return
-        }
-        if (f.store == Store.HF2 && hf2Reason != null) {
-            Toast.makeText(this, "❌ $hf2Reason", Toast.LENGTH_LONG).show()
-            return
-        }
-        val dirPath = if (f.isDir) f.path else f.path.trimEnd('/').substringBeforeLast('/', "").ifEmpty { "/" }
-        open(f.store, null, null, null, Storages.urlOf(f.store, dirPath, true))
-    }
+    // Favourites ab Home par nahi dikhte — sirf us folder ke andar, jahan se chune the
+    // (folder me ⋮ → "Is folder ke Favourites").
 
     /** Kis storage ka analyze karna hai: AIC / HF / Phone / SD / USB. */
     private fun pickAnalyze() {
