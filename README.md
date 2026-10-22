@@ -153,3 +153,11 @@ Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LIO
 - **Server ke WebSocket (/ws) wale tab** ab chalte hain: 🏖 Holiday, 📊 Reports, 📧 Email (abhi bhejo / plan / bina link), 🕉️ Ekadashi, aur ⏰ kholte hi email se aaye ✅/❌ jawab (`routine_pull`). Kotlin `RoutineNet` page ke `wsCall` ko seedha server ke `/ws` se jodta hai.
 - Export JSON (Accounts / Info / Travel / Rough) `Downloads/Lion/` me save hota hai. Back: pehle Accounts statement / Info "All entries" band, phir screen.
 - Code: `routine/RoutineActivity.kt` (WebView + `LionRt` bridge), `routine/RoutineNet.kt` (HTTP + WebSocket), `assets/routine/index.html` (chart.html se nikala panel + sync logic).
+
+## 🔒 Encrypted Vault (v4.4)
+- File manager (Phone / SD) → ⋮ → **🔒 Vault (encrypted folder)**: naya vault banao ya purana kholo (password).
+- Files chuno → ⋮ → **🔒 Vault me daalo**: Move (encrypt + verify ke baad asli delete) ya Copy.
+- Format **Cryptomator vault format 8 (SIV_GCM)**: laptop par Cryptomator (Windows / Linux / Mac) me wahi folder password se khulta hai. File ke naam aur content dono encrypted.
+- Vault ke andar: video / audio tap karo = app ke apne player me seedha chalta hai (seek bhi, poori file decrypt nahi hoti, plain data disk par nahi likha jata). Photo = swipe + zoom viewer. Baaki files (pdf, doc...) = decrypt karke dusre app me. Lamba dabao = dusre app me kholo / phone me nikalo / rename / delete. Folder banao, files jodo.
+- ⚠ Password bhool gaye to data wapas nahi aayega. Window FLAG_SECURE hai (screenshot band). Vault band karte hi decrypted cache saaf.
+- Code: `vault/` (crypto, Java) + `files/VaultActivity.kt` (UI).

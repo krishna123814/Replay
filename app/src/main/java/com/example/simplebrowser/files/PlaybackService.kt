@@ -70,7 +70,7 @@ class PlaybackService : MediaSessionService() {
         val renderers = DefaultRenderersFactory(this).setEnableDecoderFallback(true)
         val player = ExoPlayer.Builder(this, renderers)
             .setLoadControl(loadControl)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dsFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(VaultRoutingFactory(dsFactory)))
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
             .build()

@@ -90,6 +90,10 @@
             android:exported="false"
             android:theme="@style/FilesTheme" />
         <activity
+            android:name=".files.VaultActivity"
+            android:exported="false"
+            android:theme="@style/FilesTheme" />
+        <activity
             android:name=".files.ImageViewerActivity"
             android:exported="false"
             android:theme="@style/DarkTheme"

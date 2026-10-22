@@ -696,7 +696,10 @@ class BrowserActivity : AppCompatActivity() {
         if (list.size != 1) {
             AlertDialog.Builder(this)
                 .setTitle("${list.size} item chune")
-                .setItems(arrayOf("$favLabel (${list.size})")) { _, _ -> setFavs(list, !allFav) }
+                .setItems(
+                    if (store == Store.LOCAL) arrayOf("$favLabel (${list.size})", "🔒 Vault me daalo (${list.size})")
+                    else arrayOf("$favLabel (${list.size})")
+                ) { _, i -> if (i == 0) setFavs(list, !allFav) else toVault(list) }
                 .show()
             return
         }
@@ -706,6 +709,7 @@ class BrowserActivity : AppCompatActivity() {
         if (!e.isDir && store != Store.LOCAL) opts.add(optDownload)
         if (!e.isDir) opts.add(optOpenWith)
         opts.add(optRename)
+        if (store == Store.LOCAL) opts.add(optVault)
         opts.add(optInfo)
         AlertDialog.Builder(this)
             .setTitle(e.name)
@@ -715,6 +719,7 @@ class BrowserActivity : AppCompatActivity() {
                     optDownload -> download(e)
                     optOpenWith -> Opener.external(this, e)
                     optRename -> rename(e)
+                    optVault -> toVault(list)
                     optInfo -> info(e)
                 }
             }
@@ -725,6 +730,18 @@ class BrowserActivity : AppCompatActivity() {
     private val optOpenWith = "📂 Dusre app me kholo"
     private val optRename = "✏ Rename"
     private val optInfo = "ℹ Info"
+    private val optVault = "🔒 Vault me daalo"
+
+    /** Phone / SD ke chune hue items ko encrypted vault me daalo (VaultActivity). */
+    private fun toVault(list: List<Entry>) {
+        try {
+            val files = list.map { LocalFs.fileOf(it.url) }
+            val here = LocalFs.fileOf(if (currentUrl.isEmpty()) rootUrl else currentUrl)
+            VaultActivity.launch(this, here, files)
+        } catch (ex: Exception) {
+            Toast.makeText(this, "Vault nahi khula: ${ex.message}", Toast.LENGTH_LONG).show()
+        }
+    }
 
     private fun info(e: Entry) {
         val msg = "Naam: ${e.name}\n" +
@@ -1790,6 +1807,13 @@ class BrowserActivity : AppCompatActivity() {
         acts.add("🔍 Search (is folder me)" to { openSearch() })
         acts.add("⭐ Is folder ke Favourites (${folderFavs().size})" to { showFavs() })
         if (store != Store.LOCAL) acts.add("⬆ Upload (files chuno)" to { pickFiles.launch(arrayOf("*/*")) })
+        if (store == Store.LOCAL) acts.add("🔒 Vault (encrypted folder)" to {
+            try {
+                VaultActivity.launch(this, LocalFs.fileOf(if (currentUrl.isEmpty()) rootUrl else currentUrl))
+            } catch (ex: Exception) {
+                Toast.makeText(this, "Vault nahi khula: ${ex.message}", Toast.LENGTH_LONG).show()
+            }
+        })
         acts.add("🔁 Storage badlo" to { switchStorage() })
         val drive = localRoot?.let { lr -> VolumeWatcher.snapshot.firstOrNull { it.root.absolutePath == lr } }
         if (drive != null) {
