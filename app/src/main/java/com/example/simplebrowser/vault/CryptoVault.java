@@ -72,19 +72,9 @@ public final class CryptoVault {
     public static CryptoVault create(File dir, String password) throws IOException {
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Folder ban nahi paya");
         if (isVault(dir)) throw new IOException("Is folder me vault pehle se hai");
-        byte[] enc = new byte[32], mac = new byte[32], salt = new byte[8];
-        RNG.nextBytes(enc); RNG.nextBytes(mac); RNG.nextBytes(salt);
-        final int cost = 32768, block = 8;
-        byte[] kek = Prims.scrypt(pwBytes(password), salt, cost, block, 1, 32);
-        byte[] vm = Prims.hmacSha256(mac, new byte[]{0, 0, (byte) (VERSION >> 8), (byte) VERSION});
-        String mk = "{\n  \"version\": " + VERSION + ",\n"
-                + "  \"scryptSalt\": \"" + Prims.b64std(salt) + "\",\n"
-                + "  \"scryptCostParam\": " + cost + ",\n"
-                + "  \"scryptBlockSize\": " + block + ",\n"
-                + "  \"primaryMasterKey\": \"" + Prims.b64std(Prims.keyWrap(kek, enc)) + "\",\n"
-                + "  \"hmacMasterKey\": \"" + Prims.b64std(Prims.keyWrap(kek, mac)) + "\",\n"
-                + "  \"versionMac\": \"" + Prims.b64std(vm) + "\"\n}\n";
-        Arrays.fill(kek, (byte) 0);
+        byte[] enc = new byte[32], mac = new byte[32];
+        RNG.nextBytes(enc); RNG.nextBytes(mac);
+        String mk = masterJson(enc, mac, password);
 
         String head = Prims.b64url(Prims.utf8("{\"kid\":\"masterkeyfile:masterkey.cryptomator\",\"typ\":\"JWT\",\"alg\":\"HS256\"}"), false);
         String body = Prims.b64url(Prims.utf8("{\"jti\":\"" + UUID.randomUUID() + "\",\"format\":" + FORMAT
@@ -137,6 +127,38 @@ public final class CryptoVault {
         Arrays.fill(encKey, (byte) 0);
         Arrays.fill(macKey, (byte) 0);
         siv.wipe();
+    }
+
+
+    private static String masterJson(byte[] enc, byte[] mac, String password) {
+        byte[] salt = new byte[8];
+        RNG.nextBytes(salt);
+        final int cost = 32768, block = 8;
+        byte[] kek = Prims.scrypt(pwBytes(password), salt, cost, block, 1, 32);
+        byte[] vm = Prims.hmacSha256(mac, new byte[]{0, 0, (byte) (VERSION >> 8), (byte) VERSION});
+        String mk = "{\n  \"version\": " + VERSION + ",\n"
+                + "  \"scryptSalt\": \"" + Prims.b64std(salt) + "\",\n"
+                + "  \"scryptCostParam\": " + cost + ",\n"
+                + "  \"scryptBlockSize\": " + block + ",\n"
+                + "  \"primaryMasterKey\": \"" + Prims.b64std(Prims.keyWrap(kek, enc)) + "\",\n"
+                + "  \"hmacMasterKey\": \"" + Prims.b64std(Prims.keyWrap(kek, mac)) + "\",\n"
+                + "  \"versionMac\": \"" + Prims.b64std(vm) + "\"\n}\n";
+        Arrays.fill(kek, (byte) 0);
+        return mk;
+    }
+
+    /**
+     * Password badlo. Files dobara encrypt nahi hotin: sirf masterkey.cryptomator naye password se lock hoti hai.
+     * Pehle naya masterkey tmp me likhta hai, phir purane ko badalta hai.
+     */
+    public void changePassword(String newPassword) throws IOException {
+        File mkFile = new File(root, "masterkey.cryptomator");
+        File tmp = new File(root, "masterkey.cryptomator.tmp");
+        writeText(tmp, masterJson(encKey, macKey, newPassword));
+        if (!tmp.renameTo(mkFile)) {
+            if (mkFile.exists() && !mkFile.delete()) { tmp.delete(); throw new IOException("Purani masterkey file badal nahi payi"); }
+            if (!tmp.renameTo(mkFile)) throw new IOException("Naya password save nahi hua (tmp file: " + tmp.getName() + ")");
+        }
     }
 
     // ───────────────────────── naming / paths ─────────────────────────

@@ -158,6 +158,7 @@ Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LIO
 - File manager (Phone / SD) → ⋮ → **🔒 Vault (encrypted folder)**: naya vault banao ya purana kholo (password).
 - Files chuno → ⋮ → **🔒 Vault me daalo**: Move (encrypt + verify ke baad asli delete) ya Copy.
 - Format **Cryptomator vault format 8 (SIV_GCM)**: laptop par Cryptomator (Windows / Linux / Mac) me wahi folder password se khulta hai. File ke naam aur content dono encrypted.
+- ⋮ → 🔑 Password badlo (files dobara encrypt nahi hotin, sirf chaabi naye password se lock hoti hai).
 - Vault ke andar: video / audio tap karo = app ke apne player me seedha chalta hai (seek bhi, poori file decrypt nahi hoti, plain data disk par nahi likha jata). Photo = swipe + zoom viewer. Baaki files (pdf, doc...) = decrypt karke dusre app me. Lamba dabao = dusre app me kholo / phone me nikalo / rename / delete. Folder banao, files jodo.
 - ⚠ Password bhool gaye to data wapas nahi aayega. Window FLAG_SECURE hai (screenshot band). Vault band karte hi decrypted cache saaf.
 - Code: `vault/` (crypto, Java) + `files/VaultActivity.kt` (UI).

@@ -377,14 +377,57 @@ class VaultActivity : AppCompatActivity() {
     private fun showMenu() {
         val v = vault
         if (v == null) { showChooser(); return }
-        val o = arrayOf("📄 Files jodo (gallery / file picker se)", "📁 Naya folder", "🔒 Lock karo aur band karo")
+        val o = arrayOf("📄 Files jodo (gallery / file picker se)", "📁 Naya folder", "🔑 Password badlo", "🔒 Lock karo aur band karo")
         AlertDialog.Builder(this).setItems(o) { _, i ->
             when (i) {
                 0 -> pickDocs.launch(arrayOf("*/*"))
                 1 -> newFolder()
-                2 -> finish()
+                2 -> askChangePassword()
+                3 -> finish()
             }
         }.show()
+    }
+
+    private fun askChangePassword() {
+        val v = vault ?: return
+        val dir = vaultDir ?: return
+        val old = field("Purana password", true)
+        val p1 = field("Naya password (kam se kam 8 akshar)", true)
+        val p2 = field("Naya password dobara", true)
+        val d = AlertDialog.Builder(this)
+            .setTitle("🔑 Password badlo")
+            .setMessage("Files dobara encrypt nahi hongi, sirf vault ki chaabi naye password se lock hogi. Naya password bhoole to data wapas nahi aayega.")
+            .setView(column(old, p1, p2))
+            .setPositiveButton("Badlo", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        d.show()
+        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val o = old.text.toString()
+            val a = p1.text.toString()
+            when {
+                o.isEmpty() -> Toast.makeText(this, "Purana password likho", Toast.LENGTH_SHORT).show()
+                a.length < 8 -> Toast.makeText(this, "Naya password kam se kam 8 akshar ka rakho", Toast.LENGTH_SHORT).show()
+                a != p2.text.toString() -> Toast.makeText(this, "Dono naye password alag hain", Toast.LENGTH_SHORT).show()
+                a == o -> Toast.makeText(this, "Naya password purane se alag rakho", Toast.LENGTH_SHORT).show()
+                else -> {
+                    d.dismiss()
+                    busy("Password badal raha hai…")
+                    worker.execute {
+                        try {
+                            // pehle purana password dobara jaancho (kholi hui screen par koi aur na badal de)
+                            CryptoVault.open(dir, o).close()
+                            v.changePassword(a)
+                            runOnUiThread { unbusy(); Toast.makeText(this, "✅ Password badal gaya. Ab naya password dalna hoga.", Toast.LENGTH_LONG).show() }
+                        } catch (e: CryptoVault.WrongPasswordException) {
+                            runOnUiThread { unbusy(); Toast.makeText(this, "❌ Purana password galat hai", Toast.LENGTH_SHORT).show() }
+                        } catch (e: Exception) {
+                            runOnUiThread { unbusy(); Toast.makeText(this, "Password nahi badla: ${e.message}", Toast.LENGTH_LONG).show() }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun askText(title: String, init: String, ok: (String) -> Unit) {
