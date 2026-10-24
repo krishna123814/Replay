@@ -3,6 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Purane build se repo me bachi legacy icon PNG (mipmap-mdpi) naye ic_launcher.xml se takra jaati hai ("Duplicate resources").
+// Zip extract se file delete nahi hoti, isliye har build par ye do stale files yahin hata di jaati hain.
+listOf("ic_launcher.png", "ic_launcher_round.png").forEach { n ->
+    file("src/main/res/mipmap-mdpi/$n").takeIf { it.exists() }?.delete()
+}
+
 android {
     namespace = "com.example.simplebrowser"
     compileSdk = 34
