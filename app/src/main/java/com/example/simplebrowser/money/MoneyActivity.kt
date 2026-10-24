@@ -104,6 +104,7 @@ class MoneyActivity : AppCompatActivity() {
     internal var cp = "month"            // month | year | all | cmp
     internal var cc = ""                 // khuli hui category ki key
     internal var cm: String? = null      // Category detail me khula mahina
+    internal var ark = false                // Analysis: Rich Kids alag view
     internal var ap = "month"            // Analysis: month | year
     internal var al = "common"           // Analysis line graph: common | sep
     internal var at = "expense"
@@ -443,7 +444,7 @@ class MoneyActivity : AppCompatActivity() {
         val txs = MoneyRepo.txs().filter { inMonth(it.optLong("ts"), year, month) }.sortedByDescending { it.optLong("ts") }
         var inc = 0.0
         var exp = 0.0
-        for (t in txs) if (t.optString("type") == "income") inc += t.optDouble("amount", 0.0) else exp += t.optDouble("amount", 0.0)
+        for (t in txs) { if (MoneyRepo.isRk(t)) continue; if (t.optString("type") == "income") inc += t.optDouble("amount", 0.0) else exp += t.optDouble("amount", 0.0) }
 
         body.addView(cardsRow(inc, exp, true))
         body.addView(balanceRow(inc - exp))
@@ -458,7 +459,7 @@ class MoneyActivity : AppCompatActivity() {
             val sums = LinkedHashMap<String, Double>()
             val subs = LinkedHashMap<String, LinkedHashMap<String, Double>>()
             for (t in txs) {
-                if (t.optString("type") != view) continue
+                if (t.optString("type") != view || MoneyRepo.isRk(t)) continue
                 val cid = t.optString("cat")
                 val k = if (cid.isEmpty()) "n:" + t.optString("catName") else cid
                 names[k] = MoneyRepo.catName(t)
@@ -520,7 +521,7 @@ class MoneyActivity : AppCompatActivity() {
             val list = groups[k]!!
             var di = 0.0
             var de = 0.0
-            for (t in list) if (t.optString("type") == "income") di += t.optDouble("amount", 0.0) else de += t.optDouble("amount", 0.0)
+            for (t in list) { if (MoneyRepo.isRk(t)) continue; if (t.optString("type") == "income") di += t.optDouble("amount", 0.0) else de += t.optDouble("amount", 0.0) }
             cal.timeInMillis = list[0].optLong("ts")
             val h = hrow()
             h.setBackgroundColor(Color.parseColor("#1A1E29"))
@@ -553,7 +554,7 @@ class MoneyActivity : AppCompatActivity() {
         if (note.isNotEmpty()) left.addView(tv(note, 11f, MUT))
         r.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val income = t.optString("type") == "income"
-        r.addView(tv(MoneyRepo.fmt(t.optDouble("amount", 0.0)), 14f, if (income) GREEN else RED, true))
+        r.addView(tv(MoneyRepo.fmt(t.optDouble("amount", 0.0)), 14f, if (MoneyRepo.isRk(t)) Color.parseColor("#FFB74D") else if (income) GREEN else RED, true))
         r.setOnClickListener { openAdd(t.optString("id")) }
         return r
     }
@@ -631,7 +632,7 @@ class MoneyActivity : AppCompatActivity() {
         val ai = LinkedHashMap<String, Double>()
         val ae = LinkedHashMap<String, Double>()
         for (a in MoneyRepo.accts()) { ai[a] = 0.0; ae[a] = 0.0 }
-        for (t in MoneyRepo.txs()) {
+        for (t in MoneyRepo.txsN()) {
             var k = t.optString("acct")
             if (k.isEmpty()) k = "Cash"
             if (!ai.containsKey(k)) { ai[k] = 0.0; ae[k] = 0.0 }
@@ -859,10 +860,10 @@ class MoneyActivity : AppCompatActivity() {
             val s = MoneyRepo.subOf(c, st.sub)
             if (st.edit.isEmpty()) {
                 val pend = MoneyRepo.rkPending()
-                val isRk = st.type == "expense" && Math.round(a * 100) == 50000L && c != null && MoneyRepo.rkNorm(c.optString("name")) == "rich kids"
+                val isRk = st.type == "income" && Math.round(a * 100) == 50000L && c != null && MoneyRepo.rkNorm(c.optString("name")) == "rich kids"
                 if (pend > 0 && !isRk) {
                     err.setTextColor(RED)
-                    err.text = "⛔ Pehle 'rich kids' category me ₹500 ki Expense entry karo ($pend mahine ki baaki). Uske baad hi baaki entries hongi."
+                    err.text = "⛔ Pehle 'rich kids' category me ₹500 ki Income entry karo ($pend mahine ki baaki). Uske baad hi baaki entries hongi."
                     return
                 }
             }

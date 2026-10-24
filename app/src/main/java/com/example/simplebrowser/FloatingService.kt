@@ -1893,6 +1893,17 @@ class FloatingService : Service() {
             }
 
             webView.webViewClient = object : WebViewClient() {
+                // 🔒 Server ab password ke peeche hai (nginx basic auth): Lion ka saved login (Session) apne server ke liye
+                // WebView ko de do. Dusri sites par kuch nahi karta.
+                override fun onReceivedHttpAuthRequest(view: WebView?, handler: android.webkit.HttpAuthHandler?, host: String?, realm: String?) {
+                    val S = com.example.simplebrowser.files.Session
+                    val a = ctx.applicationContext
+                    if (!S.hasCreds()) S.load(a)
+                    val sh = try { android.net.Uri.parse(S.baseUrl).host } catch (e: Exception) { null }
+                    if (handler != null && host != null && host == sh && S.hasCreds()) handler.proceed(S.user, S.pass)
+                    else super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                }
+
                 override fun onPageStarted(view: WebView?, pageUrl: String?, favicon: Bitmap?) {
                     handler.removeCallbacks(clearSelRunnable)
                     lastSelection = ""

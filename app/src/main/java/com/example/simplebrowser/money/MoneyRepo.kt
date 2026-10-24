@@ -155,6 +155,15 @@ object MoneyRepo {
 
     fun cats(): List<JSONObject> = list("cats")
     fun txs(): List<JSONObject> = list("tx")
+
+    /** 'rich kids' category ki entry? (iski counting total/balance me nahi judti, sirf Analysis me) */
+    fun isRk(t: JSONObject): Boolean {
+        val c = catOf(t.optString("cat"))
+        return rkNorm(if (c != null) c.optString("name") else t.optString("catName")) == "rich kids"
+    }
+
+    /** rich kids ko chhodke baaki sab entries (totals ke liye) */
+    fun txsN(): List<JSONObject> = txs().filter { !isRk(it) }
     fun catsOf(type: String): List<JSONObject> = cats().filter { it.optString("type") == type }
     fun catOf(id: String): JSONObject? = if (id.isEmpty()) null else cats().firstOrNull { it.optString("id") == id }
     fun subsOf(c: JSONObject?): List<JSONObject> {
@@ -212,6 +221,7 @@ object MoneyRepo {
         val s = Sum()
         val cal = Calendar.getInstance()
         for (t in txs()) {
+            if (isRk(t)) continue
             cal.timeInMillis = t.optLong("ts")
             if (cal.get(Calendar.YEAR) == y && (mo == null || cal.get(Calendar.MONTH) == mo)) {
                 if (t.optString("type") == "income") s.i += t.optDouble("amount", 0.0) else s.e += t.optDouble("amount", 0.0)
@@ -223,6 +233,7 @@ object MoneyRepo {
     fun sumAll(): Sum {
         val s = Sum()
         for (t in txs()) {
+            if (isRk(t)) continue
             if (t.optString("type") == "income") s.i += t.optDouble("amount", 0.0) else s.e += t.optDouble("amount", 0.0)
         }
         return s
@@ -312,7 +323,7 @@ object MoneyRepo {
     }
 
     // ───────────────────────── "rich kids" rule (server wale app jaisa) ─────────────────────────
-    // Oct 2026 se har mahine expense category "rich kids" me Rs 500 ki ek entry pehle; tab tak baaki entries block.
+    // Oct 2026 se har mahine category "rich kids" me Rs 500 ki ek Income entry pehle; tab tak baaki entries block. Iski counting total se alag.
 
     private val rkStart: Long by lazy {
         val c = Calendar.getInstance()
@@ -320,11 +331,20 @@ object MoneyRepo {
         c.timeInMillis
     }
 
+    private val rkExpUntil: Long by lazy {
+        val c = Calendar.getInstance()
+        c.clear(); c.set(2026, 9, 24)
+        c.timeInMillis
+    }
+
     fun rkNorm(x: String): String =
         x.lowercase().replace(Regex("[^a-z0-9 ]"), "").replace(Regex("\\s+"), " ").trim()
 
     private fun rkQual(t: JSONObject): Boolean {
-        if (t.optString("type") != "expense") return false
+        val ty = t.optString("type")
+        if (ty != "income" && ty != "expense") return false
+        // ₹500 *expense* sirf purani entry (24 Oct 2026 se pehle) valid; ab se ₹500 *income*
+        if (ty == "expense" && t.optLong("ts") >= rkExpUntil) return false
         if (Math.round(t.optDouble("amount", 0.0) * 100) != 50000L) return false
         val c = catOf(t.optString("cat"))
         return rkNorm(if (c != null) c.optString("name") else t.optString("catName")) == "rich kids"
@@ -342,9 +362,10 @@ object MoneyRepo {
     /** Pending ho aur category na ho to bana deta hai. true = blob badla (save karna hai). */
     fun rkEnsure(): Boolean {
         if (rkPending() == 0) return false
-        val has = catsOf("expense").any { rkNorm(it.optString("name")) == "rich kids" }
-        if (has) return false
-        addCat("expense", "rich kids")
-        return true
+        var changed = false
+        for (ty in listOf("income", "expense")) {
+            if (catsOf(ty).none { rkNorm(it.optString("name")) == "rich kids" }) { addCat(ty, "rich kids"); changed = true }
+        }
+        return changed
     }
 }

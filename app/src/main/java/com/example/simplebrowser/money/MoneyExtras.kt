@@ -190,7 +190,7 @@ private class Bud(val id: String, val name: String, val lim: Double, val spent: 
 private fun budInfo(y: Int, mo: Int): List<Bud> {
     val bd = MoneyRepo.blob.optJSONObject("budgets") ?: return emptyList()
     val sp = HashMap<String, Double>()
-    for (t in MoneyRepo.txs()) {
+    for (t in MoneyRepo.txsN()) {
         if (t.optString("type") != "expense") continue
         val ts = t.optLong("ts")
         if (yearOf(ts) == y && monthOf(ts) == mo) sp[t.optString("cat")] = (sp[t.optString("cat")] ?: 0.0) + t.optDouble("amount", 0.0)
@@ -252,7 +252,7 @@ internal fun MoneyActivity.renderYearly() {
 internal fun MoneyActivity.renderCategory() {
     val isInc = ct == "income"
     val cl = if (isInc) GREEN else RED
-    val mine = MoneyRepo.txs().filter { it.optString("type") == ct }
+    val mine = MoneyRepo.txsN().filter { it.optString("type") == ct }
     body.addView(typeToggle(ct) { ct = it; cc = ""; cm = null; render() })
 
     if (cc.isEmpty()) {
@@ -470,13 +470,56 @@ private fun MoneyActivity.trendRow(lbl: String, cur: Double, prev: Double, upGoo
     return kv(lbl, (if (up) "▲ badh rahi " else "▼ ghat rahi ") + String.format(Locale.US, "%.1f", Math.abs(d)) + "%", if (good) GREEN else RED)
 }
 
+// ── Rich Kids alag analysis (normal totals me nahi judta) ──
+private fun MoneyActivity.renderAnalysisRk() {
+    val y = mYear
+    val per = ArrayList<Per>()
+    if (ap == "month") for (mo in 0..11) per.add(Per(mnShort(y, mo), y, mo))
+    else for (yy in txYears().reversed()) per.add(Per(yy.toString(), yy, null))
+    var ai = 0.0
+    var ae = 0.0
+    var n = 0
+    for (t in MoneyRepo.txs()) {
+        if (!MoneyRepo.isRk(t)) continue
+        val a = t.optDouble("amount", 0.0)
+        val isInc = t.optString("type") == "income"
+        if (isInc) ai += a else ae += a
+        n++
+        val ts = t.optLong("ts")
+        val yy = yearOf(ts)
+        val mm = monthOf(ts)
+        val p = per.firstOrNull { it.y == yy && (it.mo == null || it.mo == mm) } ?: continue
+        if (isInc) p.i += a else p.e += a
+    }
+    body.addView(chipRow(listOf("month" to "Monthly", "year" to "Yearly"), ap) { ap = it; render() })
+    if (ap == "month") body.addView(navRow(y.toString(), { mYear--; render() }, { mYear++; render() }))
+    val bal = ai - ae
+    body.addView(section("🧒 Rich Kids — ab tak (sab time)"))
+    body.addView(kv("Jama (income)", MoneyRepo.fmt(ai), GREEN))
+    body.addView(kv("Kharch (expense)", MoneyRepo.fmt(ae), RED))
+    body.addView(kv("Bacha hua", MoneyRepo.fmt(bal), if (bal >= 0) GREEN else RED))
+    body.addView(noteText("Ye sab total/balance se alag hai, sirf yahin ginta hai. ($n entries)"))
+    if (n == 0) { body.addView(empty("Abhi rich kids me koi entry nahi.")); return }
+    val labels = per.map { it.lb }
+    body.addView(section("📊 Jama vs Kharch"))
+    body.addView(chartBox("bar", labels, listOf(ChartSeries("Jama", GREEN, per.map { it.i }), ChartSeries("Kharch", RED, per.map { it.e }))))
+    body.addView(legend(listOf("Jama" to GREEN, "Kharch" to RED)))
+    body.addView(section(if (ap == "month") "$y — mahine wise" else "Saal wise"))
+    for (x in per.filter { it.i > 0 || it.e > 0 }.reversed()) {
+        val d = x.i - x.e
+        body.addView(sumRow(x.lb, Color.WHITE, listOf(MoneyRepo.fmt(x.i) to GREEN, MoneyRepo.fmt(x.e) to RED), MoneyRepo.fmt(d), if (d >= 0) GREEN else RED, 56, 92, null))
+    }
+}
+
 internal fun MoneyActivity.renderAnalysis() {
+    body.addView(chipRow(listOf("n" to "Normal", "r" to "🧒 Rich Kids"), if (ark) "r" else "n") { ark = (it == "r"); render() })
+    if (ark) { renderAnalysisRk(); return }
     val y = mYear
     val per = ArrayList<Per>()
     if (ap == "month") for (mo in 0..11) per.add(Per(mnShort(y, mo), y, mo))
     else for (yy in txYears().reversed()) per.add(Per(yy.toString(), yy, null))
     val nm = HashMap<String, String>()
-    for (t in MoneyRepo.txs()) {
+    for (t in MoneyRepo.txsN()) {
         val ts = t.optLong("ts")
         val yy = yearOf(ts)
         val mm = monthOf(ts)
@@ -786,7 +829,7 @@ internal fun MoneyActivity.searchDialog() {
         }.sortedByDescending { it.optLong("ts") }
         var ti = 0.0
         var te = 0.0
-        for (t in res) if (t.optString("type") == "income") ti += t.optDouble("amount", 0.0) else te += t.optDouble("amount", 0.0)
+        for (t in res) { if (MoneyRepo.isRk(t)) continue; if (t.optString("type") == "income") ti += t.optDouble("amount", 0.0) else te += t.optDouble("amount", 0.0) }
         results.removeAllViews()
         val sum = hrow()
         sum.setPadding(dp(2), dp(10), dp(2), dp(6))
