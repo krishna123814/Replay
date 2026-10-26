@@ -1887,6 +1887,7 @@ class FloatingService : Service() {
 
             // file download: Abhi / Schedule dialog (overlay)
             webView.addJavascriptInterface(BlobDl.Bridge(ctx.applicationContext), BlobDl.BRIDGE_NAME)
+            webView.addJavascriptInterface(ShotBridge.Bridge(ctx.applicationContext, webView), ShotBridge.NAME)
             webView.addJavascriptInterface(VideoDetect.Bridge(ctx, true), VideoDetect.BRIDGE_NAME)
             webView.setDownloadListener { dlUrl, ua, cd, mime, len ->
                 Downloader.offer(ctx, true, dlUrl, ua, cd, mime, len, webView.url, webView)

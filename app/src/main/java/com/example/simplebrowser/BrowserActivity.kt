@@ -107,6 +107,7 @@ class BrowserActivity : AppCompatActivity() {
 
         // file download: Abhi / Schedule dialog
         web.addJavascriptInterface(BlobDl.Bridge(applicationContext), BlobDl.BRIDGE_NAME)
+        web.addJavascriptInterface(ShotBridge.Bridge(applicationContext, web), ShotBridge.NAME)
         web.addJavascriptInterface(VideoDetect.Bridge(this, false), VideoDetect.BRIDGE_NAME)
         web.setDownloadListener { dlUrl, ua, cd, mime, len ->
             Downloader.offer(this, false, dlUrl, ua, cd, mime, len, web.url, web)
