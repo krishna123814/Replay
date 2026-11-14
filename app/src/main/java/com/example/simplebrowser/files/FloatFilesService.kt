@@ -43,28 +43,33 @@ object FloatApps {
     const val FILES = "files"
     const val MONEY = "money"
     const val ROUTINE = "routine"
+    const val INCOME = "income"
 
     fun title(k: String): String = when (k) {
         FILES -> "📁 File Manager"
         MONEY -> "💵 Money Manager"
+        INCOME -> "🏦 Income Source"
         else -> "⏰ Routine / Tasks"
     }
 
     fun icon(k: String): String = when (k) {
         FILES -> "📁"
         MONEY -> "💵"
+        INCOME -> "🏦"
         else -> "⏰"
     }
 
     fun index(k: String): Int = when (k) {
         FILES -> 0
         MONEY -> 1
+        INCOME -> 3
         else -> 2
     }
 
     fun root(k: String, ctx: Context, host: OvlScreen.Host): OvlScreen = when (k) {
         FILES -> FloatHome(ctx, Intent(), host)
         MONEY -> FloatMoney(ctx, Intent(), host)
+        INCOME -> com.example.simplebrowser.income.FloatIncome(ctx, Intent(), host)
         else -> FloatRoutine(ctx, Intent(), host)
     }
 }
@@ -396,7 +401,7 @@ class AppWindow(private val svc: FloatAppService, private val kind: String) : Ov
         dotView = View(ctx)
         val dotShape = GradientDrawable()
         dotShape.shape = GradientDrawable.OVAL
-        val dotColors = arrayOf("#F5A623", "#66BB6A", "#AB47BC") // files, money, routine
+        val dotColors = arrayOf("#F5A623", "#66BB6A", "#AB47BC", "#29B6F6") // files, money, routine, income
         dotShape.setColor(Color.parseColor(dotColors[idx % dotColors.size]))
         dotShape.setStroke(maxOf(1, (1.5f * density).toInt()), Color.parseColor("#B3FFFFFF"))
         dotView.background = dotShape

@@ -83,6 +83,29 @@
         android:orientation="horizontal">
 
         <Button
+            android:id="@+id/btnIncome"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="🏦  Income Source" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/swIncome"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:checked="true"
+            android:text="Float  " />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <Button
             android:id="@+id/btnRoutine"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
