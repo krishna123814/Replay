@@ -27,6 +27,16 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
 .am{font-size:14px;color:#26a69a;white-space:nowrap}
 .offtag{font-size:10px;border:1px solid #2a2e39;border-radius:8px;padding:0 6px;color:#848da0;margin-left:6px}
 .empty{padding:28px 18px;text-align:center;color:#848da0;line-height:1.6}
+.row.sub{padding:7px 12px 7px 36px;background:#161a25}
+.row.sub .ic{width:26px;height:26px;font-size:12px;background:#24304a}
+.row.sub .nm b{font-size:13px;font-weight:500}
+.addsub{flex-shrink:0;background:transparent;border:1px solid #2a2e39;color:#90caf9;border-radius:12px;font-size:11px;padding:3px 9px;font-family:inherit;cursor:pointer}
+.subcnt{font-size:10px;color:#848da0;margin-left:6px;font-weight:400}
+.sublist{background:#131722;border:1px solid #2a2e39;border-radius:8px;margin-bottom:6px;overflow:hidden}
+.sublist .row{padding:8px 10px}
+.sublist .none{padding:8px 10px;color:#848da0;font-size:12px}
+.hint{font-size:11px;color:#848da0;margin-top:4px}
+.sheet input:disabled{opacity:.6}
 #fab{position:absolute;right:16px;bottom:16px;width:52px;height:52px;border-radius:50%;border:0;background:#ff6150;color:#fff;font-size:30px;line-height:50px;cursor:pointer;box-shadow:0 4px 14px #0008;padding:0}
 #modal{display:none;position:absolute;inset:0;background:#000a;align-items:flex-end}
 .sheet{width:100%;max-height:100%;overflow-y:auto;background:#1e222d;border-radius:14px 14px 0 0;padding:10px 12px 16px}
@@ -72,6 +82,10 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
   function esc(x) { return String(x == null ? '' : x).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function inr(n) { return '\u20b9' + (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 }); }
   function uid() { return 'is' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  function subsOf(s) { return (s && Array.isArray(s.subs)) ? s.subs : []; }
+  function subsTotal(s) { return subsOf(s).reduce(function (a, x) { return a + (x && x.on !== false ? (Number(x.amt) || 0) : 0); }, 0); }
+  // parent ka amt = chalu subs ka total (agar subs me amount hai) — chart.html ka purana panel bhi sahi total dikhaye
+  function recalc(s) { var t = subsTotal(s); if (t > 0) s.amt = t; }
   function toast(m) { var t = $('toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toast._t); toast._t = setTimeout(function () { t.style.display = 'none'; }, 2500); }
 
   // ── native transport ──
@@ -203,11 +217,21 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
     } else {
       b.src.slice().sort(function (x, y) { return (x.on === false) - (y.on === false); }).forEach(function (s) {
         var nm = String(s.name || '?');
+        var sb = subsOf(s);
         h += '<div class="row' + (s.on === false ? ' off' : '') + '" onclick="openEdit(\'' + esc(s.id) + '\')">'
           + '<div class="ic">' + esc(nm.charAt(0).toUpperCase()) + '</div>'
-          + '<div class="nm"><b>' + esc(nm) + (s.on === false ? '<span class="offtag">band</span>' : '') + '</b>'
+          + '<div class="nm"><b>' + esc(nm) + (s.on === false ? '<span class="offtag">band</span>' : '') + (sb.length ? '<span class="subcnt">' + sb.length + ' sub</span>' : '') + '</b>'
           + (s.note ? '<i>' + esc(s.note) + '</i>' : '') + '</div>'
-          + (Number(s.amt) > 0 ? '<div class="am">' + inr(s.amt) + '</div>' : '') + '</div>';
+          + (Number(s.amt) > 0 ? '<div class="am">' + inr(s.amt) + '</div>' : '')
+          + '<button type="button" class="addsub" onclick="event.stopPropagation();openSub(\'' + esc(s.id) + '\',\'\')">\uff0b sub</button></div>';
+        sb.forEach(function (c) {
+          var cn = String(c.name || '?');
+          h += '<div class="row sub' + ((s.on === false || c.on === false) ? ' off' : '') + '" onclick="openSub(\'' + esc(s.id) + '\',\'' + esc(c.id) + '\')">'
+            + '<div class="ic">' + esc(cn.charAt(0).toUpperCase()) + '</div>'
+            + '<div class="nm"><b>' + esc(cn) + (c.on === false ? '<span class="offtag">band</span>' : '') + '</b>'
+            + (c.note ? '<i>' + esc(c.note) + '</i>' : '') + '</div>'
+            + (Number(c.amt) > 0 ? '<div class="am">' + inr(c.amt) + '</div>' : '') + '</div>';
+        });
       });
     }
     $('body').innerHTML = h;
@@ -226,8 +250,16 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
     m.innerHTML = '<div class="sheet" onclick="event.stopPropagation()">'
       + '<div class="sh-h"><b>' + (s ? 'Source badlo' : 'Naya Income Source') + '</b><button type="button" onclick="closeModal()" aria-label="Close">\u2715</button></div>'
       + '<label>Source ka naam *</label><input id="f-name" type="text" maxlength="40" placeholder="jaise Salary / Trading / Rent" value="' + esc(s ? s.name : '') + '">'
-      + '<label>Andaaza mahine ka (\u20b9, optional)</label><input id="f-amt" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="' + (s && Number(s.amt) > 0 ? esc(s.amt) : '') + '">'
+      + '<label>Andaaza mahine ka (\u20b9, optional)</label><input id="f-amt" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="' + (s && Number(s.amt) > 0 ? esc(s.amt) : '') + '"' + (s && subsTotal(s) > 0 ? ' disabled' : '') + '>'
+      + (s && subsTotal(s) > 0 ? '<div class="hint">Sub-categories ka total apne aap judta hai</div>' : '')
       + '<label>Note (optional)</label><input id="f-note" type="text" maxlength="120" placeholder="jaise 1 tareekh ko aata hai" value="' + esc(s ? s.note : '') + '">'
+      + '<label>Sub-categories (jaise Option market, Cash market)</label>'
+      + (s ? '<div class="sublist">' + (subsOf(s).length ? subsOf(s).map(function (c) {
+            return '<div class="row' + (c.on === false ? ' off' : '') + '" onclick="openSub(\'' + esc(s.id) + '\',\'' + esc(c.id) + '\')"><div class="nm"><b>' + esc(c.name) + (c.on === false ? '<span class="offtag">band</span>' : '') + '</b></div>'
+              + (Number(c.amt) > 0 ? '<div class="am">' + inr(c.amt) + '</div>' : '') + '</div>';
+          }).join('') : '<div class="none">Abhi koi sub-category nahi</div>') + '</div>'
+          + '<button type="button" class="addsub" onclick="openSub(\'' + esc(s.id) + '\',\'\')">\uff0b Sub-category jodo</button>'
+        : '<div class="hint">Pehle Save karo, phir sub-category jod sakte ho</div>')
       + '<label>Status</label><div class="tg"><button type="button" id="f-on" onclick="setOn(true)">Chalu</button><button type="button" id="f-off" onclick="setOn(false)">Band</button></div>'
       + '<div class="err" id="err"></div>'
       + '<div class="btns"><button type="button" class="pri" onclick="saveSrc(\'' + esc(id || '') + '\')">Save</button>'
@@ -250,7 +282,7 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
     if (id) {
       var s = b.src.filter(function (x) { return x.id === id; })[0];
       if (!s) { closeModal(); return; }
-      s.name = name; s.amt = amt; s.note = note; s.on = formOn; s.t = now;
+      s.name = name; s.amt = amt; s.note = note; s.on = formOn; s.t = now; recalc(s);
     } else {
       b.src.push({ id: uid(), name: name, amt: amt, note: note, on: formOn, t: now });
     }
@@ -260,7 +292,7 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
   function delSrc(id) {
     var btn = $('delbtn'); if (!btn) return;
     if (!btn.classList.contains('cf')) {
-      btn.classList.add('cf'); btn.textContent = 'Pakka delete?';
+      btn.classList.add('cf'); var _cs = load().src.filter(function (x) { return x.id === id; })[0]; btn.textContent = (_cs && subsOf(_cs).length) ? 'Pakka? (' + subsOf(_cs).length + ' sub bhi)' : 'Pakka delete?';
       setTimeout(function () { var x = $('delbtn'); if (x) { x.classList.remove('cf'); x.textContent = '\ud83d\uddd1 Delete'; } }, 3500);
       return;
     }
@@ -268,6 +300,59 @@ html,body{margin:0;height:100%;background:#131722;color:#d1d4dc;font-family:-app
     b.src = b.src.filter(function (x) { return x.id !== id; });
     persist(b); closeModal(); render();
   }
+  function openSub(pid, sid) {
+    var b = load(), p = b.src.filter(function (x) { return x.id === pid; })[0]; if (!p) return;
+    var c = sid ? (subsOf(p).filter(function (x) { return x.id === sid; })[0] || null) : null;
+    var m = $('modal');
+    m.innerHTML = '<div class="sheet" onclick="event.stopPropagation()">'
+      + '<div class="sh-h"><b>' + (c ? 'Sub-category badlo' : 'Naya Sub-category') + ' \u00b7 ' + esc(p.name) + '</b><button type="button" onclick="closeModal()" aria-label="Close">\u2715</button></div>'
+      + '<label>Naam *</label><input id="f-name" type="text" maxlength="40" placeholder="jaise Option market / Cash market / BTC option" value="' + esc(c ? c.name : '') + '">'
+      + '<label>Andaaza mahine ka (\u20b9, optional)</label><input id="f-amt" type="number" inputmode="decimal" min="0" step="any" placeholder="0" value="' + (c && Number(c.amt) > 0 ? esc(c.amt) : '') + '">'
+      + '<label>Note (optional)</label><input id="f-note" type="text" maxlength="120" value="' + esc(c ? c.note : '') + '">'
+      + '<label>Status</label><div class="tg"><button type="button" id="f-on" onclick="setOn(true)">Chalu</button><button type="button" id="f-off" onclick="setOn(false)">Band</button></div>'
+      + '<div class="err" id="err"></div>'
+      + '<div class="btns"><button type="button" class="pri" onclick="saveSub(\'' + esc(pid) + '\',\'' + esc(sid || '') + '\')">Save</button>'
+      + (c ? '<button type="button" class="del" id="delbtn" onclick="delSub(\'' + esc(pid) + '\',\'' + esc(sid) + '\')">\ud83d\uddd1 Delete</button>' : '') + '</div></div>';
+    m.style.display = 'flex'; m.onclick = closeModal;
+    setOn(!c || c.on !== false);
+    if (!c) setTimeout(function () { try { $('f-name').focus(); } catch (e) {} }, 60);
+  }
+  function saveSub(pid, sid) {
+    var name = ($('f-name').value || '').trim().replace(/\s+/g, ' ');
+    var amtRaw = ($('f-amt').value || '').trim();
+    var note = ($('f-note').value || '').trim();
+    var err = $('err');
+    if (!name) { err.textContent = 'Sub-category ka naam likho'; return; }
+    var amt = 0;
+    if (amtRaw !== '') { amt = Number(amtRaw); if (!isFinite(amt) || amt < 0) { err.textContent = 'Amount sahi likho (0 ya zyada)'; return; } }
+    var b = load(), p = b.src.filter(function (x) { return x.id === pid; })[0];
+    if (!p) { closeModal(); return; }
+    if (!Array.isArray(p.subs)) p.subs = [];
+    if (p.subs.some(function (x) { return x.id !== sid && String(x.name || '').trim().toLowerCase() === name.toLowerCase(); })) { err.textContent = 'Is source me ye naam pehle se hai'; return; }
+    var now = Date.now();
+    if (sid) {
+      var c = p.subs.filter(function (x) { return x.id === sid; })[0];
+      if (!c) { closeModal(); return; }
+      c.name = name; c.amt = amt; c.note = note; c.on = formOn; c.t = now;
+    } else {
+      p.subs.push({ id: uid(), name: name, amt: amt, note: note, on: formOn, t: now });
+    }
+    p.t = now; recalc(p);
+    if (!persist(b)) { err.textContent = 'Save nahi hua (phone storage)'; return; }
+    closeModal(); render();
+  }
+  function delSub(pid, sid) {
+    var btn = $('delbtn'); if (!btn) return;
+    if (!btn.classList.contains('cf')) {
+      btn.classList.add('cf'); btn.textContent = 'Pakka delete?';
+      setTimeout(function () { var x = $('delbtn'); if (x) { x.classList.remove('cf'); x.textContent = '\ud83d\uddd1 Delete'; } }, 3500);
+      return;
+    }
+    var b = load(), p = b.src.filter(function (x) { return x.id === pid; })[0];
+    if (p) { p.subs = subsOf(p).filter(function (x) { return x.id !== sid; }); p.t = Date.now(); recalc(p); }
+    persist(b); closeModal(); render();
+  }
+  window.openSub = openSub; window.saveSub = saveSub; window.delSub = delSub;
   window.openEdit = openEdit; window.closeModal = closeModal; window.setOn = setOn; window.saveSrc = saveSrc; window.delSrc = delSrc;
   window.toggleIncomeSrc = function () {
     try { if (window._lionExit) { window._lionExit(); return; } } catch (e) {}
