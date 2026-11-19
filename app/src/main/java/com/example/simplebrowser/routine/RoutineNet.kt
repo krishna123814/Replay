@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * ⏰ Routine ka network layer (File Manager / Money Manager wala hi login: Session).
- *  - http(): sirf 2 raaste — GET dav/app_state/{routine,accounts}.json aur POST api/local_state_save
+ *  - http(): sirf 2 raaste — GET dav/app_state/{routine,accounts,incomesrc,family}.json aur POST api/local_state_save
  *  - wsCall(): server ka WebSocket /ws (chart.html ke wsCall jaisa: {id, action, data} -> {id, ok, data|error})
  * Saare calls blocking hain — RoutineActivity inhe background thread se chalata hai.
  */
@@ -41,7 +41,7 @@ object RoutineNet {
         return u.newBuilder().encodedPath("/").query(null).fragment(null).build().toString()
     }
 
-    private val allowedGet = setOf("dav/app_state/routine.json", "dav/app_state/accounts.json", "dav/app_state/incomesrc.json")
+    private val allowedGet = setOf("dav/app_state/routine.json", "dav/app_state/accounts.json", "dav/app_state/incomesrc.json", "dav/app_state/family.json")
 
     /** @return (HTTP code, body) */
     fun http(ctx: Context, method: String, path: String, body: String): Pair<Int, String> {

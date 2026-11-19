@@ -17,7 +17,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
 #lines{position:absolute;left:0;top:0;pointer-events:none}
 .card{position:absolute;width:112px;height:60px;background:var(--panel);border:1px solid var(--line);border-left:5px solid var(--o);border-radius:8px;padding:6px 6px 4px 8px;display:flex;flex-direction:column;justify-content:center;overflow:hidden}
 .card.M{border-left-color:var(--m)}.card.F{border-left-color:var(--f)}
-.card.late{background:#161a22;border-color:#2a2e39}
+.card.late{background:#161a22}
 .card.late .n{color:#b0b3bd}
 .card.late .y{color:#8a8d98}
 .card.sel{outline:2px solid var(--acc);background:#10252a}
@@ -58,8 +58,10 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
 <div id="app">
   <div id="hdr">
     <button id="ttl">🌳 Family Tree ▾</button><div id="cnt"></div>
+    <button class="hb" id="bSync" style="display:none">☁</button>
     <button class="hb" id="bFit" title="Fit">⤢</button>
     <button class="hb" id="bMenu">⋮</button>
+    <button class="hb" id="bClose" style="display:none" title="Band">✕</button>
   </div>
   <div id="vp">
     <div id="world"><svg id="lines" xmlns="http://www.w3.org/2000/svg"></svg></div>
@@ -185,7 +187,17 @@ var $=function(i){return document.getElementById(i)};
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function byId(id){for(var i=0;i<people.length;i++)if(people[i].id===id)return people[i];return null}
 
-/* ---------- storage ---------- */
+/* ---------- storage + server sync ---------- */
+// Bridge: Lion app me window.LionRt (phone file + http), chart.html ke andar iframe me window.parent.__famBridge (web).
+// Blob = {v:2, nextT, trees:[{id,name,next,people}], t}  (t = aakhri local badlav; server par kind="family" = /data/app_state/family.json)
+// Whole-blob latest-wins (Income/Money/Routine jaisa). "Kaun sa tree khula hai" (cur) sirf is device me rehta hai (family_meta).
+var BR=null;try{BR=window.LionRt||(window.parent&&window.parent!==window&&window.parent.__famBridge)||null}catch(e){BR=null}
+var WEB=!!(BR&&BR.web),HAS=!!(BR&&BR.http);
+var K='family',KM='family_meta';
+function rd(k){try{if(BR){var s=BR.get(k);return s?s:null}}catch(e){}try{return localStorage.getItem('_lion_'+k)}catch(e){return null}}
+function wr(k,s){try{if(BR)return !!BR.set(k,s)}catch(e){}try{localStorage.setItem('_lion_'+k,s);return true}catch(e){return false}}
+var M={};try{M=JSON.parse(rd(KM)||'{}')||{}}catch(e){M={}}
+function saveMeta(){wr(KM,JSON.stringify(M))}
 //#STORE-START
 function normPeople(arr){
   var ps=(arr||[]).map(function(p){return {id:String(p.id),name:String(p.name||''),year:String(p.year||''),g:(p.g==='M'||p.g==='F')?p.g:'O',
@@ -217,22 +229,115 @@ var S=migrate(null);
 function curTree(){for(var i=0;i<S.trees.length;i++)if(S.trees[i].id===S.cur)return S.trees[i];return S.trees[0]}
 function syncTree(){var t=curTree();t.people=people;t.next=nextId}
 function load(){
-  var raw='';
-  try{raw=window.LionRt?LionRt.get('family'):(localStorage.getItem('family')||'')}catch(e){}
-  var o=null;try{if(raw)o=JSON.parse(raw)}catch(e){}
-  S=migrate(o);
+  var raw=rd(K),o=null;try{if(raw)o=JSON.parse(raw)}catch(e){}
+  S=migrate(o);S.t=(o&&+o.t)||0;
+  var c=M.cur||(o&&o.cur);
+  S.cur=S.trees.some(function(t){return t.id===c})?c:S.trees[0].id;
   var t=curTree();people=t.people;nextId=t.next;
 }
-function dump(){syncTree();return JSON.stringify({v:2,cur:S.cur,nextT:S.nextT,trees:S.trees})}
+function dump(){syncTree();return JSON.stringify({v:2,nextT:S.nextT,trees:S.trees,t:S.t||0})}
 function save(){
-  var s=dump();
-  try{if(window.LionRt)LionRt.set('family',s);else localStorage.setItem('family',s)}catch(e){}
+  S.t=Date.now();
+  if(!wr(K,dump())){toast('Save nahi hua');return}
+  M.cur=S.cur;M.dirty=true;saveMeta();
+  if(HAS){SY.ver++;sched(1200);chip()}
 }
 function switchTree(id){
   syncTree();S.cur=id;var t=curTree();
-  people=t.people;nextId=t.next;sel=null;closeSheet();save();render(false);
+  people=t.people;nextId=t.next;sel=null;closeSheet();M.cur=id;saveMeta();render(false);
 }
 function setTitle(){$('ttl').textContent='🌳 '+curTree().name+' ▾'}
+
+// ---- server sync (sirf Lion app me; web me chart.html khud server se sync karta hai) ----
+var SY={err:'',last:0,busy:false,syncing:false,ver:0,p:null};
+var pend={},seq=0,pt=null,lastSync=0,syncP=null;
+window._lionNet=function(id,ok,payload){
+  var p=pend[id];if(!p)return;
+  delete pend[id];clearTimeout(p.t);
+  if(ok)p.res(payload);else p.rej(new Error(String(payload)));
+};
+function http(method,path,body){
+  return new Promise(function(res,rej){
+    if(!HAS){rej(new Error('native bridge nahi'));return}
+    var id=++seq;
+    pend[id]={res:res,rej:rej,t:setTimeout(function(){delete pend[id];rej(new Error('timeout'))},50000)};
+    try{BR.http(id,method,path,body||'')}catch(e){clearTimeout(pend[id].t);delete pend[id];rej(e)}
+  }).then(function(p){return JSON.parse(p)});
+}
+function hasData(b){return !!(b&&Array.isArray(b.trees)&&b.trees.some(function(t){return t.people&&t.people.length}))}
+function busyUI(){return ['formOv','impOv','menuOv','treesOv'].some(function(i){return $(i).style.display==='flex'})}
+function chip(){
+  var c=$('bSync');if(!c||WEB)return;
+  var txt='☁ ✓',col='#26a69a';
+  if(!HAS){txt='☁ offline';col='#848da0'}
+  else if(SY.syncing||SY.busy){txt='☁ …';col='#90caf9'}
+  else if(SY.err){txt='☁ ⚠';col='#ef5350';c.title=SY.err}
+  else if(M.dirty){txt='☁ ↑';col='#ffb74d'}
+  else if(!M.first){txt='☁ ?';col='#848da0'}
+  c.textContent=txt;c.style.color=col;
+}
+function sched(ms){clearTimeout(pt);pt=setTimeout(function(){push()},ms)}
+function parseAck(r){try{return JSON.parse(r.body)}catch(e){return null}}
+function push(){
+  if(SY.busy)return Promise.resolve();
+  if(!HAS||!M.first||!M.dirty)return Promise.resolve();
+  var raw=rd(K),payload;
+  try{payload=JSON.parse(raw)}catch(e){return Promise.resolve()}
+  if(!payload){M.dirty=false;saveMeta();return Promise.resolve()}
+  var ver=SY.ver;SY.busy=true;chip();
+  SY.p=http('POST','api/local_state_save',JSON.stringify({kind:K,seq:Date.now(),payload:payload}))
+    .then(function(r){
+      var a=parseAck(r);
+      if(r.code===200&&a&&a.ok){if(SY.ver===ver){M.dirty=false;saveMeta()}SY.err='';SY.last=Date.now()}
+      else throw new Error((a&&a.msg)||('HTTP '+r.code));
+    })
+    .catch(function(e){SY.err=String((e&&e.message)||e)})
+    .then(function(){SY.busy=false;SY.p=null;chip();if(M.dirty&&!SY.err)sched(1500)});
+  return SY.p;
+}
+function pull(){
+  return http('GET','dav/app_state/family.json').then(function(r){
+    if(r.code===401)throw new Error('Login galat (401)');
+    var lv=null;try{lv=JSON.parse(rd(K))}catch(e){}
+    if(r.code===404){ // server par abhi file nahi: jo phone me hai wahi bhejo
+      if(hasData(lv))M.dirty=true;
+      M.first=true;saveMeta();return false;
+    }
+    if(r.code<200||r.code>=300)throw new Error('HTTP '+r.code);
+    var j;try{j=JSON.parse(r.body)}catch(e){throw new Error('server data JSON nahi hai')}
+    if(!j||!Array.isArray(j.trees))throw new Error('server data ka shape galat');
+    var lt=(lv&&lv.t)||0,st=j.t||0;
+    if(M.first&&(M.dirty||lt>st)){M.dirty=true;saveMeta();return false}              // local aage hai: push karenge
+    if(!M.first&&lv&&lt>st&&hasData(lv)){M.dirty=true;M.first=true;saveMeta();return false}
+    var changed=JSON.stringify(lv)!==JSON.stringify(j);
+    if(changed){
+      if(busyUI())return false;                                                       // form khula hai: agle round me
+      if(!M.first&&hasData(lv)){wr('family_prev',rd(K)||'')}                           // pehli baar: purana local copy bacha ke rakho
+      wr(K,r.body);
+    }
+    M.first=true;M.dirty=false;saveMeta();
+    return changed;
+  });
+}
+function syncNow(manual){
+  if(!HAS){if(manual)toast('Server sync sirf Lion app me chalta hai');return Promise.resolve()}
+  if(syncP)return syncP;
+  if(!manual&&Date.now()-lastSync<15000)return Promise.resolve();
+  SY.syncing=true;SY.err='';chip();
+  var chg=false;
+  syncP=pull().then(function(c){chg=c;return push()})
+    .then(function(){SY.last=Date.now();if(chg){load();sel=null;closeSheet();render(true)}})
+    .catch(function(e){SY.err=String((e&&e.message)||e);if(manual)toast('⚠ '+SY.err)})
+    .then(function(){SY.syncing=false;syncP=null;lastSync=Date.now();chip();if(manual&&!SY.err)toast('☁ Sync ho gaya')});
+  return syncP;
+}
+window._lionFlush=function(){clearTimeout(pt);return Promise.resolve(SY.p||0).then(function(){return push()})};
+window._lionExit=function(){
+  var done=false;
+  function go(){if(done)return;done=true;try{BR.close()}catch(e){}}
+  setTimeout(go,4000);
+  window._lionFlush().then(go,go);
+};
 
 /* ---------- render ---------- */
 var tx=0,ty=0,sc=1,vpW=0,vpH=0;
@@ -455,7 +560,7 @@ $('mExp').onclick=function(){
   var s=dump();
   if(!S.trees.some(function(t){return t.people.length})){toast('Export karne ko kuch nahi');return}
   try{
-    if(window.LionRt&&LionRt.saveFile){LionRt.saveFile('family_trees.json',s)}
+    if(BR&&BR.saveFile){BR.saveFile('family_trees.json',s)}
     else{var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([s],{type:'application/json'}));a.download='family_trees.json';a.click()}
   }catch(e){toast('Export fail')}
 };
@@ -468,7 +573,7 @@ $('impOk').onclick=function(){
     var st=migrate(o);syncTree();var first=null;
     st.trees.forEach(function(t){t.id='t'+(S.nextT++);S.trees.push(t);if(!first)first=t.id});
     $('impOv').style.display='none';
-    switchTree(first);toast(st.trees.length+' tree import hue');
+    save();switchTree(first);toast(st.trees.length+' tree import hue');
   }catch(e){toast('JSON galat hai')}
 };
 $('mClr').onclick=function(){
@@ -498,7 +603,7 @@ $('tNew').onclick=function(){
   if(n===null)return;n=n.trim();if(!n){toast('Naam likho');return}
   syncTree();
   var t={id:'t'+(S.nextT++),name:n,next:1,people:[]};S.trees.push(t);
-  $('treesOv').style.display='none';switchTree(t.id);
+  save();$('treesOv').style.display='none';switchTree(t.id);
 };
 $('tRen').onclick=function(){
   var t=curTree(),n=prompt('Tree ka naam',t.name);
@@ -511,7 +616,7 @@ $('tDel').onclick=function(){
   syncTree();
   S.trees=S.trees.filter(function(x){return x.id!==t.id});
   if(!S.trees.length)S.trees.push({id:'t'+(S.nextT++),name:'Mera Parivar',next:1,people:[]});
-  $('treesOv').style.display='none';switchTree(S.trees[0].id);
+  save();$('treesOv').style.display='none';switchTree(S.trees[0].id);
 };
 $('bFit').onclick=fit;
 
@@ -522,9 +627,21 @@ window._lionBack=function(){
   if($('sheet').style.display==='block'){closeSheet();return true}
   return false;
 };
-window._lionFlush=function(){};
 window.addEventListener('resize',function(){setTimeout(function(){if(!sel)fit()},100)});
 
-load();render(false);
+if(WEB)$('bClose').style.display='';
+if(!WEB){$('bSync').style.display='';$('bSync').onclick=function(){syncNow(true)}}
+$('bClose').onclick=function(){try{BR.close()}catch(e){}};
+load();render(false);chip();
+if(HAS){
+  syncNow(false);
+  setInterval(function(){
+    if(SY.syncing)return;
+    if(!M.first){syncNow(false);return}
+    if(M.dirty){SY.err='';push();return}
+    if(!document.hidden&&Date.now()-lastSync>120000)syncNow(false);
+  },30000);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)syncNow(false)});
+}
 </script>
 </body></html>

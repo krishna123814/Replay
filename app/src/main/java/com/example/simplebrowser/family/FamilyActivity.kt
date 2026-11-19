@@ -21,12 +21,16 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.example.simplebrowser.routine.RoutineNet
 import com.example.simplebrowser.routine.RoutineStore
+import org.json.JSONObject
 import java.io.File
 
 /**
  * 🌳 Family Tree — assets/family/index.html (WebView).
- * Data phone me hi: filesDir/routine/family.json (RoutineStore, key "family"). Server sync nahi.
+ * Local copy: filesDir/routine/family.json (RoutineStore, key "family"; "family_meta" = sirf is phone ka state).
+ * Server: GET dav/app_state/family.json, save = POST api/local_state_save {kind:'family'} (RoutineNet, File Manager wala login).
+ * Server ke chart.html wala 🌳 panel bhi isi blob ko padhta/likhta hai.
  */
 class FamilyActivity : AppCompatActivity() {
 
@@ -99,7 +103,12 @@ class FamilyActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 web.evaluateJavascript("(function(){try{return window._lionBack?window._lionBack():false}catch(e){return false}})()") { r ->
-                    if (r != "true") finish()
+                    if (r != "true") {
+                        // pending save/sync hai to JS use poora karke (max ~4 sec) LionRt.close() bulayega
+                        web.evaluateJavascript("(function(){try{window._lionExit();return true}catch(e){return false}})()") { r2 ->
+                            if (r2 != "true") finish()
+                        }
+                    }
                 }
             }
         })
@@ -108,7 +117,11 @@ class FamilyActivity : AppCompatActivity() {
     }
 
     override fun onResume() { super.onResume(); web.onResume() }
-    override fun onPause() { web.onPause(); super.onPause() }
+    override fun onPause() {
+        try { web.evaluateJavascript("try{window._lionFlush&&window._lionFlush()}catch(e){}", null) } catch (_: Exception) {}
+        web.onPause()
+        super.onPause()
+    }
     override fun onDestroy() {
         try { web.removeJavascriptInterface("LionRt"); web.destroy() } catch (_: Exception) {}
         super.onDestroy()
@@ -119,6 +132,18 @@ class FamilyActivity : AppCompatActivity() {
         @JavascriptInterface fun get(key: String): String = store.read(key)
         @JavascriptInterface fun set(key: String, value: String): Boolean = store.write(key, value)
         @JavascriptInterface fun close() { runOnUiThread { finish() } }
+
+        /** Async HTTP (sirf family.json GET + local_state_save POST). Jawab: window._lionNet(id, ok, '{"code":..,"body":".."}') */
+        @JavascriptInterface fun http(id: Int, method: String, path: String, body: String) {
+            RoutineNet.io.execute {
+                try {
+                    val (code, txt) = RoutineNet.http(applicationContext, method, path, body)
+                    deliver(id, true, JSONObject().put("code", code).put("body", txt).toString())
+                } catch (e: Exception) {
+                    deliver(id, false, e.message ?: "network error")
+                }
+            }
+        }
 
         /** Export JSON: Downloads/Lion/ me file save. */
         @JavascriptInterface fun saveFile(name: String, text: String): Boolean {
@@ -131,6 +156,13 @@ class FamilyActivity : AppCompatActivity() {
                 ).show()
             }
             return where != null
+        }
+    }
+
+    private fun deliver(id: Int, ok: Boolean, payload: String) {
+        runOnUiThread {
+            if (isDestroyed || isFinishing) return@runOnUiThread
+            web.evaluateJavascript("window._lionNet($id,$ok,${JSONObject.quote(payload)})", null)
         }
     }
 
