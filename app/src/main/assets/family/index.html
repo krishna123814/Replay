@@ -15,7 +15,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
 #vp{flex:1;position:relative;overflow:hidden;touch-action:none;background-image:radial-gradient(#1f2433 1px,transparent 1px);background-size:22px 22px}
 #world{position:absolute;left:0;top:0;transform-origin:0 0}
 #lines{position:absolute;left:0;top:0;pointer-events:none}
-.card{position:absolute;width:112px;height:60px;background:var(--panel);border:1px solid var(--line);border-left:5px solid var(--o);border-radius:8px;padding:6px 6px 4px 8px;display:flex;flex-direction:column;justify-content:center;overflow:hidden}
+.card{position:absolute;width:112px;height:72px;background:var(--panel);border:1px solid var(--line);border-left:5px solid var(--o);border-radius:8px;padding:6px 6px 4px 8px;display:flex;flex-direction:column;justify-content:center;overflow:hidden}
 .card.M{border-left-color:var(--m)}.card.F{border-left-color:var(--f)}
 .card.late{background:#161a22}
 .card.late .n{color:#b0b3bd}
@@ -23,6 +23,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
 .card.sel{outline:2px solid var(--acc);background:#10252a}
 .card .n{font-size:12px;font-weight:700;color:#fff;line-height:1.15;max-height:28px;overflow:hidden;word-break:break-word}
 .card .y{font-size:10px;color:var(--mut);margin-top:2px}
+.card .pl{font-size:10px;color:#8ab4c2;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #empty{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--mut);font-size:14px;text-align:center;padding:20px}
 .big{background:var(--acc);color:#0b1217;border:none;border-radius:8px;font-size:14px;font-weight:700;padding:12px 18px}
 #sheet{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);border-radius:14px 14px 0 0;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));display:none;z-index:20;box-shadow:0 -6px 24px #000a}
@@ -85,6 +86,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
   <h3 id="fTitle"></h3>
   <label>Naam</label><input type="text" id="fName" autocomplete="off">
   <label>Janm saal (optional)</label><input type="text" id="fYear" inputmode="numeric" maxlength="4">
+  <label>📍 Kahan rehte hain — jagah (optional)</label><input type="text" id="fPlace" autocomplete="off" maxlength="60" placeholder="jaise: Jaipur, Rajasthan">
   <label>Gender</label>
   <div class="gs"><button class="gb" data-g="M">👨 Male</button><button class="gb" data-g="F">👩 Female</button><button class="gb" data-g="O">Other</button></div>
   <label class="ckl"><input type="checkbox" id="fLate"> ✝ Late (guzar chuke hain)</label>
@@ -125,7 +127,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
 
 <script>
 //#LAYOUT-START
-var CW=112,CH=60,SG=18,UG=26,VG=70;
+var CW=112,CH=72,SG=18,UG=26,VG=70;
 // people: [{id,name,year,g,parents:[ids],spouse:id|null}]
 // Har couple ek "unit" hai; unit ke bacche uske neeche. Position m.x / m.y me set hoti hai.
 function layout(people){
@@ -201,7 +203,7 @@ function saveMeta(){wr(KM,JSON.stringify(M))}
 //#STORE-START
 function normPeople(arr){
   var ps=(arr||[]).map(function(p){return {id:String(p.id),name:String(p.name||''),year:String(p.year||''),g:(p.g==='M'||p.g==='F')?p.g:'O',
-    parents:Array.isArray(p.parents)?p.parents.map(String):[],spouse:p.spouse?String(p.spouse):null,d:!!p.d,dy:String(p.dy||'')}});
+    parents:Array.isArray(p.parents)?p.parents.map(String):[],spouse:p.spouse?String(p.spouse):null,d:!!p.d,dy:String(p.dy||''),pl:String(p.pl||'').slice(0,60)}});
   var mx=0;ps.forEach(function(p){var n=parseInt(p.id.replace(/\D/g,''),10);if(n>mx)mx=n});
   return {people:ps,next:mx+1};
 }
@@ -355,7 +357,7 @@ function render(keepView){
   var h='';
   people.forEach(function(p){
     h+='<div class="card '+p.g+(p.d?' late':'')+(p.id===sel?' sel':'')+'" data-id="'+esc(p.id)+'" style="left:'+(p.x+PAD)+'px;top:'+(p.y+PAD)+'px">'
-      +'<div class="n">'+(p.d?'Late ':'')+esc(p.name||'(naam nahi)')+'</div>'+yearLine(p)+'</div>';
+      +'<div class="n">'+(p.d?'Late ':'')+esc(p.name||'(naam nahi)')+'</div>'+yearLine(p)+(p.pl?'<div class="pl">📍 '+esc(p.pl)+'</div>':'')+'</div>';
   });
   var d='';
   L.units.forEach(function(u){
@@ -456,6 +458,7 @@ function select(id){
   var par=p.parents.map(byId).filter(Boolean),sp=p.spouse?byId(p.spouse):null;
   $('sname').textContent=(p.d?'Late ':'')+(p.name||'(naam nahi)');
   var bits=[];if(p.year)bits.push('b. '+p.year);if(p.d)bits.push('✝ Late'+(p.dy?' ('+p.dy+')':''));
+  if(p.pl)bits.push('📍 '+p.pl);
   if(par.length)bits.push('Parents: '+par.map(function(x){return x.name}).join(' & '));
   if(sp)bits.push('Spouse: '+sp.name);
   $('ssub').textContent=bits.join('  •  ')||'Koi rishta nahi jura';
@@ -478,9 +481,9 @@ function setG(g){fG=g;var b=document.querySelectorAll('.gb');for(var i=0;i<b.len
 [].forEach.call(document.querySelectorAll('.gb'),function(b){b.addEventListener('click',function(){setG(b.getAttribute('data-g'))})});
 function setLate(on){$('fLate').checked=!!on;$('fDyWrap').style.display=on?'block':'none'}
 $('fLate').addEventListener('change',function(){setLate(this.checked)});
-function openForm(title,name,year,g,late,dy,cb){
+function openForm(title,name,year,g,late,dy,cb,place){
   $('fTitle').textContent=title;$('fName').value=name||'';$('fYear').value=year||'';setG(g||'M');
-  setLate(late);$('fDy').value=dy||'';fCb=cb;
+  setLate(late);$('fDy').value=dy||'';$('fPlace').value=place||'';fCb=cb;
   $('formOv').style.display='flex';setTimeout(function(){$('fName').focus()},60);
 }
 function closeForm(){$('formOv').style.display='none';fCb=null}
@@ -490,24 +493,25 @@ $('fOk').onclick=function(){
   if(!n){toast('Naam likho');return}
   var y=$('fYear').value.replace(/\D/g,'').slice(0,4),cb=fCb;
   var late=$('fLate').checked,dy=late?$('fDy').value.replace(/\D/g,'').slice(0,4):'';
-  closeForm();if(cb)cb(n,y,fG,late,dy);
+  var pl=$('fPlace').value.replace(/\s+/g,' ').trim().slice(0,60);
+  closeForm();if(cb)cb(n,y,fG,late,dy,pl);
 };
 
 /* ---------- actions ---------- */
-function mk(n,y,g,parents,spouse,late,dy){var p={id:'p'+(nextId++),name:n,year:y,g:g,parents:parents||[],spouse:spouse||null,d:!!late,dy:dy||''};people.push(p);return p}
+function mk(n,y,g,parents,spouse,late,dy,pl){var p={id:'p'+(nextId++),name:n,year:y,g:g,parents:parents||[],spouse:spouse||null,d:!!late,dy:dy||'',pl:pl||''};people.push(p);return p}
 function changed(focus){save();render(true);if(focus)select(focus);else closeSheet()}
 function opp(g){return g==='M'?'F':(g==='F'?'M':'O')}
 
 $('bFirst').onclick=function(){
-  openForm('Pehla insaan (aap / sabse purane)','','','M',false,'',function(n,y,g,l,dy){var p=mk(n,y,g,[],null,l,dy);save();render(false);select(p.id)});
+  openForm('Pehla insaan (aap / sabse purane)','','','M',false,'',function(n,y,g,l,dy,pl){var p=mk(n,y,g,[],null,l,dy,pl);save();render(false);select(p.id)});
 };
 $('aPar').onclick=function(){
   var p=byId(sel);if(!p)return;
   var par=p.parents.map(byId).filter(Boolean);
   if(par.length>=2){toast('Do parents already hain');return}
   var other=par[0]||null;
-  openForm('Parent add — '+p.name,'','',other?opp(other.g):'M',false,'',function(n,y,g,l,dy){
-    var np=mk(n,y,g,[],null,l,dy);
+  openForm('Parent add — '+p.name,'','',other?opp(other.g):'M',false,'',function(n,y,g,l,dy,pl){
+    var np=mk(n,y,g,[],null,l,dy,pl);
     // sab full siblings (same parents) ko ye naya parent mile
     var sibs=par.length?people.filter(function(q){return q.id!==np.id&&q.parents.length===p.parents.length&&q.parents.every(function(i){return p.parents.indexOf(i)>=0})}):[p];
     if(!sibs.length)sibs=[p];
@@ -519,28 +523,28 @@ $('aPar').onclick=function(){
 $('aSp').onclick=function(){
   var p=byId(sel);if(!p)return;
   if(p.spouse&&byId(p.spouse)){toast('Spouse already hai');return}
-  openForm('Spouse add — '+p.name,'','',opp(p.g),false,'',function(n,y,g,l,dy){
-    var np=mk(n,y,g,[],p.id,l,dy);p.spouse=np.id;changed(p.id);
+  openForm('Spouse add — '+p.name,'','',opp(p.g),false,'',function(n,y,g,l,dy,pl){
+    var np=mk(n,y,g,[],p.id,l,dy,pl);p.spouse=np.id;changed(p.id);
   });
 };
 $('aKid').onclick=function(){
   var p=byId(sel);if(!p)return;
-  openForm('Child add — '+p.name,'','','M',false,'',function(n,y,g,l,dy){
+  openForm('Child add — '+p.name,'','','M',false,'',function(n,y,g,l,dy,pl){
     var ps=[p.id];if(p.spouse&&byId(p.spouse))ps.push(p.spouse);
-    var c=mk(n,y,g,ps,null,l,dy);changed(c.id);
+    var c=mk(n,y,g,ps,null,l,dy,pl);changed(c.id);
   });
 };
 $('aSib').onclick=function(){
   var p=byId(sel);if(!p)return;
   var par=p.parents.filter(byId);
   if(!par.length){toast('Pehle Parent add karo, phir Sibling');return}
-  openForm('Sibling add — '+p.name,'','','M',false,'',function(n,y,g,l,dy){
-    var c=mk(n,y,g,par.slice(),null,l,dy);changed(c.id);
+  openForm('Sibling add — '+p.name,'','','M',false,'',function(n,y,g,l,dy,pl){
+    var c=mk(n,y,g,par.slice(),null,l,dy,pl);changed(c.id);
   });
 };
 $('aEdit').onclick=function(){
   var p=byId(sel);if(!p)return;
-  openForm('Edit',p.name,p.year,p.g,p.d,p.dy,function(n,y,g,l,dy){p.name=n;p.year=y;p.g=g;p.d=l;p.dy=dy;changed(p.id)});
+  openForm('Edit',p.name,p.year,p.g,p.d,p.dy,function(n,y,g,l,dy,pl){p.name=n;p.year=y;p.g=g;p.d=l;p.dy=dy;p.pl=pl;changed(p.id)},p.pl);
 };
 $('aDel').onclick=function(){
   var p=byId(sel);if(!p)return;
