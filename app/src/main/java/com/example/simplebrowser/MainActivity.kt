@@ -62,6 +62,9 @@ class MainActivity : AppCompatActivity() {
             R.id.btnIncome, R.id.swIncome, FloatApps.INCOME,
             com.example.simplebrowser.income.IncomeActivity::class.java
         )
+        findViewById<Button>(R.id.btnFamily).setOnClickListener {
+            startActivity(Intent(this, com.example.simplebrowser.family.FamilyActivity::class.java))
+        }
         findViewById<Button>(R.id.btnFloating).setOnClickListener { runFloating { startFloating() } }
         findViewById<Button>(R.id.btnStopFloating).setOnClickListener {
             stopService(Intent(this, FloatingService::class.java))

@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="hi"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Family Tree</title>
+<style>
+:root{--bg:#131722;--panel:#1a1e29;--line:#2a2e39;--txt:#d1d4dc;--mut:#787b86;--acc:#4dd0e1;--m:#42a5f5;--f:#f06292;--o:#9e9e9e}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family:sans-serif;overflow:hidden}
+#app{display:flex;flex-direction:column;height:100%}
+#hdr{display:flex;align-items:center;gap:6px;padding:9px 10px;background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0}
+#ttl{flex:1;min-width:0;text-align:left;background:none;border:none;font-size:15px;font-weight:700;color:#fff;padding:6px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#cnt{font-size:11px;color:var(--mut);margin-right:4px}
+.hb{background:#222736;border:1px solid var(--line);border-radius:6px;color:var(--txt);font-size:15px;min-width:34px;height:32px;padding:0 6px}
+.hb:active{background:var(--line)}
+#vp{flex:1;position:relative;overflow:hidden;touch-action:none;background-image:radial-gradient(#1f2433 1px,transparent 1px);background-size:22px 22px}
+#world{position:absolute;left:0;top:0;transform-origin:0 0}
+#lines{position:absolute;left:0;top:0;pointer-events:none}
+.card{position:absolute;width:112px;height:60px;background:var(--panel);border:1px solid var(--line);border-left:5px solid var(--o);border-radius:8px;padding:6px 6px 4px 8px;display:flex;flex-direction:column;justify-content:center;overflow:hidden}
+.card.M{border-left-color:var(--m)}.card.F{border-left-color:var(--f)}
+.card.late{background:#161a22;border-color:#2a2e39}
+.card.late .n{color:#b0b3bd}
+.card.late .y{color:#8a8d98}
+.card.sel{outline:2px solid var(--acc);background:#10252a}
+.card .n{font-size:12px;font-weight:700;color:#fff;line-height:1.15;max-height:28px;overflow:hidden;word-break:break-word}
+.card .y{font-size:10px;color:var(--mut);margin-top:2px}
+#empty{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--mut);font-size:14px;text-align:center;padding:20px}
+.big{background:var(--acc);color:#0b1217;border:none;border-radius:8px;font-size:14px;font-weight:700;padding:12px 18px}
+#sheet{position:fixed;left:0;right:0;bottom:0;background:var(--panel);border-top:1px solid var(--line);border-radius:14px 14px 0 0;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));display:none;z-index:20;box-shadow:0 -6px 24px #000a}
+#sname{font-size:15px;font-weight:700;color:#fff}
+#ssub{font-size:11px;color:var(--mut);margin:2px 0 10px}
+#sgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.ab{background:#222736;border:1px solid var(--line);border-radius:8px;color:var(--txt);font-size:13px;padding:11px 6px}
+.ab:active{background:var(--line)}
+.ab.dis{opacity:.4}
+.ab.red{color:#ef5350}
+.ov{position:fixed;inset:0;background:#000a;display:none;align-items:flex-start;justify-content:center;padding-top:10vh;z-index:30}
+.box{width:min(340px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+.box h3{margin:0 0 10px;font-size:14px;color:#fff}
+.box label{display:block;font-size:11px;color:var(--mut);margin:8px 0 3px}
+.box input[type=text],.box textarea{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--txt);font-size:14px;padding:9px;outline:none}
+.box textarea{height:130px;font-family:monospace;font-size:11px}
+.box input:focus,.box textarea:focus{border-color:var(--acc)}
+.box label.ckl{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);margin:14px 0 4px}
+.ckl input{width:18px;height:18px}
+.ab.tr{display:flex;justify-content:space-between;align-items:center;text-align:left;padding:12px}
+.ab.tr span{font-size:11px;color:var(--mut)}
+.ab.tr.cur{border-color:var(--acc);background:#10252a;color:#fff}
+#trList{display:grid;gap:8px;grid-template-columns:1fr;max-height:48vh;overflow-y:auto;margin-bottom:10px}
+.gs{display:flex;gap:6px}
+.gb{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--mut);font-size:13px;padding:9px 4px}
+.gb.on{color:#fff;border-color:var(--acc);background:#10252a}
+.br{display:flex;gap:8px;margin-top:14px}
+.br button{flex:1;border-radius:8px;font-size:14px;font-weight:700;padding:11px;border:1px solid var(--line);background:#222736;color:var(--txt)}
+.br button.ok{background:var(--acc);color:#0b1217;border-color:var(--acc)}
+#toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#000d;color:#fff;font-size:12px;padding:8px 14px;border-radius:16px;display:none;z-index:40;max-width:90vw;text-align:center}
+</style></head>
+<body>
+<div id="app">
+  <div id="hdr">
+    <button id="ttl">🌳 Family Tree ▾</button><div id="cnt"></div>
+    <button class="hb" id="bFit" title="Fit">⤢</button>
+    <button class="hb" id="bMenu">⋮</button>
+  </div>
+  <div id="vp">
+    <div id="world"><svg id="lines" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <div id="empty"><div>🌳<br>Tree abhi khali hai</div><button class="big" id="bFirst">➕ Pehla insaan add karo</button></div>
+  </div>
+</div>
+
+<div id="sheet">
+  <div id="sname"></div><div id="ssub"></div>
+  <div id="sgrid">
+    <button class="ab" id="aPar">⬆️ Parent add</button>
+    <button class="ab" id="aSp">💍 Spouse add</button>
+    <button class="ab" id="aKid">👶 Child add</button>
+    <button class="ab" id="aSib">👫 Sibling add</button>
+    <button class="ab" id="aEdit">✏️ Edit</button>
+    <button class="ab red" id="aDel">🗑 Delete</button>
+  </div>
+</div>
+
+<div class="ov" id="formOv"><div class="box">
+  <h3 id="fTitle"></h3>
+  <label>Naam</label><input type="text" id="fName" autocomplete="off">
+  <label>Janm saal (optional)</label><input type="text" id="fYear" inputmode="numeric" maxlength="4">
+  <label>Gender</label>
+  <div class="gs"><button class="gb" data-g="M">👨 Male</button><button class="gb" data-g="F">👩 Female</button><button class="gb" data-g="O">Other</button></div>
+  <label class="ckl"><input type="checkbox" id="fLate"> ✝ Late (guzar chuke hain)</label>
+  <div id="fDyWrap" style="display:none"><label>Guzarne ka saal (optional)</label><input type="text" id="fDy" inputmode="numeric" maxlength="4"></div>
+  <div class="br"><button id="fCancel">Cancel</button><button class="ok" id="fOk">Save</button></div>
+</div></div>
+
+<div class="ov" id="menuOv"><div class="box">
+  <h3>Menu</h3>
+  <div style="display:grid;gap:8px;grid-template-columns:1fr">
+    <button class="ab" id="mTrees">🌳 Saare trees / naya tree</button>
+    <button class="ab" id="mExp">⬇️ Export (saare trees, JSON)</button>
+    <button class="ab" id="mImp">⬆️ Import (naye tree ki tarah judega)</button>
+    <button class="ab red" id="mClr">🗑 Is tree ko khali karo</button>
+    <button class="ab" id="mCls">Band</button>
+  </div>
+</div></div>
+
+<div class="ov" id="treesOv"><div class="box">
+  <h3>Family Trees</h3>
+  <div id="trList"></div>
+  <div style="display:grid;gap:8px;grid-template-columns:1fr 1fr">
+    <button class="ab" id="tNew">➕ Naya tree</button>
+    <button class="ab" id="tRen">✏️ Naam badlo</button>
+    <button class="ab red" id="tDel">🗑 Ye tree delete</button>
+    <button class="ab" id="tCls">Band</button>
+  </div>
+</div></div>
+
+<div class="ov" id="impOv"><div class="box">
+  <h3>Import</h3>
+  <label>Export wala JSON yahan paste karo (purane trees nahi hatenge)</label>
+  <textarea id="impTxt"></textarea>
+  <div class="br"><button id="impCancel">Cancel</button><button class="ok" id="impOk">Import</button></div>
+</div></div>
+
+<div id="toast"></div>
+
+<script>
+//#LAYOUT-START
+var CW=112,CH=60,SG=18,UG=26,VG=70;
+// people: [{id,name,year,g,parents:[ids],spouse:id|null}]
+// Har couple ek "unit" hai; unit ke bacche uske neeche. Position m.x / m.y me set hoti hai.
+function layout(people){
+  var by={};people.forEach(function(p){by[p.id]=p});
+  var unitOf={},units=[];
+  function hasPar(p){return p.parents.some(function(i){return by[i]})}
+  people.forEach(function(p){
+    if(unitOf[p.id])return;
+    var s=p.spouse&&by[p.spouse]&&by[p.spouse].spouse===p.id&&!unitOf[p.spouse]?by[p.spouse]:null;
+    var u={m:[p],kids:[],pu:null,vis:false};
+    if(s)u.m.push(s);
+    u.m.forEach(function(m){unitOf[m.id]=u});
+    units.push(u);
+  });
+  units.forEach(function(u){ if(u.m.length==2&&!hasPar(u.m[0])&&hasPar(u.m[1]))u.m.reverse(); });
+  units.forEach(function(u){
+    for(var i=0;i<u.m.length&&!u.pu;i++){
+      for(var j=0;j<u.m[i].parents.length;j++){
+        var pu=unitOf[u.m[i].parents[j]];
+        if(pu&&pu!==u){u.pu=pu;break}
+      }
+    }
+  });
+  units.forEach(function(u){if(u.pu)u.pu.kids.push(u)});
+  units.forEach(function(u){
+    var all=u.kids.every(function(k){return k.m[0].year});
+    if(all&&u.kids.length>1)u.kids.sort(function(a,b){return (+a.m[0].year)-(+b.m[0].year)});
+  });
+  function meas(u){
+    u.vis=true;
+    u.uw=u.m.length*CW+(u.m.length-1)*SG;
+    u.kids=u.kids.filter(function(k){return !k.vis});
+    var kw=0;
+    u.kids.forEach(function(k){meas(k);kw+=k.w});
+    if(u.kids.length>1)kw+=(u.kids.length-1)*UG;
+    u.kw=kw;u.w=Math.max(u.uw,kw);
+  }
+  function place(u,left,d){
+    u.y=d*(CH+VG);u.cx=left+u.w/2;
+    var x=u.cx-u.uw/2;
+    u.m.forEach(function(m,i){m.x=x+i*(CW+SG);m.y=u.y});
+    var kl=left+(u.w-u.kw)/2;
+    u.kids.forEach(function(k){place(k,kl,d+1);kl+=k.w+UG});
+  }
+  var roots=units.filter(function(u){return !u.pu});
+  roots.forEach(meas);
+  units.forEach(function(u){if(!u.vis){u.pu=null;roots.push(u);meas(u)}}); // cycle bachav
+  var left=0;
+  roots.forEach(function(u){place(u,left,0);left+=u.w+UG*2});
+  var W=Math.max(left-UG*2,CW),H=0;
+  people.forEach(function(p){H=Math.max(H,p.y+CH)});
+  return {units:units,roots:roots,w:W,h:H};
+}
+//#LAYOUT-END
+
+var PAD=40;
+var people=[],nextId=1,sel=null;
+var $=function(i){return document.getElementById(i)};
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function byId(id){for(var i=0;i<people.length;i++)if(people[i].id===id)return people[i];return null}
+
+/* ---------- storage ---------- */
+//#STORE-START
+function normPeople(arr){
+  var ps=(arr||[]).map(function(p){return {id:String(p.id),name:String(p.name||''),year:String(p.year||''),g:(p.g==='M'||p.g==='F')?p.g:'O',
+    parents:Array.isArray(p.parents)?p.parents.map(String):[],spouse:p.spouse?String(p.spouse):null,d:!!p.d,dy:String(p.dy||'')}});
+  var mx=0;ps.forEach(function(p){var n=parseInt(p.id.replace(/\D/g,''),10);if(n>mx)mx=n});
+  return {people:ps,next:mx+1};
+}
+// v1 ({people}) ya v2 ({trees}) dono padh leta hai -> {cur,nextT,trees}
+function migrate(o){
+  var st={cur:null,nextT:1,trees:[]};
+  if(o&&Array.isArray(o.trees)){
+    o.trees.forEach(function(t,i){
+      var n=normPeople(t.people);
+      st.trees.push({id:String(t.id||('t'+(i+1))),name:String(t.name||('Parivar '+(i+1))),next:Math.max(+t.next||1,n.next),people:n.people});
+    });
+    st.cur=o.cur;
+  }else if(o&&Array.isArray(o.people)){
+    var n=normPeople(o.people);
+    st.trees.push({id:'t1',name:'Mera Parivar',next:Math.max(+o.next||1,n.next),people:n.people});
+  }
+  if(!st.trees.length)st.trees.push({id:'t1',name:'Mera Parivar',next:1,people:[]});
+  var mx=0;st.trees.forEach(function(t){var n=parseInt(t.id.replace(/\D/g,''),10);if(n>mx)mx=n});
+  st.nextT=Math.max(+(o&&o.nextT)||1,mx+1);
+  if(!st.trees.some(function(t){return t.id===st.cur}))st.cur=st.trees[0].id;
+  return st;
+}
+//#STORE-END
+var S=migrate(null);
+function curTree(){for(var i=0;i<S.trees.length;i++)if(S.trees[i].id===S.cur)return S.trees[i];return S.trees[0]}
+function syncTree(){var t=curTree();t.people=people;t.next=nextId}
+function load(){
+  var raw='';
+  try{raw=window.LionRt?LionRt.get('family'):(localStorage.getItem('family')||'')}catch(e){}
+  var o=null;try{if(raw)o=JSON.parse(raw)}catch(e){}
+  S=migrate(o);
+  var t=curTree();people=t.people;nextId=t.next;
+}
+function dump(){syncTree();return JSON.stringify({v:2,cur:S.cur,nextT:S.nextT,trees:S.trees})}
+function save(){
+  var s=dump();
+  try{if(window.LionRt)LionRt.set('family',s);else localStorage.setItem('family',s)}catch(e){}
+}
+function switchTree(id){
+  syncTree();S.cur=id;var t=curTree();
+  people=t.people;nextId=t.next;sel=null;closeSheet();save();render(false);
+}
+function setTitle(){$('ttl').textContent='🌳 '+curTree().name+' ▾'}
+
+/* ---------- render ---------- */
+var tx=0,ty=0,sc=1,vpW=0,vpH=0;
+var world=$('world'),vp=$('vp'),svg=$('lines');
+function applyT(){world.style.transform='translate('+tx+'px,'+ty+'px) scale('+sc+')'}
+function yearLine(p){
+  var t='';
+  if(p.d)t='✝'+((p.year||p.dy)?' '+(p.year||'?')+'–'+(p.dy||'?'):'');
+  else if(p.year)t='b. '+p.year;
+  return t?'<div class="y">'+esc(t)+'</div>':'';
+}
+function render(keepView){
+  var L=layout(people);
+  var W=L.w+PAD*2,H=L.h+PAD*2;
+  var h='';
+  people.forEach(function(p){
+    h+='<div class="card '+p.g+(p.d?' late':'')+(p.id===sel?' sel':'')+'" data-id="'+esc(p.id)+'" style="left:'+(p.x+PAD)+'px;top:'+(p.y+PAD)+'px">'
+      +'<div class="n">'+(p.d?'Late ':'')+esc(p.name||'(naam nahi)')+'</div>'+yearLine(p)+'</div>';
+  });
+  var d='';
+  L.units.forEach(function(u){
+    if(u.m.length==2){
+      var yy=u.y+CH/2+PAD;
+      d+='<line x1="'+(u.m[0].x+CW+PAD)+'" y1="'+yy+'" x2="'+(u.m[1].x+PAD)+'" y2="'+yy+'" stroke="#f06292" stroke-width="3"/>';
+    }
+    if(!u.kids.length)return;
+    var ax=u.cx+PAD,ay=(u.m.length==2?u.y+CH/2:u.y+CH)+PAD;
+    var bus=u.y+CH+VG/2+PAD;
+    var xs=[ax];
+    u.kids.forEach(function(k){
+      var kx=k.m[0].x+CW/2+PAD;xs.push(kx);
+      d+='<line x1="'+kx+'" y1="'+bus+'" x2="'+kx+'" y2="'+(k.y+PAD)+'" stroke="#4a5068" stroke-width="2"/>';
+    });
+    d+='<line x1="'+ax+'" y1="'+ay+'" x2="'+ax+'" y2="'+bus+'" stroke="#4a5068" stroke-width="2"/>';
+    d+='<line x1="'+Math.min.apply(null,xs)+'" y1="'+bus+'" x2="'+Math.max.apply(null,xs)+'" y2="'+bus+'" stroke="#4a5068" stroke-width="2"/>';
+  });
+  svg.setAttribute('width',W);svg.setAttribute('height',H);
+  svg.innerHTML=d;
+  // purane cards hatao, naye lagao
+  var old=world.querySelectorAll('.card');for(var i=0;i<old.length;i++)world.removeChild(old[i]);
+  svg.insertAdjacentHTML('afterend',h);
+  world.style.width=W+'px';world.style.height=H+'px';
+  world._W=W;world._H=H;
+  $('cnt').textContent=people.length?people.length+' log':'';
+  setTitle();
+  $('empty').style.display=people.length?'none':'flex';
+  if(!keepView)fit();else applyT();
+}
+function fit(){
+  vpW=vp.clientWidth;vpH=vp.clientHeight;
+  var W=world._W||1,H=world._H||1;
+  sc=Math.max(0.25,Math.min(1,vpW/W,vpH/H));
+  tx=(vpW-W*sc)/2;ty=Math.max(8,(vpH-H*sc)/2);
+  if(W*sc>vpW)tx=0;
+  applyT();
+}
+
+/* ---------- pan / pinch-zoom / tap ---------- */
+var pts={},st=null,moved=false,tapEl=null,pin=null;
+function cnt(){return Object.keys(pts).length}
+vp.addEventListener('pointerdown',function(e){
+  if(e.target.closest('#empty'))return;
+  try{vp.setPointerCapture(e.pointerId)}catch(_){}
+  pts[e.pointerId]={x:e.clientX,y:e.clientY};
+  var n=cnt();
+  if(n==1){st={x:e.clientX,y:e.clientY,tx:tx,ty:ty};moved=false;var c=e.target.closest('.card');tapEl=c?c.getAttribute('data-id'):null;pin=null}
+  else if(n==2){
+    var a=Object.keys(pts).map(function(k){return pts[k]});
+    var r=vp.getBoundingClientRect();
+    pin={d:Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)||1,sc:sc,tx:tx,ty:ty,mx:(a[0].x+a[1].x)/2-r.left,my:(a[0].y+a[1].y)/2-r.top};
+    moved=true;
+  }
+});
+vp.addEventListener('pointermove',function(e){
+  if(!pts[e.pointerId])return;
+  pts[e.pointerId]={x:e.clientX,y:e.clientY};
+  var n=cnt();
+  if(n==1&&st){
+    var dx=e.clientX-st.x,dy=e.clientY-st.y;
+    if(!moved&&Math.abs(dx)+Math.abs(dy)>8)moved=true;
+    if(moved){tx=st.tx+dx;ty=st.ty+dy;applyT()}
+  }else if(n>=2&&pin){
+    var a=Object.keys(pts).map(function(k){return pts[k]});
+    var r=vp.getBoundingClientRect();
+    var d=Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y)||1;
+    var ns=Math.max(0.2,Math.min(3,pin.sc*d/pin.d));
+    var mx=(a[0].x+a[1].x)/2-r.left,my=(a[0].y+a[1].y)/2-r.top;
+    var wx=(pin.mx-pin.tx)/pin.sc,wy=(pin.my-pin.ty)/pin.sc;
+    sc=ns;tx=mx-wx*ns;ty=my-wy*ns;applyT();
+  }
+});
+function endPtr(e){
+  if(!pts[e.pointerId])return;
+  delete pts[e.pointerId];
+  var n=cnt();
+  if(n==0){
+    if(e.type==='pointerup'&&!moved&&st){ if(tapEl)select(tapEl);else closeSheet() }
+    st=null;pin=null;tapEl=null;
+  }else if(n==1){
+    var k=Object.keys(pts)[0];
+    st={x:pts[k].x,y:pts[k].y,tx:tx,ty:ty};pin=null;moved=true;
+  }
+}
+vp.addEventListener('pointerup',endPtr);
+vp.addEventListener('pointercancel',endPtr);
+vp.addEventListener('wheel',function(e){
+  e.preventDefault();
+  var r=vp.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top;
+  var ns=Math.max(0.2,Math.min(3,sc*(e.deltaY<0?1.12:0.89)));
+  var wx=(mx-tx)/sc,wy=(my-ty)/sc;sc=ns;tx=mx-wx*ns;ty=my-wy*ns;applyT();
+},{passive:false});
+
+/* ---------- selection sheet ---------- */
+function select(id){
+  sel=id;var p=byId(id);if(!p){closeSheet();return}
+  var par=p.parents.map(byId).filter(Boolean),sp=p.spouse?byId(p.spouse):null;
+  $('sname').textContent=(p.d?'Late ':'')+(p.name||'(naam nahi)');
+  var bits=[];if(p.year)bits.push('b. '+p.year);if(p.d)bits.push('✝ Late'+(p.dy?' ('+p.dy+')':''));
+  if(par.length)bits.push('Parents: '+par.map(function(x){return x.name}).join(' & '));
+  if(sp)bits.push('Spouse: '+sp.name);
+  $('ssub').textContent=bits.join('  •  ')||'Koi rishta nahi jura';
+  $('aPar').classList.toggle('dis',par.length>=2);
+  $('aSp').classList.toggle('dis',!!sp);
+  $('aSib').classList.toggle('dis',!par.length);
+  $('sheet').style.display='block';
+  var cs=world.querySelectorAll('.card');
+  for(var i=0;i<cs.length;i++)cs[i].classList.toggle('sel',cs[i].getAttribute('data-id')===id);
+}
+function closeSheet(){
+  sel=null;$('sheet').style.display='none';
+  var cs=world.querySelectorAll('.card.sel');for(var i=0;i<cs.length;i++)cs[i].classList.remove('sel');
+}
+function toast(t){var e=$('toast');e.textContent=t;e.style.display='block';clearTimeout(toast._t);toast._t=setTimeout(function(){e.style.display='none'},2200)}
+
+/* ---------- form ---------- */
+var fCb=null,fG='M';
+function setG(g){fG=g;var b=document.querySelectorAll('.gb');for(var i=0;i<b.length;i++)b[i].classList.toggle('on',b[i].getAttribute('data-g')===g)}
+[].forEach.call(document.querySelectorAll('.gb'),function(b){b.addEventListener('click',function(){setG(b.getAttribute('data-g'))})});
+function setLate(on){$('fLate').checked=!!on;$('fDyWrap').style.display=on?'block':'none'}
+$('fLate').addEventListener('change',function(){setLate(this.checked)});
+function openForm(title,name,year,g,late,dy,cb){
+  $('fTitle').textContent=title;$('fName').value=name||'';$('fYear').value=year||'';setG(g||'M');
+  setLate(late);$('fDy').value=dy||'';fCb=cb;
+  $('formOv').style.display='flex';setTimeout(function(){$('fName').focus()},60);
+}
+function closeForm(){$('formOv').style.display='none';fCb=null}
+$('fCancel').onclick=closeForm;
+$('fOk').onclick=function(){
+  var n=$('fName').value.trim();
+  if(!n){toast('Naam likho');return}
+  var y=$('fYear').value.replace(/\D/g,'').slice(0,4),cb=fCb;
+  var late=$('fLate').checked,dy=late?$('fDy').value.replace(/\D/g,'').slice(0,4):'';
+  closeForm();if(cb)cb(n,y,fG,late,dy);
+};
+
+/* ---------- actions ---------- */
+function mk(n,y,g,parents,spouse,late,dy){var p={id:'p'+(nextId++),name:n,year:y,g:g,parents:parents||[],spouse:spouse||null,d:!!late,dy:dy||''};people.push(p);return p}
+function changed(focus){save();render(true);if(focus)select(focus);else closeSheet()}
+function opp(g){return g==='M'?'F':(g==='F'?'M':'O')}
+
+$('bFirst').onclick=function(){
+  openForm('Pehla insaan (aap / sabse purane)','','','M',false,'',function(n,y,g,l,dy){var p=mk(n,y,g,[],null,l,dy);save();render(false);select(p.id)});
+};
+$('aPar').onclick=function(){
+  var p=byId(sel);if(!p)return;
+  var par=p.parents.map(byId).filter(Boolean);
+  if(par.length>=2){toast('Do parents already hain');return}
+  var other=par[0]||null;
+  openForm('Parent add — '+p.name,'','',other?opp(other.g):'M',false,'',function(n,y,g,l,dy){
+    var np=mk(n,y,g,[],null,l,dy);
+    // sab full siblings (same parents) ko ye naya parent mile
+    var sibs=par.length?people.filter(function(q){return q.id!==np.id&&q.parents.length===p.parents.length&&q.parents.every(function(i){return p.parents.indexOf(i)>=0})}):[p];
+    if(!sibs.length)sibs=[p];
+    sibs.forEach(function(q){q.parents.push(np.id)});
+    if(other&&!other.spouse&&!np.spouse){other.spouse=np.id;np.spouse=other.id}
+    changed(p.id);
+  });
+};
+$('aSp').onclick=function(){
+  var p=byId(sel);if(!p)return;
+  if(p.spouse&&byId(p.spouse)){toast('Spouse already hai');return}
+  openForm('Spouse add — '+p.name,'','',opp(p.g),false,'',function(n,y,g,l,dy){
+    var np=mk(n,y,g,[],p.id,l,dy);p.spouse=np.id;changed(p.id);
+  });
+};
+$('aKid').onclick=function(){
+  var p=byId(sel);if(!p)return;
+  openForm('Child add — '+p.name,'','','M',false,'',function(n,y,g,l,dy){
+    var ps=[p.id];if(p.spouse&&byId(p.spouse))ps.push(p.spouse);
+    var c=mk(n,y,g,ps,null,l,dy);changed(c.id);
+  });
+};
+$('aSib').onclick=function(){
+  var p=byId(sel);if(!p)return;
+  var par=p.parents.filter(byId);
+  if(!par.length){toast('Pehle Parent add karo, phir Sibling');return}
+  openForm('Sibling add — '+p.name,'','','M',false,'',function(n,y,g,l,dy){
+    var c=mk(n,y,g,par.slice(),null,l,dy);changed(c.id);
+  });
+};
+$('aEdit').onclick=function(){
+  var p=byId(sel);if(!p)return;
+  openForm('Edit',p.name,p.year,p.g,p.d,p.dy,function(n,y,g,l,dy){p.name=n;p.year=y;p.g=g;p.d=l;p.dy=dy;changed(p.id)});
+};
+$('aDel').onclick=function(){
+  var p=byId(sel);if(!p)return;
+  if(!confirm(p.name+' ko tree se hataye?\n(Iske rishtedar tree me rahenge)'))return;
+  people=people.filter(function(q){return q.id!==p.id});
+  people.forEach(function(q){q.parents=q.parents.filter(function(i){return i!==p.id});if(q.spouse===p.id)q.spouse=null});
+  changed(null);
+};
+
+/* ---------- menu: export / import / clear ---------- */
+$('bMenu').onclick=function(){$('menuOv').style.display='flex'};
+$('mCls').onclick=function(){$('menuOv').style.display='none'};
+$('mTrees').onclick=function(){$('menuOv').style.display='none';showTrees()};
+$('ttl').onclick=showTrees;
+$('mExp').onclick=function(){
+  $('menuOv').style.display='none';
+  var s=dump();
+  if(!S.trees.some(function(t){return t.people.length})){toast('Export karne ko kuch nahi');return}
+  try{
+    if(window.LionRt&&LionRt.saveFile){LionRt.saveFile('family_trees.json',s)}
+    else{var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([s],{type:'application/json'}));a.download='family_trees.json';a.click()}
+  }catch(e){toast('Export fail')}
+};
+$('mImp').onclick=function(){$('menuOv').style.display='none';$('impTxt').value='';$('impOv').style.display='flex'};
+$('impCancel').onclick=function(){$('impOv').style.display='none'};
+$('impOk').onclick=function(){
+  try{
+    var o=JSON.parse($('impTxt').value.trim());
+    if(!o||!(Array.isArray(o.trees)||Array.isArray(o.people)))throw new Error('bad');
+    var st=migrate(o);syncTree();var first=null;
+    st.trees.forEach(function(t){t.id='t'+(S.nextT++);S.trees.push(t);if(!first)first=t.id});
+    $('impOv').style.display='none';
+    switchTree(first);toast(st.trees.length+' tree import hue');
+  }catch(e){toast('JSON galat hai')}
+};
+$('mClr').onclick=function(){
+  $('menuOv').style.display='none';
+  if(!confirm('"'+curTree().name+'" ke saare log hatao? Ye wapas nahi aayega.'))return;
+  people=[];nextId=1;closeSheet();save();render(false);
+};
+
+/* ---------- trees manager ---------- */
+function showTrees(){
+  syncTree();
+  var h='';
+  S.trees.forEach(function(t){
+    h+='<button class="ab tr'+(t.id===S.cur?' cur':'')+'" data-t="'+esc(t.id)+'"><b>🌳 '+esc(t.name)+'</b><span>'+t.people.length+' log</span></button>';
+  });
+  $('trList').innerHTML=h;
+  $('treesOv').style.display='flex';
+}
+$('trList').addEventListener('click',function(e){
+  var b=e.target.closest('.tr');if(!b)return;
+  $('treesOv').style.display='none';
+  var id=b.getAttribute('data-t');if(id!==S.cur)switchTree(id);
+});
+$('tCls').onclick=function(){$('treesOv').style.display='none'};
+$('tNew').onclick=function(){
+  var n=prompt('Naye tree ka naam','Parivar '+(S.trees.length+1));
+  if(n===null)return;n=n.trim();if(!n){toast('Naam likho');return}
+  syncTree();
+  var t={id:'t'+(S.nextT++),name:n,next:1,people:[]};S.trees.push(t);
+  $('treesOv').style.display='none';switchTree(t.id);
+};
+$('tRen').onclick=function(){
+  var t=curTree(),n=prompt('Tree ka naam',t.name);
+  if(n===null)return;n=n.trim();if(!n){toast('Naam likho');return}
+  t.name=n;save();setTitle();showTrees();
+};
+$('tDel').onclick=function(){
+  var t=curTree();
+  if(!confirm('"'+t.name+'" tree poora delete kare ('+people.length+' log)? Ye wapas nahi aayega.'))return;
+  syncTree();
+  S.trees=S.trees.filter(function(x){return x.id!==t.id});
+  if(!S.trees.length)S.trees.push({id:'t'+(S.nextT++),name:'Mera Parivar',next:1,people:[]});
+  $('treesOv').style.display='none';switchTree(S.trees[0].id);
+};
+$('bFit').onclick=fit;
+
+/* Android back: pehle khule popup/sheet band karo; true = hum ne handle kar liya */
+window._lionBack=function(){
+  var ids=['formOv','impOv','menuOv','treesOv'];
+  for(var i=0;i<ids.length;i++){var e=$(ids[i]);if(e.style.display==='flex'){if(ids[i]==='formOv')closeForm();else e.style.display='none';return true}}
+  if($('sheet').style.display==='block'){closeSheet();return true}
+  return false;
+};
+window._lionFlush=function(){};
+window.addEventListener('resize',function(){setTimeout(function(){if(!sel)fit()},100)});
+
+load();render(false);
+</script>
+</body></html>
