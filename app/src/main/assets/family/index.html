@@ -116,6 +116,12 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
   </div>
 </div></div>
 
+<div class="ov" id="spOv"><div class="box">
+  <h3>Kiske saath child add kare?</h3>
+  <div id="spList" style="display:grid;gap:8px"></div>
+  <div style="display:grid;gap:8px;margin-top:8px"><button class="ab" id="spCls">Cancel</button></div>
+</div></div>
+
 <div class="ov" id="impOv"><div class="box">
   <h3>Import</h3>
   <label>Export wala JSON yahan paste karo (purane trees nahi hatenge)</label>
@@ -127,59 +133,239 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);font-family
 
 <script>
 //#LAYOUT-START
-var CW=112,CH=72,SG=18,UG=26,VG=70;
-// people: [{id,name,year,g,parents:[ids],spouse:id|null}]
-// Har couple ek "unit" hai; unit ke bacche uske neeche. Position m.x / m.y me set hoti hai.
+var CW=112,CH=72,SG=18,UG=26,VG=70,DW=14;
+// people: [{id,name,year,g,parents:[ids],spouses:[ids],spouse:id|null (purane app ke liye = pehla spouse)}]
+// Graph-style layout (v2): har shaadi-wala group (couple / remarriage) = ek "cluster" (ek row me).
+// Har generation ki ek row. Dono taraf ke parents cluster ke upar aate hain (sasural + maayka), isliye tree tootta nahi.
+// Output: har person me p.x / p.y, aur L.lines = [{pts:[[x,y],..],c:color,w:width}]
 function layout(people){
-  var by={};people.forEach(function(p){by[p.id]=p});
-  var unitOf={},units=[];
-  function hasPar(p){return p.parents.some(function(i){return by[i]})}
-  people.forEach(function(p){
-    if(unitOf[p.id])return;
-    var s=p.spouse&&by[p.spouse]&&by[p.spouse].spouse===p.id&&!unitOf[p.spouse]?by[p.spouse]:null;
-    var u={m:[p],kids:[],pu:null,vis:false};
-    if(s)u.m.push(s);
-    u.m.forEach(function(m){unitOf[m.id]=u});
-    units.push(u);
+  var by={},adj={},cOf={},clusters=[];
+  people.forEach(function(p){by[p.id]=p;adj[p.id]=[]});
+  function spOf(p){return p.spouses||(p.spouse?[p.spouse]:[])}
+  function parOf(p){var r=[];(p.parents||[]).forEach(function(i){if(by[i]&&i!==p.id&&r.indexOf(i)<0)r.push(i)});return r}
+  function link(a,b){if(a===b)return;if(adj[a].indexOf(b)<0)adj[a].push(b);if(adj[b].indexOf(a)<0)adj[b].push(a)}
+  people.forEach(function(p){spOf(p).forEach(function(s){if(by[s])link(p.id,s)})});
+
+  /* 1) clusters: spouse se jude log ek row me. Beech me wo jiske sabse zyada spouse; pehla spouse right, doosra left... */
+  people.forEach(function(p0){
+    if(cOf[p0.id])return;
+    var comp=[],q=[p0.id],seen={};seen[p0.id]=1;
+    while(q.length){var x=q.shift();comp.push(by[x]);adj[x].forEach(function(y){if(!seen[y]){seen[y]=1;q.push(y)}})}
+    var anc=comp[0],best=-1;
+    comp.forEach(function(m){var s=adj[m.id].length*10+(parOf(m).length?1:0);if(s>best){best=s;anc=m}});
+    var row=[anc.id],side={},placed={},turn=0,qq=[anc.id];side[anc.id]=0;placed[anc.id]=1;
+    while(qq.length){
+      var x2=qq.shift();
+      adj[x2].forEach(function(y){
+        if(placed[y])return;placed[y]=1;
+        var sd=side[x2]||((turn++%2===0)?1:-1);
+        side[y]=sd;if(sd>0)row.push(y);else row.unshift(y);qq.push(y);
+      });
+    }
+    var c={i:clusters.length,ids:row,m:row.map(function(i){return by[i]}),n:row.length,gen:0,ups:[],dns:[]};
+    c.w=c.n*CW+(c.n-1)*SG;
+    row.forEach(function(i){cOf[i]=c});clusters.push(c);
   });
-  units.forEach(function(u){ if(u.m.length==2&&!hasPar(u.m[0])&&hasPar(u.m[1]))u.m.reverse(); });
-  units.forEach(function(u){
-    for(var i=0;i<u.m.length&&!u.pu;i++){
-      for(var j=0;j<u.m[i].parents.length;j++){
-        var pu=unitOf[u.m[i].parents[j]];
-        if(pu&&pu!==u){u.pu=pu;break}
+
+  /* 2) generation (row) number: bacha hamesha parents se neeche; dono taraf ke parents us se ek upar */
+  clusters.forEach(function(c){c.m.forEach(function(m){parOf(m).forEach(function(pid){
+    var pc=cOf[pid];if(pc===c)return;
+    if(c.ups.indexOf(pc)<0)c.ups.push(pc);if(pc.dns.indexOf(c)<0)pc.dns.push(c);
+  })})});
+  var N=clusters.length;
+  for(var it=0;it<N+2;it++){var chg=false;clusters.forEach(function(c){c.ups.forEach(function(pc){if(pc.gen+1>c.gen&&c.gen<N){c.gen=pc.gen+1;chg=true}})});if(!chg)break}
+  clusters.forEach(function(c){ // jinke parents nahi: bacchon ke bilkul upar rakho
+    if(!c.ups.length&&c.dns.length){var g=1e9;c.dns.forEach(function(k){if(k.gen<g)g=k.gen});if(g-1>c.gen)c.gen=g-1}
+  });
+  var G=0;clusters.forEach(function(c){if(c.gen>G)G=c.gen});
+
+  /* 3) graph: node = cluster; lambi (kai generation ki) line ke liye beech me dummy node */
+  var nodes=[],chains={};
+  function mkNode(o){o.up=[];o.dn=[];nodes.push(o);return o}
+  function nlink(a,b){if(a.dn.indexOf(b)<0){a.dn.push(b);b.up.push(a)}}
+  clusters.forEach(function(c){c.nd=mkNode({c:c,w:c.w,gen:c.gen,real:true})});
+  clusters.forEach(function(c){c.ups.forEach(function(pc){
+    if(c.gen-pc.gen<1)return;
+    var prev=pc.nd,ch=[];
+    for(var g=pc.gen+1;g<c.gen;g++){var d=mkNode({w:DW,gen:g,real:false});ch.push(d);nlink(prev,d);prev=d}
+    nlink(prev,c.nd);chains[pc.i+'>'+c.i]=ch;
+  })});
+
+  /* 4) connected parts alag-alag order karo (crossing kam: DFS order + barycenter sweeps) */
+  var parts=[],cp=0;
+  nodes.forEach(function(n){n.cp=-1});
+  nodes.forEach(function(n){
+    if(n.cp>=0)return;
+    var st=[n],list=[];n.cp=cp;
+    while(st.length){var x=st.pop();list.push(x);x.up.concat(x.dn).forEach(function(y){if(y.cp<0){y.cp=cp;st.push(y)}})}
+    parts.push(list);cp++;
+  });
+  function ykey(n){while(!n.real&&n.dn.length)n=n.dn[0];if(!n.real)return null;var y=null;n.c.m.forEach(function(m){var v=parseInt(m.year,10);if(v&&(y===null||v<y))y=v});return y}
+  function sortKids(a){
+    var ks=a.map(ykey);if(ks.some(function(k){return k===null}))return a;
+    return a.map(function(n,i){return {n:n,k:ks[i],i:i}}).sort(function(p,q){return p.k-q.k||p.i-q.i}).map(function(o){return o.n});
+  }
+  function orderPart(list){
+    var lay=[];for(var g=0;g<=G;g++)lay.push([]);
+    var root=null;list.forEach(function(n){if(!n.up.length&&(!root||n.gen<root.gen))root=n});root=root||list[0];
+    list.forEach(function(n){n.seen=0});
+    (function dfs(n){if(n.seen)return;n.seen=1;lay[n.gen].push(n);sortKids(n.dn).forEach(dfs);n.up.forEach(dfs)})(root);
+    function pos(){lay.forEach(function(l){l.forEach(function(n,i){n.ix=i;n.pos=(i+.5)/l.length})})}
+    function cross(){
+      var t=0;
+      for(var g=0;g<G;g++){
+        var es=[];lay[g].forEach(function(a,i){a.dn.forEach(function(b){es.push([i,b.ix])})});
+        for(var i=0;i<es.length;i++)for(var j=i+1;j<es.length;j++)if((es[i][0]-es[j][0])*(es[i][1]-es[j][1])<0)t++;
+      }
+      return t;
+    }
+    function sweep(g,upDir){
+      var keyed=lay[g].map(function(n,i){
+        var a=upDir?n.up:n.dn,k=n.pos;
+        if(a.length){var s=0;a.forEach(function(m){s+=m.pos});k=s/a.length}
+        return {n:n,k:k,i:i};
+      });
+      keyed.sort(function(a,b){return a.k-b.k||a.i-b.i});
+      lay[g]=keyed.map(function(o){return o.n});pos();
+    }
+    pos();
+    var bestC=cross(),best=lay.map(function(l){return l.slice()});
+    for(var r=0;r<10&&bestC>0;r++){
+      for(var g1=1;g1<=G;g1++)sweep(g1,true);
+      for(var g2=G-1;g2>=0;g2--)sweep(g2,false);
+      var cc=cross();
+      if(cc<bestC){bestC=cc;best=lay.map(function(l){return l.slice()})}
+    }
+    return best;
+  }
+  var layers=[];for(var g0=0;g0<=G;g0++)layers.push([]);
+  parts.forEach(function(list){var lay=orderPart(list);for(var g=0;g<=G;g++)layers[g]=layers[g].concat(lay[g])});
+
+  /* 5) x position: har row ke andar order fixed; parents bacchon ke beech me, bacche parents ke neeche (weighted least-squares) */
+  function gapOf(a,b){
+    if(!a.real||!b.real)return 12;
+    for(var i=0;i<a.up.length;i++)if(b.up.indexOf(a.up[i])>=0)return UG;
+    return UG*2;
+  }
+  function pava(t,wt){
+    var bl=[];
+    for(var i=0;i<t.length;i++){
+      bl.push({v:t[i],w:wt[i],n:1});
+      while(bl.length>1&&bl[bl.length-2].v>bl[bl.length-1].v){
+        var b=bl.pop(),a=bl[bl.length-1];
+        a.v=(a.v*a.w+b.v*b.w)/(a.w+b.w);a.w+=b.w;a.n+=b.n;
       }
     }
-  });
-  units.forEach(function(u){if(u.pu)u.pu.kids.push(u)});
-  units.forEach(function(u){
-    var all=u.kids.every(function(k){return k.m[0].year});
-    if(all&&u.kids.length>1)u.kids.sort(function(a,b){return (+a.m[0].year)-(+b.m[0].year)});
-  });
-  function meas(u){
-    u.vis=true;
-    u.uw=u.m.length*CW+(u.m.length-1)*SG;
-    u.kids=u.kids.filter(function(k){return !k.vis});
-    var kw=0;
-    u.kids.forEach(function(k){meas(k);kw+=k.w});
-    if(u.kids.length>1)kw+=(u.kids.length-1)*UG;
-    u.kw=kw;u.w=Math.max(u.uw,kw);
+    var y=[];bl.forEach(function(b){for(var k=0;k<b.n;k++)y.push(b.v)});return y;
   }
-  function place(u,left,d){
-    u.y=d*(CH+VG);u.cx=left+u.w/2;
-    var x=u.cx-u.uw/2;
-    u.m.forEach(function(m,i){m.x=x+i*(CW+SG);m.y=u.y});
-    var kl=left+(u.w-u.kw)/2;
-    u.kids.forEach(function(k){place(k,kl,d+1);kl+=k.w+UG});
+  var maxW=0;
+  layers.forEach(function(l){var w=0;l.forEach(function(n,i){w+=n.w+(i?gapOf(l[i-1],n):0)});l.wd=w;if(w>maxW)maxW=w});
+  layers.forEach(function(l){var x=(maxW-l.wd)/2;l.forEach(function(n,i){if(i)x+=gapOf(l[i-1],n);n.x=x;x+=n.w})});
+  function relax(g,upDir){
+    var l=layers[g],t=[],wt=[],off=[],acc=0;
+    l.forEach(function(n,i){
+      if(i>0)acc+=l[i-1].w+gapOf(l[i-1],n);
+      off.push(acc);
+      var a=upDir?n.up:n.dn,d=n.x;
+      if(a.length){var s=0;a.forEach(function(m){s+=m.x+m.w/2});d=s/a.length-n.w/2}
+      t.push(d-acc);wt.push(a.length||0.01);
+    });
+    var y=pava(t,wt);
+    l.forEach(function(n,i){n.x=y[i]+off[i]});
   }
-  var roots=units.filter(function(u){return !u.pu});
-  roots.forEach(meas);
-  units.forEach(function(u){if(!u.vis){u.pu=null;roots.push(u);meas(u)}}); // cycle bachav
-  var left=0;
-  roots.forEach(function(u){place(u,left,0);left+=u.w+UG*2});
-  var W=Math.max(left-UG*2,CW),H=0;
-  people.forEach(function(p){H=Math.max(H,p.y+CH)});
-  return {units:units,roots:roots,w:W,h:H};
+  for(var k=0;k<24;k++){
+    for(var g3=1;g3<=G;g3++)relax(g3,true);
+    for(var g4=G-1;g4>=0;g4--)relax(g4,false);
+  }
+  var minX=1e9;nodes.forEach(function(n){if(n.x<minX)minX=n.x});
+  nodes.forEach(function(n){n.x-=minX});
+
+  /* 6) cluster ke andar members ka order: jiske parents left me wo left me */
+  clusters.forEach(function(c){
+    if(c.n<2)return;
+    function cost(ids){
+      var s=0;
+      ids.forEach(function(id,i){
+        var ps=parOf(by[id]).map(function(pid){return cOf[pid]}).filter(function(pc){return pc!==c});
+        if(!ps.length)return;
+        var t=0;ps.forEach(function(pc){t+=pc.nd.x+pc.w/2});t/=ps.length;
+        s+=Math.abs(c.nd.x+i*(CW+SG)+CW/2-t);
+      });
+      return s;
+    }
+    var rev=c.ids.slice().reverse();
+    if(cost(rev)<cost(c.ids)-0.5){c.ids=rev;c.m=rev.map(function(i){return by[i]})}
+  });
+  clusters.forEach(function(c){c.ids.forEach(function(id,i){var p=by[id];p.x=c.nd.x+i*(CW+SG);p.y=c.gen*(CH+VG)})});
+
+  /* 7) lines: shaadi (pink) + parents->bacche (bus line) */
+  var lines=[];
+  function cxp(p){return p.x+CW/2}
+  var anchorOf={}; // "a|b" -> {x,y}
+  people.forEach(function(a){adj[a.id].forEach(function(bid){
+    if(a.id>bid)return;
+    var b=by[bid],c=cOf[a.id],ia=c.ids.indexOf(a.id),ib=c.ids.indexOf(bid),l=ia<ib?a:b,r=ia<ib?b:a,key=[a.id,bid].sort().join('|');
+    if(Math.abs(ia-ib)===1){
+      var yy=a.y+CH/2;
+      lines.push({pts:[[l.x+CW,yy],[r.x,yy]],c:'#f06292',w:3});
+      anchorOf[key]={x:(l.x+CW+r.x)/2,y:yy};
+    }else{
+      var by0=a.y+CH,dy=7*Math.abs(ia-ib);
+      lines.push({pts:[[cxp(l),by0],[cxp(l),by0+dy],[cxp(r),by0+dy],[cxp(r),by0]],c:'#f06292',w:3});
+      anchorOf[key]={x:(cxp(l)+cxp(r))/2,y:by0+dy};
+    }
+  })});
+  var fams={};
+  people.forEach(function(p){
+    var ps=parOf(p);if(!ps.length)return;
+    ps.sort();var k=ps.join('|');(fams[k]=fams[k]||{ps:ps,kids:[]}).kids.push(p);
+  });
+  var fl=[];
+  Object.keys(fams).forEach(function(k){
+    var f=fams[k],ps=f.ps.map(function(i){return by[i]}),anchors=[],gp=0;
+    ps.forEach(function(p){var g=cOf[p.id].gen;if(g>gp)gp=g});
+    if(ps.length===2&&anchorOf[k])anchors.push(anchorOf[k]);
+    else ps.forEach(function(p){anchors.push({x:cxp(p),y:p.y+CH})});
+    var pcl=null;ps.forEach(function(p){if(cOf[p.id].gen===gp)pcl=cOf[p.id]});
+    var paths=[],xs=anchors.map(function(a){return a.x});
+    f.kids.forEach(function(kd){
+      var kc=cOf[kd.id],ch=chains[pcl.i+'>'+kc.i]||[],kx=cxp(kd);
+      paths.push({kd:kd,ch:ch});
+      xs.push(ch.length?ch[0].x+DW/2:kx);
+    });
+    fl.push({anchors:anchors,paths:paths,gp:gp,mn:Math.min.apply(null,xs),mx:Math.max.apply(null,xs)});
+  });
+  var byGap={};fl.forEach(function(f){(byGap[f.gp]=byGap[f.gp]||[]).push(f)});
+  Object.keys(byGap).forEach(function(gk){
+    var arr=byGap[gk].sort(function(a,b){return a.mn-b.mn}),ends=[];
+    arr.forEach(function(f){
+      var lv=0;while(lv<ends.length&&ends[lv]+8>f.mn)lv++;
+      ends[lv]=f.mx;f.lv=lv;
+    });
+    var L=ends.length,sp=Math.min(10,(VG-24)/Math.max(L,1)),top=(+gk)*(CH+VG)+CH;
+    arr.forEach(function(f){f.bus=top+VG/2-(L-1)*sp/2+f.lv*sp});
+  });
+  fl.forEach(function(f){
+    f.anchors.forEach(function(a){lines.push({pts:[[a.x,a.y],[a.x,f.bus]],c:'#4a5068',w:2})});
+    lines.push({pts:[[f.mn,f.bus],[f.mx,f.bus]],c:'#4a5068',w:2});
+    f.paths.forEach(function(o){
+      var kx=cxp(o.kd),ky=o.kd.y,ch=o.ch;
+      if(!ch.length){lines.push({pts:[[kx,f.bus],[kx,ky]],c:'#4a5068',w:2});return}
+      var pts=[],x0=ch[0].x+DW/2;
+      pts.push([x0,f.bus]);
+      ch.forEach(function(d,i){
+        var dx=d.x+DW/2,gy=d.gen*(CH+VG)+CH+VG/2;
+        if(i>0)pts.push([dx,pts[pts.length-1][1]]);
+        pts.push([dx,gy]);
+      });
+      pts.push([kx,pts[pts.length-1][1]]);pts.push([kx,ky]);
+      lines.push({pts:pts,c:'#4a5068',w:2});
+    });
+  });
+  var W=CW,H=CH;
+  nodes.forEach(function(n){if(n.x+n.w>W)W=n.x+n.w});
+  people.forEach(function(p){if(p.y+CH>H)H=p.y+CH});
+  return {lines:lines,w:W,h:H};
 }
 //#LAYOUT-END
 
@@ -202,8 +388,14 @@ var M={};try{M=JSON.parse(rd(KM)||'{}')||{}}catch(e){M={}}
 function saveMeta(){wr(KM,JSON.stringify(M))}
 //#STORE-START
 function normPeople(arr){
+  // spouses = saare spouses (remarriage ke liye, order me); spouse = pehla spouse (purane app/data ke liye)
   var ps=(arr||[]).map(function(p){return {id:String(p.id),name:String(p.name||''),year:String(p.year||''),g:(p.g==='M'||p.g==='F')?p.g:'O',
-    parents:Array.isArray(p.parents)?p.parents.map(String):[],spouse:p.spouse?String(p.spouse):null,d:!!p.d,dy:String(p.dy||''),pl:String(p.pl||'').slice(0,60)}});
+    parents:Array.isArray(p.parents)?p.parents.map(String):[],
+    spouses:Array.isArray(p.spouses)?p.spouses.map(String):(p.spouse?[String(p.spouse)]:[]),spouse:null,
+    d:!!p.d,dy:String(p.dy||''),pl:String(p.pl||'').slice(0,60)}});
+  var ix={};ps.forEach(function(p){ix[p.id]=p});
+  ps.forEach(function(p){p.spouses.forEach(function(s){if(ix[s]&&s!==p.id&&ix[s].spouses.indexOf(p.id)<0)ix[s].spouses.push(p.id)})});
+  ps.forEach(function(p){var seen={};p.spouses=p.spouses.filter(function(s){if(!ix[s]||s===p.id||seen[s])return false;seen[s]=1;return true});p.spouse=p.spouses[0]||null});
   var mx=0;ps.forEach(function(p){var n=parseInt(p.id.replace(/\D/g,''),10);if(n>mx)mx=n});
   return {people:ps,next:mx+1};
 }
@@ -267,7 +459,7 @@ function http(method,path,body){
   }).then(function(p){return JSON.parse(p)});
 }
 function hasData(b){return !!(b&&Array.isArray(b.trees)&&b.trees.some(function(t){return t.people&&t.people.length}))}
-function busyUI(){return ['formOv','impOv','menuOv','treesOv'].some(function(i){return $(i).style.display==='flex'})}
+function busyUI(){return ['formOv','impOv','menuOv','treesOv','spOv'].some(function(i){return $(i).style.display==='flex'})}
 function chip(){
   var c=$('bSync');if(!c||WEB)return;
   var txt='☁ ✓',col='#26a69a';
@@ -360,21 +552,8 @@ function render(keepView){
       +'<div class="n">'+(p.d?'Late ':'')+esc(p.name||'(naam nahi)')+'</div>'+yearLine(p)+(p.pl?'<div class="pl">📍 '+esc(p.pl)+'</div>':'')+'</div>';
   });
   var d='';
-  L.units.forEach(function(u){
-    if(u.m.length==2){
-      var yy=u.y+CH/2+PAD;
-      d+='<line x1="'+(u.m[0].x+CW+PAD)+'" y1="'+yy+'" x2="'+(u.m[1].x+PAD)+'" y2="'+yy+'" stroke="#f06292" stroke-width="3"/>';
-    }
-    if(!u.kids.length)return;
-    var ax=u.cx+PAD,ay=(u.m.length==2?u.y+CH/2:u.y+CH)+PAD;
-    var bus=u.y+CH+VG/2+PAD;
-    var xs=[ax];
-    u.kids.forEach(function(k){
-      var kx=k.m[0].x+CW/2+PAD;xs.push(kx);
-      d+='<line x1="'+kx+'" y1="'+bus+'" x2="'+kx+'" y2="'+(k.y+PAD)+'" stroke="#4a5068" stroke-width="2"/>';
-    });
-    d+='<line x1="'+ax+'" y1="'+ay+'" x2="'+ax+'" y2="'+bus+'" stroke="#4a5068" stroke-width="2"/>';
-    d+='<line x1="'+Math.min.apply(null,xs)+'" y1="'+bus+'" x2="'+Math.max.apply(null,xs)+'" y2="'+bus+'" stroke="#4a5068" stroke-width="2"/>';
+  L.lines.forEach(function(l){
+    d+='<polyline fill="none" stroke="'+l.c+'" stroke-width="'+l.w+'" stroke-linejoin="round" points="'+l.pts.map(function(q){return (q[0]+PAD)+','+(q[1]+PAD)}).join(' ')+'"/>';
   });
   svg.setAttribute('width',W);svg.setAttribute('height',H);
   svg.innerHTML=d;
@@ -455,15 +634,14 @@ vp.addEventListener('wheel',function(e){
 /* ---------- selection sheet ---------- */
 function select(id){
   sel=id;var p=byId(id);if(!p){closeSheet();return}
-  var par=p.parents.map(byId).filter(Boolean),sp=p.spouse?byId(p.spouse):null;
+  var par=p.parents.map(byId).filter(Boolean),sps=(p.spouses||[]).map(byId).filter(Boolean);
   $('sname').textContent=(p.d?'Late ':'')+(p.name||'(naam nahi)');
   var bits=[];if(p.year)bits.push('b. '+p.year);if(p.d)bits.push('✝ Late'+(p.dy?' ('+p.dy+')':''));
   if(p.pl)bits.push('📍 '+p.pl);
   if(par.length)bits.push('Parents: '+par.map(function(x){return x.name}).join(' & '));
-  if(sp)bits.push('Spouse: '+sp.name);
+  if(sps.length)bits.push((sps.length>1?'Spouses: ':'Spouse: ')+sps.map(function(x){return x.name}).join(', '));
   $('ssub').textContent=bits.join('  •  ')||'Koi rishta nahi jura';
   $('aPar').classList.toggle('dis',par.length>=2);
-  $('aSp').classList.toggle('dis',!!sp);
   $('aSib').classList.toggle('dis',!par.length);
   $('sheet').style.display='block';
   var cs=world.querySelectorAll('.card');
@@ -498,7 +676,12 @@ $('fOk').onclick=function(){
 };
 
 /* ---------- actions ---------- */
-function mk(n,y,g,parents,spouse,late,dy,pl){var p={id:'p'+(nextId++),name:n,year:y,g:g,parents:parents||[],spouse:spouse||null,d:!!late,dy:dy||'',pl:pl||''};people.push(p);return p}
+function addSp(a,b){
+  a.spouses=a.spouses||[];b.spouses=b.spouses||[];
+  if(a.spouses.indexOf(b.id)<0)a.spouses.push(b.id);if(b.spouses.indexOf(a.id)<0)b.spouses.push(a.id);
+  a.spouse=a.spouses[0]||null;b.spouse=b.spouses[0]||null;
+}
+function mk(n,y,g,parents,spouse,late,dy,pl){var p={id:'p'+(nextId++),name:n,year:y,g:g,parents:parents||[],spouses:spouse?[spouse]:[],spouse:spouse||null,d:!!late,dy:dy||'',pl:pl||''};people.push(p);return p}
 function changed(focus){save();render(true);if(focus)select(focus);else closeSheet()}
 function opp(g){return g==='M'?'F':(g==='F'?'M':'O')}
 
@@ -516,22 +699,38 @@ $('aPar').onclick=function(){
     var sibs=par.length?people.filter(function(q){return q.id!==np.id&&q.parents.length===p.parents.length&&q.parents.every(function(i){return p.parents.indexOf(i)>=0})}):[p];
     if(!sibs.length)sibs=[p];
     sibs.forEach(function(q){q.parents.push(np.id)});
-    if(other&&!other.spouse&&!np.spouse){other.spouse=np.id;np.spouse=other.id}
+    if(other)addSp(other,np);
     changed(p.id);
   });
 };
 $('aSp').onclick=function(){
   var p=byId(sel);if(!p)return;
-  if(p.spouse&&byId(p.spouse)){toast('Spouse already hai');return}
-  openForm('Spouse add — '+p.name,'','',opp(p.g),false,'',function(n,y,g,l,dy,pl){
-    var np=mk(n,y,g,[],p.id,l,dy,pl);p.spouse=np.id;changed(p.id);
+  var n0=(p.spouses||[]).filter(byId).length;
+  openForm((n0?'Dusra spouse add — ':'Spouse add — ')+p.name,'','',opp(p.g),false,'',function(n,y,g,l,dy,pl){
+    var np=mk(n,y,g,[],null,l,dy,pl);addSp(p,np);changed(p.id);
   });
 };
+var spCb=null;
+function pickSp(p,cb){
+  var sps=(p.spouses||[]).map(byId).filter(Boolean);
+  if(sps.length<2){cb(sps[0]||null);return}
+  var h='';sps.forEach(function(s){h+='<button class="ab" data-s="'+esc(s.id)+'">💍 '+esc(s.name)+' ke saath</button>'});
+  h+='<button class="ab" data-s="">Sirf '+esc(p.name)+' ke (bina spouse)</button>';
+  $('spList').innerHTML=h;spCb=cb;$('spOv').style.display='flex';
+}
+$('spList').addEventListener('click',function(e){
+  var b=e.target.closest('.ab');if(!b)return;
+  var id=b.getAttribute('data-s'),cb=spCb;spCb=null;$('spOv').style.display='none';
+  if(cb)cb(id?byId(id):null);
+});
+$('spCls').onclick=function(){spCb=null;$('spOv').style.display='none'};
 $('aKid').onclick=function(){
   var p=byId(sel);if(!p)return;
-  openForm('Child add — '+p.name,'','','M',false,'',function(n,y,g,l,dy,pl){
-    var ps=[p.id];if(p.spouse&&byId(p.spouse))ps.push(p.spouse);
-    var c=mk(n,y,g,ps,null,l,dy,pl);changed(c.id);
+  pickSp(p,function(s){
+    openForm('Child add — '+p.name+(s?' & '+s.name:''),'','','M',false,'',function(n,y,g,l,dy,pl){
+      var ps=[p.id];if(s)ps.push(s.id);
+      var c=mk(n,y,g,ps,null,l,dy,pl);changed(c.id);
+    });
   });
 };
 $('aSib').onclick=function(){
@@ -550,7 +749,7 @@ $('aDel').onclick=function(){
   var p=byId(sel);if(!p)return;
   if(!confirm(p.name+' ko tree se hataye?\n(Iske rishtedar tree me rahenge)'))return;
   people=people.filter(function(q){return q.id!==p.id});
-  people.forEach(function(q){q.parents=q.parents.filter(function(i){return i!==p.id});if(q.spouse===p.id)q.spouse=null});
+  people.forEach(function(q){q.parents=q.parents.filter(function(i){return i!==p.id});q.spouses=(q.spouses||[]).filter(function(i){return i!==p.id});q.spouse=q.spouses[0]||null});
   changed(null);
 };
 
@@ -626,7 +825,7 @@ $('bFit').onclick=fit;
 
 /* Android back: pehle khule popup/sheet band karo; true = hum ne handle kar liya */
 window._lionBack=function(){
-  var ids=['formOv','impOv','menuOv','treesOv'];
+  var ids=['formOv','impOv','menuOv','treesOv','spOv'];
   for(var i=0;i<ids.length;i++){var e=$(ids[i]);if(e.style.display==='flex'){if(ids[i]==='formOv')closeForm();else e.style.display='none';return true}}
   if($('sheet').style.display==='block'){closeSheet();return true}
   return false;
