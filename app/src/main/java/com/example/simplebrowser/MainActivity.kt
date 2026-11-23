@@ -14,6 +14,7 @@ import android.widget.TextView
 import android.os.Handler
 import android.os.Looper
 import com.example.simplebrowser.deploy.AutoDeploy
+import com.example.simplebrowser.deploy.GitDeploy
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -70,6 +71,7 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, com.example.simplebrowser.family.FamilyActivity::class.java))
         }
         setupDeploy()
+        setupGit()
         findViewById<Button>(R.id.btnFloating).setOnClickListener { runFloating { startFloating() } }
         findViewById<Button>(R.id.btnStopFloating).setOnClickListener {
             stopService(Intent(this, FloatingService::class.java))
@@ -82,6 +84,7 @@ class MainActivity : AppCompatActivity() {
     private val deployTick = object : Runnable {
         override fun run() {
             refreshDeployStatus()
+            refreshGitStatus()
             deployH.postDelayed(this, 2000)
         }
     }
@@ -102,13 +105,40 @@ class MainActivity : AppCompatActivity() {
                 AutoDeploy.askAllFiles(this)
             }
             AutoDeploy.setOn(this, on)
-            if (on) AutoDeploy.start(this) else AutoDeploy.stop(this)
+            // OFF par service khud band ho jati hai (agar GitHub wala bhi OFF ho)
+            if (on) AutoDeploy.start(this)
             refreshDeployStatus()
         }
         findViewById<Button>(R.id.btnDeploy).setOnClickListener {
             AutoDeploy.showSettings(this) { refreshDeployStatus() }
         }
         refreshDeployStatus()
+    }
+
+    // 🐙 Auto Deploy (GitHub): Download me SimpleBrowser*.zip aate hi GitHub repo me
+    private fun refreshGitStatus() {
+        val tv = findViewById<TextView>(R.id.tvGitStatus) ?: return
+        tv.text = if (GitDeploy.on(this)) GitDeploy.last(this).ifBlank { "Chalu hai — Download me " + GitDeploy.pattern(this) + " ka intezaar" }
+        else "Band hai"
+    }
+
+    private fun setupGit() {
+        val sw = findViewById<SwitchCompat>(R.id.swGit)
+        sw.isChecked = GitDeploy.on(this)
+        if (sw.isChecked) AutoDeploy.start(this)
+        sw.setOnCheckedChangeListener { _, on ->
+            if (on && !AutoDeploy.hasAllFiles()) {
+                Toast.makeText(this, "\"All files access\" allow karo", Toast.LENGTH_LONG).show()
+                AutoDeploy.askAllFiles(this)
+            }
+            GitDeploy.setOn(this, on)
+            if (on) AutoDeploy.start(this)
+            refreshGitStatus()
+        }
+        findViewById<Button>(R.id.btnGit).setOnClickListener {
+            GitDeploy.showSettings(this) { refreshGitStatus() }
+        }
+        refreshGitStatus()
     }
 
     override fun onResume() {
