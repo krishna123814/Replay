@@ -74,6 +74,9 @@ dependencies {
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // Auto Deploy: SFTP se server par zip bhejne ke liye (JSch ka maintained fork, package com.jcraft.jsch)
+    implementation("com.github.mwiede:jsch:0.2.18")
+
     // File Manager (MyFiles) ke liye
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.viewpager2:viewpager2:1.1.0")

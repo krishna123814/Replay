@@ -477,5 +477,6 @@ class DownloadBootReceiver : BroadcastReceiver() {
     // BOOT_COMPLETED / MY_PACKAGE_REPLACED: alarms dobara lagao
     override fun onReceive(context: Context, intent: Intent) {
         Downloader.rescheduleAll(context)
+        try { com.example.simplebrowser.deploy.AutoDeploy.startIfOn(context) } catch (_: Throwable) { }
     }
 }

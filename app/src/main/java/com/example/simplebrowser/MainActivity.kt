@@ -10,6 +10,10 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.TextView
+import android.os.Handler
+import android.os.Looper
+import com.example.simplebrowser.deploy.AutoDeploy
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -65,11 +69,57 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnFamily).setOnClickListener {
             startActivity(Intent(this, com.example.simplebrowser.family.FamilyActivity::class.java))
         }
+        setupDeploy()
         findViewById<Button>(R.id.btnFloating).setOnClickListener { runFloating { startFloating() } }
         findViewById<Button>(R.id.btnStopFloating).setOnClickListener {
             stopService(Intent(this, FloatingService::class.java))
             Toast.makeText(this, "Floating band", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // 📦 Auto Deploy: Download me server*.zip aate hi server ke drop folder me apne aap
+    private val deployH = Handler(Looper.getMainLooper())
+    private val deployTick = object : Runnable {
+        override fun run() {
+            refreshDeployStatus()
+            deployH.postDelayed(this, 2000)
+        }
+    }
+
+    private fun refreshDeployStatus() {
+        val tv = findViewById<TextView>(R.id.tvDeployStatus) ?: return
+        tv.text = if (AutoDeploy.on(this)) AutoDeploy.last(this).ifBlank { "Chalu hai — Download me " + AutoDeploy.pattern(this) + " ka intezaar" }
+        else "Band hai"
+    }
+
+    private fun setupDeploy() {
+        val sw = findViewById<SwitchCompat>(R.id.swDeploy)
+        sw.isChecked = AutoDeploy.on(this)
+        if (sw.isChecked) AutoDeploy.start(this)
+        sw.setOnCheckedChangeListener { _, on ->
+            if (on && !AutoDeploy.hasAllFiles()) {
+                Toast.makeText(this, "\"All files access\" allow karo", Toast.LENGTH_LONG).show()
+                AutoDeploy.askAllFiles(this)
+            }
+            AutoDeploy.setOn(this, on)
+            if (on) AutoDeploy.start(this) else AutoDeploy.stop(this)
+            refreshDeployStatus()
+        }
+        findViewById<Button>(R.id.btnDeploy).setOnClickListener {
+            AutoDeploy.showSettings(this) { refreshDeployStatus() }
+        }
+        refreshDeployStatus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        deployH.removeCallbacks(deployTick)
+        deployH.post(deployTick)
+    }
+
+    override fun onPause() {
+        deployH.removeCallbacks(deployTick)
+        super.onPause()
     }
 
     private fun setupApp(btnId: Int, swId: Int, app: String, normal: Class<*>) {

@@ -162,3 +162,10 @@ Signing ke liye repo Secrets me 4 cheezein chahiye: `LION_KEYSTORE_BASE64`, `LIO
 - Vault ke andar: video / audio tap karo = app ke apne player me seedha chalta hai (seek bhi, poori file decrypt nahi hoti, plain data disk par nahi likha jata). Photo = swipe + zoom viewer. Baaki files (pdf, doc...) = decrypt karke dusre app me. Lamba dabao = dusre app me kholo / phone me nikalo / rename / delete. Folder banao, files jodo.
 - ⚠ Password bhool gaye to data wapas nahi aayega. Window FLAG_SECURE hai (screenshot band). Vault band karte hi decrypted cache saaf.
 - Code: `vault/` (crypto, Java) + `files/VaultActivity.kt` (UI).
+
+## 📦 Auto Deploy (Nov 2026)
+Start page par "Auto Deploy (server.zip)" row: switch ON karo to phone ke Download folder me `server*.zip` aate hi wo
+SFTP se server ke folder (default `/root/app`) me `server.zip` naam se chali jaati hai (pehle `.part`, poori hone par purani hata kar rename).
+Settings (⚙): phone folder, phone file pattern, SFTP host/port/user/password, server folder + file naam, upload ke baad file hatao, Connection test.
+Files: `deploy/AutoDeploy.kt`, `deploy/AutoDeployService.kt`, manifest me service, `activity_main.xml` me row, `DownloadBootReceiver` se boot par restart.
+Dependency: `com.github.mwiede:jsch` (SFTP). Android 11+ par "All files access" chahiye.

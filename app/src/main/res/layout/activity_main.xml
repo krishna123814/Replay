@@ -128,6 +128,35 @@
         android:layout_marginBottom="12dp"
         android:text="🌳  Family Tree" />
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnDeploy"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="📦  Auto Deploy (server.zip) ⚙" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/swDeploy"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:text="On  " />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvDeployStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:textSize="11sp" />
+
     <Button
         android:id="@+id/btnStopFloating"
         android:layout_width="match_parent"

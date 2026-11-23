@@ -166,6 +166,16 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 📦 Auto Deploy: Download folder ki server*.zip ko server ke drop folder me apne aap bhejta hai -->
+        <service
+            android:name=".deploy.AutoDeployService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="auto_deploy_zip_upload" />
+        </service>
+
         <!-- Scheduled downloads: alarm bajne par + reboot/app-update ke baad dobara set -->
         <receiver
             android:name=".DownloadAlarmReceiver"
