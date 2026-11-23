@@ -10,38 +10,41 @@
     android:layout_height="wrap_content"
     android:gravity="center"
     android:orientation="vertical"
-    android:padding="24dp">
+    android:padding="10dp">
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="28dp"
+        android:layout_marginBottom="10dp"
         android:text="Lion"
-        android:textSize="24sp"
+        android:textSize="18sp"
         android:textStyle="bold" />
 
     <Button
+        style="@style/CompactButton"
         android:id="@+id/btnBrowser"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:text="🌐  Normal Browser" />
 
     <Button
+        style="@style/CompactButton"
         android:id="@+id/btnFloating"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:text="🪟  Floating Window" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <Button
+        style="@style/CompactButton"
             android:id="@+id/btnFiles"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -52,7 +55,8 @@
             android:id="@+id/swFiles"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
+            android:textSize="11sp"
             android:checked="true"
             android:text="Float  " />
     </LinearLayout>
@@ -60,11 +64,12 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <Button
+        style="@style/CompactButton"
             android:id="@+id/btnMoney"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -75,7 +80,8 @@
             android:id="@+id/swMoney"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
+            android:textSize="11sp"
             android:checked="true"
             android:text="Float  " />
     </LinearLayout>
@@ -83,11 +89,12 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <Button
+        style="@style/CompactButton"
             android:id="@+id/btnIncome"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -98,7 +105,8 @@
             android:id="@+id/swIncome"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
+            android:textSize="11sp"
             android:checked="true"
             android:text="Float  " />
     </LinearLayout>
@@ -106,11 +114,12 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
         <Button
+        style="@style/CompactButton"
             android:id="@+id/btnRoutine"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -121,16 +130,18 @@
             android:id="@+id/swRoutine"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
+            android:textSize="11sp"
             android:checked="true"
             android:text="Float  " />
     </LinearLayout>
 
     <Button
+        style="@style/CompactButton"
         android:id="@+id/btnFamily"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:text="🌳  Family Tree" />
 
     <LinearLayout
@@ -141,6 +152,7 @@
         android:orientation="horizontal">
 
         <Button
+        style="@style/CompactButton"
             android:id="@+id/btnDeploy"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -151,7 +163,8 @@
             android:id="@+id/swDeploy"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
+            android:textSize="11sp"
             android:text="On  " />
     </LinearLayout>
 
@@ -159,7 +172,7 @@
         android:id="@+id/tvDeployStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:textSize="11sp" />
 
     <LinearLayout
@@ -170,6 +183,7 @@
         android:orientation="horizontal">
 
         <Button
+        style="@style/CompactButton"
             android:id="@+id/btnGit"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
@@ -180,7 +194,8 @@
             android:id="@+id/swGit"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="6dp"
+            android:textSize="11sp"
             android:text="On  " />
     </LinearLayout>
 
@@ -188,17 +203,19 @@
         android:id="@+id/tvGitStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:textSize="11sp" />
 
     <Button
+        style="@style/CompactButton"
         android:id="@+id/btnTheft"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
+        android:layout_marginBottom="4dp"
         android:text="🛡️  Anti-theft (galat password = photo)" />
 
     <Button
+        style="@style/CompactButton"
         android:id="@+id/btnStopFloating"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -207,7 +224,7 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
+        android:layout_marginTop="10dp"
         android:gravity="center"
         android:text="Floating ke liye &quot;Display over other apps&quot; permission chahiye"
         android:textSize="12sp" />
