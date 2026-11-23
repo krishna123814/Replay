@@ -28,6 +28,7 @@ class TheftActivity : AppCompatActivity() {
     private lateinit var sw: SwitchCompat
     private lateinit var swRemote: SwitchCompat
     private lateinit var swAlarm: SwitchCompat
+    private lateinit var swTrack: SwitchCompat
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh() }
@@ -56,7 +57,7 @@ class TheftActivity : AppCompatActivity() {
         }
 
         root.addView(tv("🛡️ Anti-theft", 24f, true))
-        root.addView(tv("Lock screen par ${TheftEngine.THRESHOLD} baar galat password/PIN/pattern -> front camera ki photo -> Telegram.", 13f))
+        root.addView(tv("Lock screen par ${TheftEngine.THRESHOLD} baar galat password/PIN/pattern -> front+back camera photo (battery, location, cell tower ke saath) -> Telegram. Switch-off hote waqt bhi photo+location try karta hai.", 13f))
 
         sw = SwitchCompat(this).apply {
             text = "Anti-theft chalu  "
@@ -84,6 +85,12 @@ class TheftActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, on -> TheftEngine.setAlarmOnTrigger(this@TheftActivity, on) }
         }
         root.addView(swAlarm, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        swTrack = SwitchCompat(this).apply {
+            text = "Live tracking — har ~5 min location  "
+            isChecked = TheftEngine.trackOn(this@TheftActivity)
+            setOnCheckedChangeListener { _, on -> TheftEngine.setTrackOn(this@TheftActivity, on) }
+        }
+        root.addView(swTrack, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
 
         tvChecks = tv("", 14f)
         root.addView(tvChecks)
@@ -114,6 +121,9 @@ class TheftActivity : AppCompatActivity() {
                 Manifest.permission.READ_PHONE_STATE
             ))
         }
+        btn("8️⃣  Microphone permission (remote `audio` command ke liye)") {
+            permLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+        }
         btn("7️⃣  Location: \"Hamesha allow karo\" (app settings)") {
             Toast.makeText(this, "Permissions > Location > \"Allow all the time\"", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
@@ -139,7 +149,27 @@ class TheftActivity : AppCompatActivity() {
         btn("🔕  Alarm band karo") {
             try { TheftGuardService.start(this, TheftGuardService.ACTION_ALARM_OFF) } catch (_: Throwable) { }
         }
-        root.addView(tv("Telegram commands: photo · locate · alarm · alarmoff · phone (status/battery)", 12f).apply { setPadding(0, dp(14), 0, 0) })
+        btn("🔎  Test: Lost mode (\"mujhe lauta do\") dikhao") {
+            TheftEngine.findMe(this)
+        }
+        btn("🔒  Test: Abhi phone lock karo") {
+            try {
+                (getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager).lockNow()
+            } catch (_: Throwable) {
+                Toast.makeText(this, "Pehle Device Admin chalu karo (2)", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        root.addView(tv(
+            "Telegram commands:\n" +
+                "photo · locate · alarm · alarmoff\n" +
+                "lock (turant lock) · findme (\"mujhe lauta do ${TheftEngine.FIND_ME_NUMBER}\" screen+alarm)\n" +
+                "audio (10s mic record) · siminfo (abhi kaun si SIM lagi hai)\n" +
+                "track / trackoff (har 5 min location)\n" +
+                "phone (status+battery)\n" +
+                "📸 📍 🔔 🔒 inline buttons har photo/alert ke saath aate hain",
+            12f
+        ).apply { setPadding(0, dp(14), 0, 0) })
 
         tvStatus = tv("", 12f).apply { setPadding(0, dp(14), 0, 0); gravity = Gravity.START }
         root.addView(tvStatus)
@@ -179,5 +209,6 @@ class TheftActivity : AppCompatActivity() {
             (if (pend > 0) "\nPending alerts: $pend" else "")
         if (sw.isChecked != TheftEngine.enabled(this)) sw.isChecked = TheftEngine.enabled(this)
         if (swRemote.isChecked != TheftEngine.remote(this)) swRemote.isChecked = TheftEngine.remote(this)
+        if (swTrack.isChecked != TheftEngine.trackOn(this)) swTrack.isChecked = TheftEngine.trackOn(this)
     }
 }

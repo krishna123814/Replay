@@ -19,6 +19,20 @@ object SimGuard {
     fun hasPerm(ctx: Context): Boolean =
         ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
 
+    /** Telegram `siminfo` command ke liye: abhi kaun si SIM(s) lagi hain, ek line me. */
+    @Suppress("MissingPermission")
+    fun currentDesc(ctx: Context): String {
+        if (!hasPerm(ctx)) return "SIM check permission nahi di gayi."
+        val raw = try {
+            (ctx.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager).activeSubscriptionInfoList
+        } catch (_: Throwable) { null }
+        val list = raw ?: emptyList()
+        return if (list.isEmpty()) "📶 Koi SIM nahi lagi hai."
+        else "📶 " + list.joinToString(" + ") {
+            "${it.carrierName ?: "?"} (slot ${it.simSlotIndex + 1}, number: ${it.number?.takeIf { n -> n.isNotBlank() } ?: "pata nahi"})"
+        }
+    }
+
     @Suppress("MissingPermission")
     fun check(ctx: Context) {
         val a = ctx.applicationContext

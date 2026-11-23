@@ -103,6 +103,29 @@ object TheftSender {
         return allOk
     }
 
+    /** 🎙️ Audio recording seedha bhejo (queue me nahi daalte — turant try, fail ho to caller retry kare). */
+    fun sendAudioBlocking(ctx: Context, audio: File, caption: String): Boolean {
+        val a = ctx.applicationContext
+        val root = origin(a) ?: run {
+            TheftEngine.setStatus(a, "Server login nahi — audio bhej nahi saka")
+            return false
+        }
+        val url = root + "api/theft_audio"
+        return try {
+            val req = Request.Builder().url(url)
+                .header("X-Caption", URLEncoder.encode(caption, "UTF-8").replace("+", "%20"))
+                .post(audio.readBytes().toRequestBody("audio/mp4".toMediaType()))
+                .build()
+            Dav.client.newCall(req).execute().use { r ->
+                if (r.code == 200) { TheftEngine.setStatus(a, "Audio Telegram par bhej di ✅"); true }
+                else { TheftEngine.setStatus(a, "Audio bhejne me dikkat (HTTP ${r.code})"); false }
+            }
+        } catch (e: Throwable) {
+            TheftEngine.setStatus(a, "Audio bhejne me net/server dikkat (${e.javaClass.simpleName})")
+            false
+        }
+    }
+
     private fun post(a: Context, url: String, caption: String, body: RequestBody): Boolean = try {
         val req = Request.Builder().url(url)
             .header("X-Caption", URLEncoder.encode(caption, "UTF-8").replace("+", "%20"))

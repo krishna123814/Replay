@@ -25,8 +25,8 @@ import androidx.core.app.NotificationCompat
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 📸 Front camera se bina preview 3 photo + saath me location, phone me save karta hai aur server ko bhejta hai.
- * Foreground service (type=camera) — Android 14 ke liye zaroori.
+ * 📸 Front + back camera, bina preview, 4-5 photo (reason ke hisaab se) + saath me location,
+ * phone me save karta hai aur server ko bhejta hai. Foreground service (type=camera) — Android 14 ke liye zaroori.
  */
 class TheftCamService : Service() {
 
@@ -34,13 +34,15 @@ class TheftCamService : Service() {
         const val EXTRA_FAILS = "fails"
         const val EXTRA_TEST = "test"
         const val EXTRA_REASON = "reason"
+        const val EXTRA_FRONT = "front_n"       // kitni front photo
+        const val EXTRA_BACK = "back_n"         // kitni back photo
         private const val CH = "theft_guard"
         private const val NOTIF_ID = 8841
-        private const val PHOTOS = 3            // itni photos
         private const val WARMUP_MS = 1200L     // auto-exposure/focus settle hone do
+        private const val WARMUP_MS_FAST = 500L // shutdown jaisi jaldi wali situation me
         private const val GAP_MS = 700L         // photos ke beech gap
         private const val LOC_TIMEOUT_MS = 10_000L
-        private const val TIMEOUT_MS = 25_000L  // kuch bhi atke to hard stop
+        private const val TIMEOUT_MS = 28_000L  // kuch bhi atke to hard stop
     }
 
     private var thread: HandlerThread? = null
@@ -63,6 +65,13 @@ class TheftCamService : Service() {
     private var fails = 0
     private var test = false
     private var reason = ""
+    private var fast = false
+
+    // ───── dual-camera burst state ─────
+    private var frontTarget = TheftEngine.PHOTOS_FRONT
+    private var backTarget = TheftEngine.PHOTOS_BACK
+    private var phase = 0                  // 0 = front camera, 1 = back camera, 2 = done
+    private var phaseShotsLeft = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,6 +79,9 @@ class TheftCamService : Service() {
         fails = intent?.getIntExtra(EXTRA_FAILS, 0) ?: 0
         test = intent?.getBooleanExtra(EXTRA_TEST, false) ?: false
         reason = intent?.getStringExtra(EXTRA_REASON) ?: ""
+        frontTarget = intent?.getIntExtra(EXTRA_FRONT, TheftEngine.PHOTOS_FRONT) ?: TheftEngine.PHOTOS_FRONT
+        backTarget = intent?.getIntExtra(EXTRA_BACK, TheftEngine.PHOTOS_BACK) ?: TheftEngine.PHOTOS_BACK
+        fast = reason == "shutdown"
         if (running) return START_NOT_STICKY
         running = true
 
@@ -89,7 +101,7 @@ class TheftCamService : Service() {
         handler!!.postDelayed({ forceFinish() }, TIMEOUT_MS)
         handler!!.post {
             startLocation()
-            capture()
+            startPhase(0)
         }
         return START_NOT_STICKY
     }
@@ -105,27 +117,46 @@ class TheftCamService : Service() {
         } catch (_: Throwable) { locDone = true }
     }
 
+    // ───────────── phase control (front camera burst, phir back camera burst) ─────────────
+
+    private fun startPhase(p: Int) {
+        phase = p
+        val target = if (p == 0) frontTarget else backTarget
+        if (target <= 0) { nextPhase(); return }
+        phaseShotsLeft = target
+        capture(lensFacing = if (p == 0) CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK)
+    }
+
+    private fun nextPhase() {
+        closeCamera()
+        if (finished.get()) return
+        when (phase) {
+            0 -> startPhase(1)
+            else -> { photosDone = true; maybeFinish() }
+        }
+    }
+
     // ───────────── camera2 (headless) ─────────────
 
-    private fun capture() {
+    private fun capture(lensFacing: Int) {
         try {
-            if (!TheftEngine.hasCamera(this)) { photosFailed(); return }
+            if (!TheftEngine.hasCamera(this)) { nextPhase(); return }
             val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val id = cm.cameraIdList.firstOrNull {
-                cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
-            } ?: cm.cameraIdList.firstOrNull()
-            if (id == null) { photosFailed(); return }
+                cm.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == lensFacing
+            }
+            if (id == null) { nextPhase(); return }   // us lens ka camera hi nahi hai (e.g. kuch tablets)
 
             val ch = cm.getCameraCharacteristics(id)
             val map = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            if (map == null) { photosFailed(); return }
+            if (map == null) { nextPhase(); return }
             sensorOri = ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 270
 
             // JPEG size: ~1600 px chaudai ke aas-paas (Telegram ke liye kaafi, upload halka)
             val jpegSizes = map.getOutputSizes(ImageFormat.JPEG)
             val js = jpegSizes.filter { it.width <= 1920 }.maxByOrNull { it.width * it.height }
                 ?: jpegSizes.minByOrNull { it.width * it.height }
-            if (js == null) { photosFailed(); return }
+            if (js == null) { nextPhase(); return }
             val rd = ImageReader.newInstance(js.width, js.height, ImageFormat.JPEG, 2)
             reader = rd
 
@@ -147,10 +178,9 @@ class TheftCamService : Service() {
                 val b = bytes
                 if (b != null && !finished.get()) {
                     photos.add(b)
-                    if (photos.size >= PHOTOS) {
-                        photosDone = true
-                        closeCamera()
-                        maybeFinish()
+                    phaseShotsLeft -= 1
+                    if (phaseShotsLeft <= 0) {
+                        nextPhase()
                     } else {
                         handler?.postDelayed({ takeStill() }, GAP_MS)
                     }
@@ -163,11 +193,11 @@ class TheftCamService : Service() {
                     if (finished.get()) { cam.close(); return }
                     startSession(cam)
                 }
-                override fun onDisconnected(cam: CameraDevice) { photosFailed() }
-                override fun onError(cam: CameraDevice, error: Int) { photosFailed() }
+                override fun onDisconnected(cam: CameraDevice) { nextPhase() }
+                override fun onError(cam: CameraDevice, error: Int) { nextPhase() }
             }, handler)
         } catch (_: Throwable) {
-            photosFailed()
+            nextPhase()
         }
     }
 
@@ -186,16 +216,16 @@ class TheftCamService : Service() {
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                         }
                         s.setRepeatingRequest(prev.build(), null, handler)
-                        handler?.postDelayed({ takeStill() }, WARMUP_MS)
-                    } catch (_: Throwable) { photosFailed() }
+                        handler?.postDelayed({ takeStill() }, if (fast) WARMUP_MS_FAST else WARMUP_MS)
+                    } catch (_: Throwable) { nextPhase() }
                 }
-                override fun onConfigureFailed(s: CameraCaptureSession) { photosFailed() }
+                override fun onConfigureFailed(s: CameraCaptureSession) { nextPhase() }
             }, handler)
-        } catch (_: Throwable) { photosFailed() }
+        } catch (_: Throwable) { nextPhase() }
     }
 
     private fun takeStill() {
-        if (finished.get() || photosDone) return
+        if (finished.get() || phaseShotsLeft <= 0) return
         val cam = camera ?: return
         val s = session ?: return
         val rd = reader ?: return
@@ -208,7 +238,7 @@ class TheftCamService : Service() {
                 set(CaptureRequest.JPEG_ORIENTATION, sensorOri)   // phone seedha pakda ho to photo seedhi aayegi
             }
             s.capture(still.build(), null, handler)
-        } catch (_: Throwable) { photosFailed() }
+        } catch (_: Throwable) { nextPhase() }
     }
 
     private fun closeCamera() {
@@ -221,13 +251,6 @@ class TheftCamService : Service() {
     }
 
     // ───────────── finish ─────────────
-
-    /** Camera se kuch bhi nahi mila / ya jitni mili utni hi: photos wala hissa khatam. */
-    private fun photosFailed() {
-        photosDone = true
-        closeCamera()
-        maybeFinish()
-    }
 
     private fun maybeFinish() { if (photosDone && locDone) finish() }
 

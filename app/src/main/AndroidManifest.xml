@@ -15,9 +15,11 @@
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
-    <!-- 🛡️ Anti-theft: front camera photo + battery se band na ho -->
+    <!-- 🛡️ Anti-theft: front+back camera photo, mic (remote audio), battery se band na ho -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -27,6 +29,7 @@
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
@@ -194,6 +197,12 @@
             android:name=".antitheft.TheftActivity"
             android:exported="false"
             android:theme="@style/DarkTheme" />
+        <activity
+            android:name=".antitheft.TheftFindActivity"
+            android:exported="false"
+            android:theme="@style/DarkTheme"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance" />
         <service
             android:name=".antitheft.TheftCamService"
             android:exported="false"
@@ -201,7 +210,7 @@
         <service
             android:name=".antitheft.TheftGuardService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|microphone">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="theft_remote_guard" />
@@ -215,6 +224,15 @@
                 android:resource="@xml/theft_admin" />
             <intent-filter>
                 <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+        <!-- 🔌 Switch-off/reboot shuru hote hi turant photo+location (best-effort, kam samay milta hai) -->
+        <receiver
+            android:name=".antitheft.TheftShutdownReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_SHUTDOWN" />
+                <action android:name="android.intent.action.QUICKBOOT_POWEROFF" />
             </intent-filter>
         </receiver>
 

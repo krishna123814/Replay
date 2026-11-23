@@ -5,15 +5,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.media.RingtoneManager
-import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -25,11 +25,14 @@ import com.example.simplebrowser.R
 import com.example.simplebrowser.files.Dav
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * 🛰️ Remote guard: har ~15 sec server se Telegram ka hukm poochta hai (photo / locate / alarm / alarmoff),
+ * 🛰️ Remote guard: har ~15 sec server se Telegram ka hukm poochta hai
+ * (photo / locate / alarm / alarmoff / lock / findme / audio / siminfo / track / trackoff),
  * saath me battery batata hai aur SIM badli to alert deta hai. Alarm bhi yahin bajta hai.
+ * Live tracking ON ho to har ~5 min location bhi bhejta hai.
  */
 class TheftGuardService : Service() {
 
@@ -40,6 +43,8 @@ class TheftGuardService : Service() {
         private const val NOTIF_ID = 8842
         private const val POLL_MS = 15_000L
         private const val ALARM_MAX_MS = 120_000L
+        private const val TRACK_EVERY_MS = 5 * 60_000L   // live tracking interval: 5 min
+        private const val AUDIO_SECONDS = 10
 
         @Volatile var alive = false
 
@@ -55,7 +60,9 @@ class TheftGuardService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private var locThread: HandlerThread? = null
     private var player: MediaPlayer? = null
+    private var recorder: MediaRecorder? = null
     private val stopAlarmRunnable = Runnable { alarmOff() }
+    private var lastTrackSend = 0L
 
     private val http by lazy {
         Dav.client.newBuilder().callTimeout(25, TimeUnit.SECONDS).build()
@@ -96,24 +103,19 @@ class TheftGuardService : Service() {
                 lastSim = now
                 try { SimGuard.check(this) } catch (_: Throwable) { }
             }
+            if (TheftEngine.trackOn(this) && now - lastTrackSend >= TRACK_EVERY_MS) {
+                lastTrackSend = now
+                try { trackTick() } catch (_: Throwable) { }
+            }
             try { poll() } catch (_: Throwable) { }
             try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { break }
         }
         main.post { if (player == null) stopSelf() }
     }
 
-    private fun battery(): Pair<Int, Boolean> {
-        val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val level = i?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale = i?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
-        val st = i?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        val chg = st == BatteryManager.BATTERY_STATUS_CHARGING || st == BatteryManager.BATTERY_STATUS_FULL
-        return Pair(if (level >= 0 && scale > 0) level * 100 / scale else -1, chg)
-    }
-
     private fun poll() {
         val root = TheftSender.origin(this) ?: return
-        val (pct, chg) = battery()
+        val (pct, chg) = TheftEngine.battery(this)
         val url = root + "api/theft_cmd?b=$pct&c=${if (chg) 1 else 0}"
         http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
             if (r.code != 200) return
@@ -137,17 +139,97 @@ class TheftGuardService : Service() {
                 alarmOff()
                 TheftEngine.queueText(app, "🔕 Alarm band kar diya.")
             }
+            "lock" -> lockNow()
+            "findme" -> TheftEngine.findMe(app)
+            "audio" -> recordAndSendAudio()
+            "siminfo" -> TheftEngine.queueText(app, SimGuard.currentDesc(app) + "\n📱 ${Build.MANUFACTURER} ${Build.MODEL}")
+            "track" -> {
+                TheftEngine.setTrackOn(app, true)
+                lastTrackSend = 0L   // turant ek location bhej do
+                TheftEngine.queueText(app, "📍 Live tracking chalu — har ~5 min location aayegi. Band karne ko `trackoff` bhejo.")
+            }
+            "trackoff" -> {
+                TheftEngine.setTrackOn(app, false)
+                TheftEngine.queueText(app, "📍 Live tracking band kar di.")
+            }
         }
     }
 
     private fun locate() {
         val app = applicationContext
         if (locThread == null) locThread = HandlerThread("theft-loc").also { it.start() }
-        val (pct, chg) = battery()
+        val (pct, chg) = TheftEngine.battery(app)
         TheftLocation.fetch(app, locThread!!.looper, 20_000L) { l ->
             val head = "📍 Phone ki location" + (if (pct >= 0) " · 🔋 $pct%" + (if (chg) " ⚡" else "") else "")
-            TheftEngine.queueText(app, head + "\n" + TheftLocation.line(l, app) + "\n📱 ${Build.MANUFACTURER} ${Build.MODEL}")
+            TheftEngine.queueText(app, head + "\n" + TheftLocation.line(l, app) + "\n" + TheftCell.line(app) + "\n📱 ${Build.MANUFACTURER} ${Build.MODEL}")
         }
+    }
+
+    /** Live tracking tick: har ~5 min, `locate` jaisa hi par alag label. */
+    private fun trackTick() {
+        val app = applicationContext
+        if (locThread == null) locThread = HandlerThread("theft-loc").also { it.start() }
+        val (pct, chg) = TheftEngine.battery(app)
+        TheftLocation.fetch(app, locThread!!.looper, 20_000L) { l ->
+            val head = "📍 Live tracking" + (if (pct >= 0) " · 🔋 $pct%" + (if (chg) " ⚡" else "") else "")
+            TheftEngine.queueText(app, head + "\n" + TheftLocation.line(l, app))
+        }
+    }
+
+    // ───────────── lock / findme ─────────────
+
+    private fun lockNow() {
+        val app = applicationContext
+        try {
+            (app.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager)
+                .lockNow()
+            TheftEngine.queueText(app, "🔒 Phone turant lock kar diya gaya.")
+        } catch (e: Throwable) {
+            TheftEngine.queueText(app, "⚠️ Lock nahi ho saka (${e.javaClass.simpleName}) — Device Admin chalu check karo.")
+        }
+    }
+
+    // ───────────── mic recording ─────────────
+
+    private fun recordAndSendAudio() {
+        val app = applicationContext
+        if (ContextCompat.checkSelfPermission(app, android.Manifest.permission.RECORD_AUDIO)
+            != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            TheftEngine.queueText(app, "⚠️ Audio record ke liye Microphone permission nahi di gayi hai.")
+            return
+        }
+        Thread {
+            val f = File(cacheDir, "theft_audio_${System.currentTimeMillis()}.m4a")
+            var ok = false
+            try {
+                val rec = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(app) else @Suppress("DEPRECATION") MediaRecorder()
+                rec.setAudioSource(MediaRecorder.AudioSource.MIC)
+                rec.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                rec.setOutputFile(f.absolutePath)
+                rec.prepare()
+                rec.start()
+                recorder = rec
+                Thread.sleep(AUDIO_SECONDS * 1000L)
+                try { rec.stop() } catch (_: Throwable) { }
+                rec.release()
+                recorder = null
+                ok = f.exists() && f.length() > 0
+            } catch (_: Throwable) {
+                try { recorder?.release() } catch (_: Throwable) { }
+                recorder = null
+            }
+            val caption = "🎙️ ${AUDIO_SECONDS}s audio (remote command)\n📱 ${Build.MANUFACTURER} ${Build.MODEL}"
+            if (ok) {
+                if (!TheftSender.sendAudioBlocking(app, f, caption)) {
+                    TheftEngine.queueText(app, "⚠️ Audio record ho gayi par abhi bhej nahi saka — baad me try karo.")
+                }
+            } else {
+                TheftEngine.queueText(app, "⚠️ Audio record nahi ho saki.")
+            }
+            try { f.delete() } catch (_: Throwable) { }
+        }.start()
     }
 
     // ───────────── alarm ─────────────
@@ -195,6 +277,8 @@ class TheftGuardService : Service() {
         th?.interrupt()
         try { player?.release() } catch (_: Throwable) { }
         player = null
+        try { recorder?.release() } catch (_: Throwable) { }
+        recorder = null
         locThread?.quitSafely()
         locThread = null
         super.onDestroy()
@@ -218,7 +302,8 @@ class TheftGuardService : Service() {
             .setContentIntent(pi)
             .build()
         if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            // specialUse + microphone dono — `audio` remote command isi service se chalta hai
+            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIF_ID, n)
         }
