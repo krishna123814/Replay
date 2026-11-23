@@ -3,7 +3,9 @@ package com.example.simplebrowser.deploy
 import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
@@ -22,6 +24,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.app.NotificationCompat
 import com.example.simplebrowser.DlSettings
 import com.example.simplebrowser.R
+import com.example.simplebrowser.UpdateChecker
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -51,6 +54,10 @@ object GitDeploy {
     const val K_PATH = "gh_path"          // repo ke andar file ka path
     const val K_TOKEN = "gh_token"
     private const val K_DONE = "gh_done"
+    private const val K_WSINCE = "gh_w_since"   // build-watch kab shuru hua (ms); khali = watch band
+    private const val K_WBASE = "gh_w_base"     // upload ke waqt latest release ka id (naya wahi jo isse bada ho)
+    private const val WATCH_MAX_MS = 20L * 60 * 1000   // itna intezaar, phir "release nahi mila"
+    private const val POLL_MS = 45_000L
 
     const val DEF_PAT = "Simple*Browser*.zip"      // SimpleBrowser.zip, SimpleBrowser(1).zip, Simple Browser(1).zip sab
     const val DEF_REPO = "krishna123814/Replay"
@@ -276,10 +283,11 @@ object GitDeploy {
             }
 
             markDone(ctx, sig)
+            startWatch(ctx, repo, tok)
             val note = tidy(ctx, f, all, fin)
             val extra = if (note.isEmpty()) "" else " ($note)"
             val where = "$repo/$path" + (if (br.isEmpty()) "" else " [$br]")
-            setLast(ctx, "✅ ${f.name} → $where$extra")
+            setLast(ctx, "✅ ${f.name} → $where$extra — ⏳ build ka intezaar")
             result(ctx, "✅ GitHub par pahunch gayi", "${f.name} → $where")
             return true
         } catch (e: Exception) {
@@ -294,6 +302,121 @@ object GitDeploy {
                 if (wl.isHeld) wl.release()
             } catch (_: Throwable) {
             }
+        }
+    }
+
+    // ───────────────────────── build watch: upload ke baad naya release aate hi APK download ─────────────────────────
+
+    private class Rel(val id: Long, val vc: Long?, val url: String)
+
+    @Volatile private var lastPoll = 0L
+    @Volatile private var dlBusy = false
+
+    private fun watchSince(ctx: Context): Long = DlSettings.getStr(ctx, K_WSINCE, "").toLongOrNull() ?: 0L
+    private fun watchBase(ctx: Context): Long = DlSettings.getStr(ctx, K_WBASE, "").toLongOrNull() ?: -1L
+    private fun stopWatch(ctx: Context) {
+        DlSettings.setStr(ctx, K_WSINCE, "")
+        DlSettings.setStr(ctx, K_WBASE, "")
+    }
+
+    /** Build ka intezaar chalu hai? (service ko zinda rakhne ke liye) */
+    fun watching(ctx: Context): Boolean = watchSince(ctx) > 0L
+
+    private fun latestRelease(repo: String, tok: String): Rel? {
+        val r = call("GET", "https://api.github.com/repos/$repo/releases/latest", tok, null)
+        if (r.code == 404) return null                 // abhi koi release nahi
+        if (r.code != 200) throw Exception(why(r))
+        val o = JSONObject(r.body)
+        val vc = o.optString("tag_name", "").removePrefix("build-").toLongOrNull()
+        var url = ""
+        val assets = o.optJSONArray("assets")
+        if (assets != null) {
+            for (i in 0 until assets.length()) {
+                val a = assets.getJSONObject(i)
+                if (a.optString("name").endsWith(".apk", ignoreCase = true)) {
+                    url = a.optString("browser_download_url")
+                    break
+                }
+            }
+        }
+        return Rel(o.optLong("id", 0L), vc, url)
+    }
+
+    /** Upload safal hote hi: abhi ka latest release yaad rakho; ab jo isse naya aaye wahi hamara build hoga. */
+    private fun startWatch(ctx: Context, repo: String, tok: String) {
+        val base = try { latestRelease(repo, tok)?.id ?: 0L } catch (e: Exception) { -1L }   // -1 = baad me pehli poll se
+        DlSettings.setStr(ctx, K_WBASE, base.toString())
+        DlSettings.setStr(ctx, K_WSINCE, System.currentTimeMillis().toString())
+        lastPoll = System.currentTimeMillis()
+    }
+
+    /** Service har ~3 sec bulati hai; asli check ~45 sec me ek baar. */
+    fun watchTick(ctx: Context) {
+        val since = watchSince(ctx)
+        if (since <= 0L || dlBusy) return
+        val now = System.currentTimeMillis()
+        if (now - since > WATCH_MAX_MS) {
+            stopWatch(ctx)
+            setLast(ctx, "⚠️ 20 min me naya build release nahi mila (GitHub Actions dekho)")
+            result(ctx, "⚠️ Build ka release nahi mila", "GitHub Actions me dekho: build fail ya der ho sakti hai")
+            return
+        }
+        if (now - lastPoll < POLL_MS) return
+        lastPoll = now
+        val tok = token(ctx)
+        val repo = repo(ctx)
+        if (tok.isEmpty() || !repo.contains('/')) return
+        val rel = try { latestRelease(repo, tok) } catch (e: Exception) { return }   // net dikkat: agli baar dobara
+        if (rel == null) return
+        val base = watchBase(ctx)
+        if (base < 0L) {                                // upload ke waqt base nahi mila tha
+            DlSettings.setStr(ctx, K_WBASE, rel.id.toString())
+            return
+        }
+        if (rel.id <= base) return                      // naya release abhi nahi bana
+        if (rel.url.isEmpty()) return                   // release bana par APK abhi lagi nahi
+        val local = UpdateChecker.installedVersion(ctx)
+        if (rel.vc != null && rel.vc <= local) {
+            stopWatch(ctx)
+            setLast(ctx, "ℹ️ Naya release bana par version wahi hai (${rel.vc}), install ki zaroorat nahi")
+            return
+        }
+        dlBusy = true
+        Thread {
+            try {
+                setLast(ctx, "⬇ Naya build download ho raha hai…")
+                val apkIntent = UpdateChecker.downloadForInstall(ctx, rel.url)
+                UpdateChecker.readyInstallIntent = apkIntent
+                stopWatch(ctx)
+                setLast(ctx, "✅ Naya build ready — notification me \"Install karo\" dabao")
+                installNotify(ctx, apkIntent)
+            } catch (e: Exception) {
+                setLast(ctx, "❌ Build download fail: " + (e.message ?: e.javaClass.simpleName) + " (dobara koshish hogi)")
+            } finally {
+                dlBusy = false
+            }
+        }.start()
+    }
+
+    private fun installNotify(ctx: Context, install: Intent) {
+        try {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= 26) {
+                nm.createNotificationChannel(
+                    NotificationChannel("deploy_install", "Naya build ready", NotificationManager.IMPORTANCE_HIGH)
+                )
+            }
+            val pi = PendingIntent.getActivity(ctx, 81, install, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val n = NotificationCompat.Builder(ctx, "deploy_install")
+                .setSmallIcon(R.drawable.ic_notif_lion)
+                .setContentTitle("✅ Naya Lion build ready")
+                .setContentText("Install karne ke liye tap karo")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .build()
+            nm.notify(81, n)
+        } catch (_: Throwable) {
         }
     }
 

@@ -205,6 +205,38 @@ object UpdateChecker {
         }.start()
     }
 
+    /** Phone me abhi install hue Lion ka versionCode (GitDeploy build-watch ke liye). */
+    fun installedVersion(ctx: Context): Long = localVersionCode(ctx.applicationContext)
+
+    /**
+     * APK ko cache/updates/Lion.apk me download karta hai aur install Intent lautata hai (install screen KHUD NAHI kholta).
+     * Blocking hai: background thread par chalao. Dikkat aaye to Exception.
+     */
+    fun downloadForInstall(ctx: Context, url: String): Intent {
+        val app = ctx.applicationContext
+        val dir = File(app.cacheDir, "updates")
+        dir.mkdirs()
+        dir.listFiles()?.forEach { it.delete() }
+        val file = File(dir, "Lion.apk")
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = 15000
+            conn.readTimeout = 30000
+            conn.setRequestProperty("User-Agent", "Lion")
+            val code = conn.responseCode
+            if (code !in 200..299) throw Exception("HTTP $code")
+            conn.inputStream.use { input -> file.outputStream().use { out -> input.copyTo(out) } }
+        } finally {
+            conn.disconnect()
+        }
+        if (file.length() <= 0L) throw Exception("Download khali aaya")
+        val uri = FileProvider.getUriForFile(app, app.packageName + ".fileprovider", file)
+        return Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
     private fun install(ctx: Context, file: File, onInstallFailed: (Intent) -> Unit) {
         val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", file)
         val intent = Intent(Intent.ACTION_VIEW)

@@ -118,7 +118,7 @@ object AutoDeploy {
 
     /** Boot / app update ke baad: ON saved ho to service wapas chalao. */
     fun startIfOn(ctx: Context) {
-        if (on(ctx) || GitDeploy.on(ctx)) start(ctx)
+        if (on(ctx) || GitDeploy.on(ctx) || GitDeploy.watching(ctx)) start(ctx)
     }
 
     // ───────────────────────── scan + upload ─────────────────────────

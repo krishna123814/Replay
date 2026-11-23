@@ -58,7 +58,8 @@ class AutoDeployService : Service() {
         val l = ArrayList<String>()
         if (AutoDeploy.on(this)) l.add(AutoDeploy.pattern(this))
         if (GitDeploy.on(this)) l.add(GitDeploy.pattern(this))
-        return if (l.isEmpty()) AutoDeploy.pattern(this) else l.joinToString(" / ")
+        val w = if (GitDeploy.watching(this)) " (build ka intezaar)" else ""
+        return (if (l.isEmpty()) AutoDeploy.pattern(this) else l.joinToString(" / ")) + w
     }
 
     private fun loop() {
@@ -69,7 +70,8 @@ class AutoDeployService : Service() {
         while (running) {
             val srvOn = AutoDeploy.on(this)
             val gitOn = GitDeploy.on(this)
-            if (!srvOn && !gitOn) {                // dono switch OFF ho gaye
+            val watching = GitDeploy.watching(this)
+            if (!srvOn && !gitOn && !watching) {   // dono switch OFF aur build ka intezaar bhi nahi
                 stopSelf()
                 break
             }
@@ -91,6 +93,13 @@ class AutoDeployService : Service() {
                 } catch (t: Throwable) {
                     GitDeploy.setLast(this, "❌ Error: " + (t.message ?: t.javaClass.simpleName))
                     waitGit = System.currentTimeMillis() + 30_000L
+                }
+            }
+            if (gitOn || watching) {
+                try {
+                    GitDeploy.watchTick(this)
+                } catch (t: Throwable) {
+                    GitDeploy.setLast(this, "❌ Build watch error: " + (t.message ?: t.javaClass.simpleName))
                 }
             }
             try {
