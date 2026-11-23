@@ -102,6 +102,7 @@ object AutoDeploy {
     }
 
     fun start(ctx: Context) {
+        DeployWatchdog.schedule(ctx)   // service mar jaye to bhi ~15 min me kaam hota rahe
         try {
             ContextCompat.startForegroundService(ctx, Intent(ctx, AutoDeployService::class.java))
         } catch (e: Throwable) {
@@ -119,6 +120,11 @@ object AutoDeploy {
     /** Boot / app update ke baad: ON saved ho to service wapas chalao. */
     fun startIfOn(ctx: Context) {
         if (on(ctx) || GitDeploy.on(ctx) || GitDeploy.watching(ctx)) start(ctx)
+    }
+
+    /** App process bani (kisi bhi wajah se) -> sirf watchdog lagao; foreground service background se nahi chalate. */
+    fun scheduleWatchdogIfOn(ctx: Context) {
+        if (on(ctx) || GitDeploy.on(ctx) || GitDeploy.watching(ctx)) DeployWatchdog.schedule(ctx)
     }
 
     // ───────────────────────── scan + upload ─────────────────────────

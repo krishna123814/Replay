@@ -26,6 +26,8 @@ class TheftActivity : AppCompatActivity() {
     private lateinit var tvChecks: TextView
     private lateinit var tvStatus: TextView
     private lateinit var sw: SwitchCompat
+    private lateinit var swRemote: SwitchCompat
+    private lateinit var swAlarm: SwitchCompat
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh() }
@@ -67,6 +69,22 @@ class TheftActivity : AppCompatActivity() {
         }
         root.addView(sw, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12); bottomMargin = dp(8) })
 
+        swRemote = SwitchCompat(this).apply {
+            text = "Remote guard (Telegram se photo/location/alarm)  "
+            isChecked = TheftEngine.remote(this@TheftActivity)
+            setOnCheckedChangeListener { _, on ->
+                TheftEngine.setRemote(this@TheftActivity, on)
+                refresh()
+            }
+        }
+        root.addView(swRemote, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+        swAlarm = SwitchCompat(this).apply {
+            text = "5 galat password par alarm bhi bajao  "
+            isChecked = TheftEngine.alarmOnTrigger(this@TheftActivity)
+            setOnCheckedChangeListener { _, on -> TheftEngine.setAlarmOnTrigger(this@TheftActivity, on) }
+        }
+        root.addView(swAlarm, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+
         tvChecks = tv("", 14f)
         root.addView(tvChecks)
 
@@ -89,6 +107,17 @@ class TheftActivity : AppCompatActivity() {
         btn("5️⃣  Server login: File Manager kholo") {
             startActivity(Intent(this, com.example.simplebrowser.files.HomeActivity::class.java))
         }
+        btn("6️⃣  Location + SIM check permission") {
+            permLauncher.launch(arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.READ_PHONE_STATE
+            ))
+        }
+        btn("7️⃣  Location: \"Hamesha allow karo\" (app settings)") {
+            Toast.makeText(this, "Permissions > Location > \"Allow all the time\"", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
 
         root.addView(tv("Test", 16f, true).apply { setPadding(0, dp(18), 0, 0) })
         btn("📸  Test: abhi photo Telegram par bhejo") {
@@ -103,6 +132,14 @@ class TheftActivity : AppCompatActivity() {
             TheftSender.kick(this)
             Toast.makeText(this, "Koshish shuru", Toast.LENGTH_SHORT).show()
         }
+
+        btn("🔔  Alarm test bajao") {
+            try { TheftGuardService.start(this, TheftGuardService.ACTION_ALARM_ON) } catch (_: Throwable) { }
+        }
+        btn("🔕  Alarm band karo") {
+            try { TheftGuardService.start(this, TheftGuardService.ACTION_ALARM_OFF) } catch (_: Throwable) { }
+        }
+        root.addView(tv("Telegram commands: photo · locate · alarm · alarmoff · phone (status/battery)", 12f).apply { setPadding(0, dp(14), 0, 0) })
 
         tvStatus = tv("", 12f).apply { setPadding(0, dp(14), 0, 0); gravity = Gravity.START }
         root.addView(tvStatus)
@@ -131,11 +168,16 @@ class TheftActivity : AppCompatActivity() {
             append("${mark(TheftEngine.isAdmin(this@TheftActivity))}  Device Admin\n")
             append("${mark(Settings.canDrawOverlays(this@TheftActivity))}  Overlay permission\n")
             append("${mark(battOk())}  Battery unrestricted\n")
-            append("${mark(Session.hasCreds())}  Server login (File Manager)")
+            append("${mark(Session.hasCreds())}  Server login (File Manager)\n")
+            append("${mark(TheftLocation.hasPerm(this@TheftActivity))}  Location permission\n")
+            append("${mark(TheftLocation.hasBackground(this@TheftActivity))}  Location \"hamesha\" (background)\n")
+            append("${mark(SimGuard.hasPerm(this@TheftActivity))}  SIM check permission\n")
+            append("${mark(TheftGuardService.alive)}  Remote guard service chal rahi hai")
         }
         val pend = TheftSender.pendingCount(this)
         tvStatus.text = "Status: " + TheftEngine.status(this).ifBlank { "—" } +
             (if (pend > 0) "\nPending alerts: $pend" else "")
         if (sw.isChecked != TheftEngine.enabled(this)) sw.isChecked = TheftEngine.enabled(this)
+        if (swRemote.isChecked != TheftEngine.remote(this)) swRemote.isChecked = TheftEngine.remote(this)
     }
 }

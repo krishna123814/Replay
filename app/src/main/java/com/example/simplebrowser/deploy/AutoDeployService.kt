@@ -16,6 +16,11 @@ import com.example.simplebrowser.R
 /** Download folder ko har ~3 sec dekhta hai (Auto Deploy server / GitHub me se koi ON ho tab). Notification ke saath zinda rehta hai. */
 class AutoDeployService : Service() {
 
+    companion object {
+        /** Service ka loop abhi zinda hai? (DeployWatchdog isse dekhta hai; process mar jaye to apne aap false) */
+        @Volatile var alive = false
+    }
+
     @Volatile private var running = false
     private var th: Thread? = null
 
@@ -46,6 +51,7 @@ class AutoDeployService : Service() {
         }
         if (!running) {
             running = true
+            alive = true
             th = Thread { loop() }.also {
                 it.isDaemon = true
                 it.start()
@@ -112,6 +118,7 @@ class AutoDeployService : Service() {
 
     override fun onDestroy() {
         running = false
+        alive = false
         th?.interrupt()
         super.onDestroy()
     }

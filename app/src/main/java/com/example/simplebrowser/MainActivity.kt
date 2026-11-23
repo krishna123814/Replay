@@ -98,6 +98,13 @@ class MainActivity : AppCompatActivity() {
         else "Band hai"
     }
 
+    // Battery optimization Lion ko background me maar deta hai -> Auto Deploy tabhi chalta tha jab app khola jaye
+    private fun askBatteryOnce() {
+        if (com.example.simplebrowser.deploy.DeployWatchdog.ignoringBattery(this)) return
+        Toast.makeText(this, "Battery me Lion ko \"Allow / Unrestricted\" karo, warna background me band ho jata hai", Toast.LENGTH_LONG).show()
+        try { startActivity(com.example.simplebrowser.deploy.DeployWatchdog.batteryIntent(this)) } catch (_: Throwable) { }
+    }
+
     private fun setupDeploy() {
         val sw = findViewById<SwitchCompat>(R.id.swDeploy)
         sw.isChecked = AutoDeploy.on(this)
@@ -108,6 +115,7 @@ class MainActivity : AppCompatActivity() {
                 AutoDeploy.askAllFiles(this)
             }
             AutoDeploy.setOn(this, on)
+            if (on) askBatteryOnce()
             // OFF par service khud band ho jati hai (agar GitHub wala bhi OFF ho)
             if (on) AutoDeploy.start(this)
             refreshDeployStatus()
@@ -135,6 +143,7 @@ class MainActivity : AppCompatActivity() {
                 AutoDeploy.askAllFiles(this)
             }
             GitDeploy.setOn(this, on)
+            if (on) askBatteryOnce()
             if (on) AutoDeploy.start(this)
             refreshGitStatus()
         }

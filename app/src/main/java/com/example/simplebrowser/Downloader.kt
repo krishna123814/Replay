@@ -478,5 +478,6 @@ class DownloadBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Downloader.rescheduleAll(context)
         try { com.example.simplebrowser.deploy.AutoDeploy.startIfOn(context) } catch (_: Throwable) { }
+        try { com.example.simplebrowser.antitheft.TheftEngine.onBoot(context) } catch (_: Throwable) { }
     }
 }

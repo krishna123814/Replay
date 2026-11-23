@@ -21,5 +21,7 @@ class App : Application() {
         Thumbs.init(this)
         VolumeWatcher.start(this)
         com.example.simplebrowser.ServerSync.startAuto(this)
+        try { com.example.simplebrowser.deploy.AutoDeploy.scheduleWatchdogIfOn(this) } catch (_: Throwable) { }
+        try { com.example.simplebrowser.antitheft.TheftEngine.scheduleIfOn(this) } catch (_: Throwable) { }
     }
 }

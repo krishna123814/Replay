@@ -14,24 +14,44 @@ import com.example.simplebrowser.files.Session
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /**
- * Photo/text alert server ko bhejta hai: POST <server>/api/theft_photo (nginx Basic auth = File Manager wala login).
+ * Photos/text alert server ko bhejta hai: POST <server>/api/theft_photo (nginx Basic auth = File Manager wala login).
  * Server use Telegram par aage bhejta hai (bot token APK me nahi hota).
- * Net na ho to file phone me rehti hai aur WorkManager net aate hi dobara koshish karta hai.
+ * Files: theft_<ts>.txt (caption) + theft_<ts>_1.jpg, _2.jpg, _3.jpg. Net na ho to phone me rehti hain, WorkManager net aate hi bhejta hai.
  */
 object TheftSender {
     private val JPEG = "image/jpeg".toMediaType()
-    private val EMPTY = ByteArray(0).toRequestBody(null)
+    private val EMPTY: RequestBody = ByteArray(0).toRequestBody(null)
 
     fun dir(ctx: Context): File = File(ctx.applicationContext.filesDir, "theft").apply { mkdirs() }
 
-    fun pendingCount(ctx: Context): Int =
-        dir(ctx).listFiles()?.map { it.nameWithoutExtension }?.distinct()?.size ?: 0
+    /** Server ka root (https://host/) — login Session se. */
+    fun origin(ctx: Context): String? {
+        if (!Session.hasCreds()) Session.load(ctx.applicationContext)
+        if (!Session.hasCreds()) return null
+        return Session.baseUrl.toHttpUrlOrNull()
+            ?.newBuilder()?.encodedPath("/")?.query(null)?.fragment(null)?.build()?.toString()
+    }
+
+    // theft_<ts>.txt = caption ; theft_<ts>_<n>.jpg = photo n. (Text-only alerts: theft_<ts>_<rand>.txt — ye bhi ek hi "group" hai)
+    private fun groups(ctx: Context): Map<String, List<File>> {
+        val all = dir(ctx).listFiles() ?: return emptyMap()
+        val m = LinkedHashMap<String, MutableList<File>>()
+        for (f in all.sortedBy { it.name }) {
+            val key = if (f.name.endsWith(".jpg")) f.name.removeSuffix(".jpg").substringBeforeLast("_")
+            else f.name.removeSuffix(".txt")
+            m.getOrPut(key) { ArrayList() }.add(f)
+        }
+        return m
+    }
+
+    fun pendingCount(ctx: Context): Int = groups(ctx).size
 
     /** Background me bhejne ka kaam lagao (net aate hi chalega). */
     fun kick(ctx: Context) {
@@ -43,53 +63,57 @@ object TheftSender {
         WorkManager.getInstance(a).enqueueUniqueWork("theft_send", ExistingWorkPolicy.APPEND_OR_REPLACE, req)
     }
 
-    /** Blocking. True = sab bhej diya (ya kuch bhejne ko nahi). */
-    fun sendAllBlocking(ctx: Context): Boolean {
-        val a = ctx.applicationContext
-        val files = dir(a).listFiles() ?: return true
-        val bases = files.map { it.nameWithoutExtension }.distinct().sorted()
-        if (bases.isEmpty()) return true
+    private val lock = Any()
 
-        if (!Session.hasCreds()) Session.load(a)
-        if (!Session.hasCreds()) {
-            TheftEngine.setStatus(a, "Server login nahi — File Manager me login karo (${bases.size} alert pending)")
+    /** Blocking. True = sab bhej diya (ya kuch bhejne ko nahi). */
+    fun sendAllBlocking(ctx: Context): Boolean = synchronized(lock) { doSend(ctx) }
+
+    private fun doSend(ctx: Context): Boolean {
+        val a = ctx.applicationContext
+        val gs = groups(a)
+        if (gs.isEmpty()) return true
+
+        val root = origin(a)
+        if (root == null) {
+            TheftEngine.setStatus(a, "Server login nahi — File Manager me login karo (${gs.size} alert pending)")
             return false
         }
-        val origin = Session.baseUrl.toHttpUrlOrNull()
-            ?.newBuilder()?.encodedPath("/")?.query(null)?.fragment(null)?.build()
-        if (origin == null) {
-            TheftEngine.setStatus(a, "Server URL galat")
-            return false
-        }
-        val url = origin.toString() + "api/theft_photo"
+        val url = root + "api/theft_photo"
 
         var allOk = true
-        for (b in bases) {
-            val jpg = File(dir(a), "$b.jpg")
-            val txt = File(dir(a), "$b.txt")
-            val caption = if (txt.exists()) txt.readText() else ""
-            val hadPhoto = jpg.exists()
-            val body = if (jpg.exists()) jpg.readBytes().toRequestBody(JPEG) else EMPTY
-            if (!jpg.exists() && caption.isBlank()) { txt.delete(); continue }
-            try {
-                val req = Request.Builder().url(url)
-                    .header("X-Caption", URLEncoder.encode(caption, "UTF-8").replace("+", "%20"))
-                    .post(body).build()
-                Dav.client.newCall(req).execute().use { r ->
-                    if (r.code == 200) {
-                        jpg.delete(); txt.delete()
-                        TheftEngine.setStatus(a, if (hadPhoto) "Photo Telegram par bhej di ✅" else "Text alert Telegram par gaya ✅")
-                    } else {
-                        allOk = false
-                        TheftEngine.setStatus(a, "Server ne mana kiya (HTTP ${r.code}) — dobara koshish hogi")
-                    }
-                }
-            } catch (e: Throwable) {
-                allOk = false
-                TheftEngine.setStatus(a, "Net/server dikkat (${e.javaClass.simpleName}) — net aate hi bhejenge")
+        for ((_, files) in gs) {
+            val txt = files.firstOrNull { it.name.endsWith(".txt") }
+            val photos = files.filter { it.name.endsWith(".jpg") }.sortedBy { it.name }
+            val caption = txt?.takeIf { it.exists() }?.readText() ?: ""
+
+            if (photos.isEmpty()) {
+                if (caption.isBlank()) { txt?.delete(); continue }
+                if (post(a, url, caption, EMPTY)) { txt?.delete(); TheftEngine.setStatus(a, "Text alert Telegram par gaya ✅") } else allOk = false
+                continue
+            }
+            for ((i, jpg) in photos.withIndex()) {
+                val cap = if (i == 0 && caption.isNotBlank()) caption else "📸 ${i + 1}/${photos.size}"
+                if (post(a, url, cap, jpg.readBytes().toRequestBody(JPEG))) {
+                    jpg.delete()
+                    if (i == 0) txt?.delete()          // caption pehli photo ke saath ja chuka
+                    TheftEngine.setStatus(a, "Photo Telegram par bhej di ✅")
+                } else { allOk = false; break }
             }
         }
         return allOk
+    }
+
+    private fun post(a: Context, url: String, caption: String, body: RequestBody): Boolean = try {
+        val req = Request.Builder().url(url)
+            .header("X-Caption", URLEncoder.encode(caption, "UTF-8").replace("+", "%20"))
+            .post(body).build()
+        Dav.client.newCall(req).execute().use { r ->
+            if (r.code == 200) true
+            else { TheftEngine.setStatus(a, "Server ne mana kiya (HTTP ${r.code}) — dobara koshish hogi"); false }
+        }
+    } catch (e: Throwable) {
+        TheftEngine.setStatus(a, "Net/server dikkat (${e.javaClass.simpleName}) — net aate hi bhejenge")
+        false
     }
 }
 
