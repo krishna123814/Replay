@@ -15,7 +15,6 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -42,12 +41,14 @@ import java.util.Locale
  * - Server par pehle `<naam>.part` ban kar jati hai, poori hone par purani file hata kar `<naam>` me rename hoti hai,
  *   taaki server ka watcher aadhi file na utha le.
  * - Login SFTP ka alag hai (host / user / password) — WebDAV ya File Manager login ki zaroorat nahi.
+ * - Download folder me hamesha sirf EK latest `server.zip` rehti hai: upload safal hone ke baad hi purani
+ *   `server*.zip` delete hoti hain aur nayi file ka naam `server.zip` kar diya jata hai.
+ *   Upload fail ho to phone par kuch delete / rename nahi hota.
  */
 object AutoDeploy {
     const val K_ON = "dep_on"
     const val K_SRC = "dep_src"          // phone ka folder (default Download)
     const val K_PAT = "dep_pat"          // phone me file naam pattern, jaise server*.zip
-    const val K_DEL = "dep_del"          // upload ke baad phone se file hatao
     const val K_LAST = "dep_last"        // last status text
     const val K_HOST = "dep_host"
     const val K_PORT = "dep_port"
@@ -71,7 +72,6 @@ object AutoDeploy {
         }
 
     fun pattern(ctx: Context): String = DlSettings.getStr(ctx, K_PAT, DEF_PAT).ifBlank { DEF_PAT }
-    fun delOn(ctx: Context): Boolean = DlSettings.getBool(ctx, K_DEL, true)
     private fun host(ctx: Context) = DlSettings.getStr(ctx, K_HOST, DEF_HOST).trim().ifBlank { DEF_HOST }
     private fun port(ctx: Context) = DlSettings.getStr(ctx, K_PORT, "22").trim().toIntOrNull() ?: 22
     private fun user(ctx: Context) = DlSettings.getStr(ctx, K_USER, "root").trim().ifBlank { "root" }
@@ -152,7 +152,8 @@ object AutoDeploy {
     }
 
     /**
-     * Ek round: Download folder dekho, jo nayi stable zip mile use upload karo.
+     * Ek round: Download folder me jitni `server*.zip` hain unme se sirf SABSE NAYI dekhi jati hai.
+     * Wo stable + sahi zip ho to upload hoti hai; safal hone ke baad baaki purani delete aur ye `server.zip` ban jati hai.
      * `seen` = file ka naam -> [size, modified, kitni baar same dikhi]. true = sab theek, false = upload fail (service 30s ruk kar dobara koshish karegi).
      */
     fun tick(ctx: Context, seen: HashMap<String, LongArray>): Boolean {
@@ -163,29 +164,64 @@ object AutoDeploy {
         val dir = File(srcDir(ctx))
         val rx = globRegex(pattern(ctx))
         val list = dir.listFiles { f -> f.isFile && rx.matches(f.name) } ?: return true
+        val f = list.maxByOrNull { it.lastModified() } ?: return true   // sabse nayi
+        val finalName = name(ctx)
+        val sig = f.name + "|" + f.length() + "|" + f.lastModified()
         val done = doneSet(ctx)
-        var allOk = true
-        for (f in list.sortedBy { it.lastModified() }) {
-            val sig = f.name + "|" + f.length() + "|" + f.lastModified()
-            if (done.contains(sig)) continue
-            val s = seen[f.name]
-            if (s == null || s[0] != f.length() || s[1] != f.lastModified()) {
-                seen[f.name] = longArrayOf(f.length(), f.lastModified(), 1L)
-                continue
-            }
-            s[2] = s[2] + 1
-            if (s[2] < 2L) continue                       // size 2 round (~3 sec) same ho tab hi
-            val bad = zipProblem(f)
-            if (bad != null) {
-                if (s[2] == 8L) {                         // ~20 sec baad bhi kharab to bata do
-                    setLast(ctx, "⚠️ ${f.name}: $bad")
-                    result(ctx, "⚠️ ${f.name} upload nahi hui", bad)
-                }
-                continue
-            }
-            if (upload(ctx, f, sig)) seen.remove(f.name) else allOk = false
+
+        // Ye file pehle hi upload ho chuki hai: bas safai (purani hatao, naam theek karo) agar baaki ho.
+        if (done.contains(sig)) {
+            if (list.size > 1 || f.name != finalName) tidy(ctx, f, list, finalName)
+            return true
         }
-        return allOk
+
+        val s = seen[f.name]
+        if (s == null || s[0] != f.length() || s[1] != f.lastModified()) {
+            seen[f.name] = longArrayOf(f.length(), f.lastModified(), 1L)
+            return true
+        }
+        s[2] = s[2] + 1
+        if (s[2] < 2L) return true                    // size 2 round (~3 sec) same ho tab hi
+        val bad = zipProblem(f)
+        if (bad != null) {
+            if (s[2] == 8L) {                         // ~20 sec baad bhi kharab to bata do
+                setLast(ctx, "⚠️ ${f.name}: $bad")
+                result(ctx, "⚠️ ${f.name} upload nahi hui", bad)
+            }
+            return true
+        }
+        val ok = upload(ctx, f, sig, list, finalName)
+        if (ok) seen.clear()
+        return ok
+    }
+
+    /**
+     * Upload ke baad: `keep` ke alawa baaki sab matching purani files delete, phir `keep` ka naam `finalName` karo.
+     * Naam badalne ke baad (naam|size|time) badal jata hai, isliye naya signature bhi "done" me daalte hain.
+     * Return: chhota text jo status me dikhta hai.
+     */
+    private fun tidy(ctx: Context, keep: File, all: Array<File>, finalName: String): String {
+        var removed = 0
+        for (o in all) {
+            if (o.absolutePath == keep.absolutePath) continue
+            if (o.delete()) removed++
+        }
+        val parts = ArrayList<String>()
+        if (removed > 0) parts.add("$removed purani hata di")
+        if (keep.name != finalName) {
+            val target = File(keep.parentFile, finalName)
+            val len = keep.length()
+            val mod = keep.lastModified()
+            if (target.exists() && !target.delete()) {
+                parts.add("naam badal nahi payi")
+            } else if (keep.renameTo(target)) {
+                markDone(ctx, finalName + "|" + len + "|" + mod)
+                parts.add("naam $finalName kiya")
+            } else {
+                parts.add("naam badal nahi payi")
+            }
+        }
+        return parts.joinToString(", ")
     }
 
     /** SFTP connect (password se). Host key check band (apna hi server hai). Caller ko disconnect karna hai. */
@@ -213,7 +249,7 @@ object AutoDeploy {
         }
     }
 
-    private fun upload(ctx: Context, f: File, sig: String): Boolean {
+    private fun upload(ctx: Context, f: File, sig: String, all: Array<File>, finalName: String): Boolean {
         val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
         val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "lion:deploy")
         wl.acquire(10L * 60 * 1000)
@@ -235,10 +271,8 @@ object AutoDeploy {
             if (exists) ch.rm(remote)
             ch.rename(part, remote)
             markDone(ctx, sig)
-            var extra = ""
-            if (delOn(ctx)) {
-                extra = if (f.delete()) " (phone se hata di)" else " (phone se hata nahi payi)"
-            }
+            val note = tidy(ctx, f, all, finalName)
+            val extra = if (note.isEmpty()) "" else " ($note)"
             setLast(ctx, "✅ ${f.name} → ${remoteDir.trimEnd('/')}/$remote$extra")
             result(ctx, "✅ Server par pahunch gayi", "${f.name} → $remoteDir/$remote")
             return true
@@ -317,11 +351,6 @@ object AutoDeploy {
         val eDir = field(dir(act))
         label("Server par file ka naam (purani same naam wali replace hogi)")
         val eName = field(name(act))
-        val cDel = CheckBox(act)
-        cDel.text = "Upload ke baad phone se file hata do"
-        cDel.isChecked = delOn(act)
-        box.addView(cDel)
-
         if (!hasAllFiles()) {
             val b = Button(act)
             b.text = "📂 All files access do"
@@ -379,7 +408,6 @@ object AutoDeploy {
                 if (!d.startsWith("/")) d = "/$d"
                 DlSettings.setStr(act, K_DIR, d)
                 DlSettings.setStr(act, K_NAME, eName.text.toString().trim().ifBlank { DEF_NAME })
-                DlSettings.setBool(act, K_DEL, cDel.isChecked)
                 Toast.makeText(act, "Save ho gaya", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Band", null)
