@@ -20,7 +20,7 @@ android {
 
         val vcProp = (project.findProperty("vc") as String?)?.toIntOrNull()
         versionCode = vcProp ?: (System.currentTimeMillis() / 60000L).toInt()
-        versionName = "4.4"
+        versionName = "4.5"
 
         // GitHub Actions -PgithubRepo=<owner/repo> deta hai; na mile (local build) to ye default repo
         val repoProp = (project.findProperty("githubRepo") as String?)
@@ -81,6 +81,9 @@ dependencies {
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+
+    // Anti-theft: net na ho to photo/alert net aate hi dobara bhejne ke liye
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("com.google.guava:guava:33.2.1-android")
     val media3 = "1.4.1"
     implementation("androidx.media3:media3-exoplayer:$media3")

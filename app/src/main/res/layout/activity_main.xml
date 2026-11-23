@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fitsSystemWindows="true"
+    android:fillViewport="true"
+    android:fitsSystemWindows="true">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:gravity="center"
     android:orientation="vertical"
     android:padding="24dp">
@@ -187,6 +192,13 @@
         android:textSize="11sp" />
 
     <Button
+        android:id="@+id/btnTheft"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="🛡️  Anti-theft (galat password = photo)" />
+
+    <Button
         android:id="@+id/btnStopFloating"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -200,3 +212,4 @@
         android:text="Floating ke liye &quot;Display over other apps&quot; permission chahiye"
         android:textSize="12sp" />
 </LinearLayout>
+</ScrollView>

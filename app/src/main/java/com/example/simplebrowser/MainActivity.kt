@@ -70,6 +70,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnFamily).setOnClickListener {
             startActivity(Intent(this, com.example.simplebrowser.family.FamilyActivity::class.java))
         }
+        findViewById<Button>(R.id.btnTheft).setOnClickListener {
+            startActivity(Intent(this, com.example.simplebrowser.antitheft.TheftActivity::class.java))
+        }
         setupDeploy()
         setupGit()
         findViewById<Button>(R.id.btnFloating).setOnClickListener { runFloating { startFloating() } }

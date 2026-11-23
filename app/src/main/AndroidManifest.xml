@@ -14,6 +14,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- 🛡️ Anti-theft: front camera photo + battery se band na ho -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
@@ -175,6 +182,27 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="auto_deploy_zip_upload" />
         </service>
+
+        <!-- 🛡️ Anti-theft -->
+        <activity
+            android:name=".antitheft.TheftActivity"
+            android:exported="false"
+            android:theme="@style/DarkTheme" />
+        <service
+            android:name=".antitheft.TheftCamService"
+            android:exported="false"
+            android:foregroundServiceType="camera" />
+        <receiver
+            android:name=".antitheft.TheftAdmin"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/theft_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Scheduled downloads: alarm bajne par + reboot/app-update ke baad dobara set -->
         <receiver
