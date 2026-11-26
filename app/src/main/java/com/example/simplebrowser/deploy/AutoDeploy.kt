@@ -45,8 +45,8 @@ import java.util.Locale
  *   (AI ne zip ka naam kuch bhi diya ho, farak nahi). Same content dobara aaye to wahi purana number milta hai.
  * - Download folder me sabse nayi `server<N>.zip` rehti hai (yahin se AI ko do). Purani saari versions
  *   `Download/ServerVersions/` me bachi rehti hain — kuch delete nahi hota (sirf bilkul same content ki duplicate hatti hai).
- * - Server par chalne wali file `server.zip` hi rehti hai (watcher ke liye), aur uski version copy
- *   server ke `versions/` folder me `server<N>.zip` naam se rakhi jati hai.
+ * - Server par bhi `server<N>.zip` naam se jati hai. Server ka watcher sirf wahi zip leta hai jiska N
+ *   `/root/last_version` se bada ho, aur li hui zip server ke `versions/` folder me bachi rehti hai.
  *   Upload fail ho to phone par kuch delete / rename nahi hota.
  */
 object AutoDeploy {
@@ -345,8 +345,10 @@ object AutoDeploy {
                 return false
             }
             val remoteDir = dir(ctx)
-            val remote = name(ctx)
-            setLast(ctx, "⬆ ${f.name} upload ho rahi hai…")
+            // Server par bhi version naam se jati hai (server<N>.zip): watcher sirf last se bada number leta hai.
+            val vname = versionName(ctx, f, finalName)
+            val remote = vname
+            setLast(ctx, "⬆ ${f.name} → $vname upload ho rahi hai…")
             c = connect(host(ctx), port(ctx), user(ctx), pass(ctx))
             val ch = c.sftp
             ch.cd(remoteDir)
@@ -356,13 +358,6 @@ object AutoDeploy {
             if (exists) ch.rm(remote)
             ch.rename(part, remote)
             markDone(ctx, sig)
-            // Server par version copy: <dir>/versions/server<N>.zip (fail ho to deploy fail nahi maanna)
-            val vname = versionName(ctx, f, finalName)
-            try {
-                try { ch.cd("versions") } catch (e: SftpException) { ch.mkdir("versions"); ch.cd("versions") }
-                ch.put(f.absolutePath, vname, ChannelSftp.OVERWRITE)
-            } catch (_: Exception) {
-            }
             val note = tidy(ctx, f, all, finalName)
             val extra = if (note.isEmpty()) "" else " ($note)"
             setLast(ctx, "✅ $vname (${f.name}) → ${remoteDir.trimEnd('/')}/$remote$extra")
