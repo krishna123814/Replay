@@ -41,7 +41,7 @@ object RoutineNet {
         return u.newBuilder().encodedPath("/").query(null).fragment(null).build().toString()
     }
 
-    private val allowedGet = setOf("dav/app_state/routine.json", "dav/app_state/accounts.json", "dav/app_state/incomesrc.json", "dav/app_state/family.json")
+    private val allowedGet = setOf("dav/app_state/routine.json", "dav/app_state/accounts.json", "dav/app_state/incomesrc.json", "dav/app_state/family.json", "dav/app_state/krishna.json")
 
     /** @return (HTTP code, body) */
     fun http(ctx: Context, method: String, path: String, body: String): Pair<Int, String> {

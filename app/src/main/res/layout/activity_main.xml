@@ -144,6 +144,14 @@
         android:layout_marginBottom="4dp"
         android:text="🌳  Family Tree" />
 
+    <Button
+        style="@style/CompactButton"
+        android:id="@+id/btnKrishna"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="4dp"
+        android:text="🦚  Krishna" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

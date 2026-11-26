@@ -96,6 +96,12 @@
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- 🦚 Krishna -->
+        <activity
+            android:name=".krishna.KrishnaActivity"
+            android:exported="false"
+            android:theme="@style/DarkTheme" />
+
         <!-- 🌳 Family Tree -->
         <activity
             android:name=".family.FamilyActivity"
