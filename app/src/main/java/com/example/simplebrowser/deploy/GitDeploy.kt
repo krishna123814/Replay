@@ -40,8 +40,12 @@ import java.util.Locale
  * - Zip jaisi hai waisi hi repo me ek file ban kar jati hai (khol kar commit nahi hoti).
  * - Chrome se `SimpleBrowser(1).zip` jaise naam se aaye to bhi chalega.
  * - File poori download hone ke baad hi uthti hai (size 2 baar same + zip khulti ho).
- * - Upload safal hone ke baad hi purani `SimpleBrowser*.zip` delete hoti hain aur nayi ka naam
- *   repo wali file ke naam (default `SimpleBrowser.zip`) kar diya jata hai. Fail ho to kuch delete / rename nahi hota.
+ * - VERSION NAAM: zip ke andar kuch nahi badalta. App khud naam deta hai: SimpleBrowser1.zip, SimpleBrowser2.zip...
+ *   (AI ne zip ka naam kuch bhi diya ho, farak nahi). Same content dobara aaye to wahi purana number milta hai.
+ * - Download me sabse nayi `SimpleBrowser<N>.zip` rehti hai; purani saari versions `Download/SimpleBrowserVersions/`
+ *   me bachi rehti hain (kuch delete nahi hota, sirf bilkul same content ki duplicate hatti hai).
+ * - GitHub par file ka naam wahi rehta hai (default `SimpleBrowser.zip`); commit message me version likha hota hai.
+ *   Fail ho to kuch delete / rename nahi hota.
  * - Login GitHub token se (fine-grained token, sirf usi repo par "Contents: Read and write").
  */
 object GitDeploy {
@@ -54,6 +58,8 @@ object GitDeploy {
     const val K_PATH = "gh_path"          // repo ke andar file ka path
     const val K_TOKEN = "gh_token"
     private const val K_DONE = "gh_done"
+    private const val K_VER = "gh_ver"              // version list: "N|sha256" har line
+    const val VER_DIR = "SimpleBrowserVersions"
     private const val K_WSINCE = "gh_w_since"   // build-watch kab shuru hua (ms); khali = watch band
     private const val K_WBASE = "gh_w_base"     // upload ke waqt latest release ka id (naya wahi jo isse bada ho)
     private const val WATCH_MAX_MS = 20L * 60 * 1000   // itna intezaar, phir "release nahi mila"
@@ -185,7 +191,8 @@ object GitDeploy {
 
         // Ye file pehle hi upload ho chuki hai: bas safai (purani hatao, naam theek karo) agar baaki ho.
         if (done.contains(sig)) {
-            if (list.size > 1 || f.name != fin) tidy(ctx, f, list, fin)
+            val verRx = Regex("^" + Regex.escape(stem(fin)) + "\\d+\\." + Regex.escape(ext(fin)) + "$", RegexOption.IGNORE_CASE)
+            if (list.size > 1 || !verRx.matches(f.name)) tidy(ctx, f, list, fin)
             return true
         }
 
@@ -209,24 +216,98 @@ object GitDeploy {
         return ok
     }
 
-    /** Upload ke baad: `keep` ke alawa baaki matching purani files delete, phir `keep` ka naam `fin` karo. */
+    // ───────────────────────── version naam ─────────────────────────
+
+    private fun stem(fin: String): String = fin.substringBeforeLast('.', fin)
+    private fun ext(fin: String): String = fin.substringAfterLast('.', "zip")
+
+    private fun sha256(f: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { ins ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = ins.read(buf)
+                if (n <= 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun verList(ctx: Context): MutableList<Pair<Int, String>> =
+        DlSettings.getStr(ctx, K_VER, "").split('\n').mapNotNull {
+            val p = it.split('|')
+            val n = p.getOrNull(0)?.toIntOrNull()
+            val h = p.getOrNull(1)
+            if (n != null && !h.isNullOrEmpty()) Pair(n, h) else null
+        }.toMutableList()
+
+    /**
+     * SimpleBrowserVersions me pehle se bani sabse badi version number (settings reset ho gayi ho tab bhi).
+     * Download folder nahi dekhte: wahan AI ka diya naam number ko galat ghuma deta.
+     */
+    private fun maxVersionOnDisk(ctx: Context, fin: String): Int {
+        val rx = Regex("^" + Regex.escape(stem(fin)) + "(\\d+)\\." + Regex.escape(ext(fin)) + "$", RegexOption.IGNORE_CASE)
+        var m = 0
+        File(File(srcDir(ctx)), VER_DIR).listFiles()?.forEach { f ->
+            rx.find(f.name)?.groupValues?.get(1)?.toIntOrNull()?.let { if (it > m) m = it }
+        }
+        return m
+    }
+
+    /** Is file ka version number: same content pehle aaya ho to wahi number, nahi to agla naya number. */
+    @Synchronized
+    private fun versionOf(ctx: Context, f: File, fin: String): Int {
+        val h = sha256(f)
+        val l = verList(ctx)
+        l.firstOrNull { it.second == h }?.let { return it.first }
+        val n = maxOf(l.maxOfOrNull { it.first } ?: 0, maxVersionOnDisk(ctx, fin)) + 1
+        l.add(Pair(n, h))
+        DlSettings.setStr(ctx, K_VER, l.joinToString("\n") { it.first.toString() + "|" + it.second })
+        return n
+    }
+
+    private fun versionName(ctx: Context, f: File, fin: String): String =
+        stem(fin) + versionOf(ctx, f, fin) + "." + ext(fin)
+
+    /**
+     * Upload ke baad: nayi `keep` ka naam `SimpleBrowser<N>.zip` kar do (Download me yahi latest rehti hai),
+     * uski ek copy `SimpleBrowserVersions/` me rakho, aur baaki purani matching files wahin bhej do.
+     * Kuch delete nahi hota — sirf wo file jiska bilkul same content pehle se SimpleBrowserVersions me ho.
+     */
     private fun tidy(ctx: Context, keep: File, all: Array<File>, fin: String): String {
-        var removed = 0
+        val vdir = File(keep.parentFile, VER_DIR)
+        vdir.mkdirs()
+        val parts = ArrayList<String>()
+        var moved = 0
         for (o in all) {
             if (o.absolutePath == keep.absolutePath) continue
-            if (o.delete()) removed++
+            try {
+                val dest = File(vdir, versionName(ctx, o, fin))
+                if (dest.exists()) {
+                    o.delete()                       // same content pehle se bachi hai
+                } else if (o.renameTo(dest) || (runCatching { o.copyTo(dest, false); o.delete() }.isSuccess)) {
+                    moved++
+                }
+            } catch (_: Throwable) {
+            }
         }
-        val parts = ArrayList<String>()
-        if (removed > 0) parts.add("$removed purani hata di")
-        if (keep.name != fin) {
-            val target = File(keep.parentFile, fin)
+        if (moved > 0) parts.add("$moved purani SimpleBrowserVersions me")
+        val vname = versionName(ctx, keep, fin)
+        try {
+            val cp = File(vdir, vname)
+            if (!cp.exists()) keep.copyTo(cp, false)
+        } catch (_: Throwable) {
+        }
+        if (keep.name != vname) {
+            val target = File(keep.parentFile, vname)
             val len = keep.length()
             val mod = keep.lastModified()
             if (target.exists() && !target.delete()) {
                 parts.add("naam badal nahi payi")
             } else if (keep.renameTo(target)) {
-                markDone(ctx, fin + "|" + len + "|" + mod)
-                parts.add("naam $fin kiya")
+                markDone(ctx, vname + "|" + len + "|" + mod)
+                parts.add("naam $vname kiya")
             } else {
                 parts.add("naam badal nahi payi")
             }
@@ -251,7 +332,7 @@ object GitDeploy {
             }
             val path = path(ctx)
             val br = branch(ctx)
-            setLast(ctx, "⬆ ${f.name} GitHub par ja rahi hai…")
+            setLast(ctx, "⬆ ${f.name} → ${versionName(ctx, f, fin)} GitHub par ja rahi hai…")
 
             val base = contentsUrl(repo, path)
             val getUrl = if (br.isEmpty()) base else base + "?ref=" + enc(br)
@@ -271,8 +352,10 @@ object GitDeploy {
             }
 
             val stamp = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US).format(Date())
+            val vname = versionName(ctx, f, fin)
+            val vnum = vname.removePrefix(stem(fin)).removeSuffix("." + ext(fin))
             val j = JSONObject()
-            j.put("message", "Update $fin ($stamp)")
+            j.put("message", "Update $fin (v$vnum, $stamp)")
             j.put("content", Base64.encodeToString(f.readBytes(), Base64.NO_WRAP))
             if (br.isNotEmpty()) j.put("branch", br)
             if (sha != null) j.put("sha", sha)
@@ -287,8 +370,8 @@ object GitDeploy {
             val note = tidy(ctx, f, all, fin)
             val extra = if (note.isEmpty()) "" else " ($note)"
             val where = "$repo/$path" + (if (br.isEmpty()) "" else " [$br]")
-            setLast(ctx, "✅ ${f.name} → $where$extra — ⏳ build ka intezaar")
-            result(ctx, "✅ GitHub par pahunch gayi", "${f.name} → $where")
+            setLast(ctx, "✅ $vname (${f.name}) → $where$extra — ⏳ build ka intezaar")
+            result(ctx, "✅ $vname GitHub par pahunch gayi", "${f.name} → $where  (version: $vname)")
             return true
         } catch (e: Exception) {
             val m = (e.message ?: e.javaClass.simpleName)
