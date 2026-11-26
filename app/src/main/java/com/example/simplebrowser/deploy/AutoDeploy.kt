@@ -234,12 +234,15 @@ object AutoDeploy {
             if (n != null && !h.isNullOrEmpty()) Pair(n, h) else null
         }.toMutableList()
 
-    /** Download ya ServerVersions me pehle se bani sabse badi version number (settings reset ho gayi ho tab bhi). */
+    /**
+     * ServerVersions me pehle se bani sabse badi version number (settings reset ho gayi ho tab bhi).
+     * Download folder nahi dekhte: wahan AI ka diya naam (jaise server25.zip) number ko galat ghuma deta.
+     */
     private fun maxVersionOnDisk(ctx: Context, finalName: String): Int {
         val rx = Regex("^" + Regex.escape(stem(finalName)) + "(\\d+)\\." + Regex.escape(ext(finalName)) + "$", RegexOption.IGNORE_CASE)
         val src = File(srcDir(ctx))
         var m = 0
-        for (d in listOf(src, File(src, VER_DIR))) {
+        for (d in listOf(File(src, VER_DIR))) {
             d.listFiles()?.forEach { f -> rx.find(f.name)?.groupValues?.get(1)?.toIntOrNull()?.let { if (it > m) m = it } }
         }
         return m
