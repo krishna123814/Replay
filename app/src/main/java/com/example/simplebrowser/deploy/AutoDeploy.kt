@@ -41,8 +41,12 @@ import java.util.Locale
  * - Server par pehle `<naam>.part` ban kar jati hai, poori hone par purani file hata kar `<naam>` me rename hoti hai,
  *   taaki server ka watcher aadhi file na utha le.
  * - Login SFTP ka alag hai (host / user / password) — WebDAV ya File Manager login ki zaroorat nahi.
- * - Download folder me hamesha sirf EK latest `server.zip` rehti hai: upload safal hone ke baad hi purani
- *   `server*.zip` delete hoti hain aur nayi file ka naam `server.zip` kar diya jata hai.
+ * - VERSION NAAM: zip ke andar kuch nahi badalta. App khud naam deta hai: server1.zip, server2.zip, server3.zip...
+ *   (AI ne zip ka naam kuch bhi diya ho, farak nahi). Same content dobara aaye to wahi purana number milta hai.
+ * - Download folder me sabse nayi `server<N>.zip` rehti hai (yahin se AI ko do). Purani saari versions
+ *   `Download/ServerVersions/` me bachi rehti hain — kuch delete nahi hota (sirf bilkul same content ki duplicate hatti hai).
+ * - Server par chalne wali file `server.zip` hi rehti hai (watcher ke liye), aur uski version copy
+ *   server ke `versions/` folder me `server<N>.zip` naam se rakhi jati hai.
  *   Upload fail ho to phone par kuch delete / rename nahi hota.
  */
 object AutoDeploy {
@@ -57,6 +61,8 @@ object AutoDeploy {
     const val K_DIR = "dep_dir"          // server par folder
     const val K_NAME = "dep_name"        // server par file ka naam
     private const val K_DONE = "dep_done"
+    private const val K_VER = "dep_ver"          // version list: "N|sha256" har line
+    const val VER_DIR = "ServerVersions"
 
     const val DEF_PAT = "server*.zip"
     const val DEF_HOST = "147.135.130.116"
@@ -177,7 +183,8 @@ object AutoDeploy {
 
         // Ye file pehle hi upload ho chuki hai: bas safai (purani hatao, naam theek karo) agar baaki ho.
         if (done.contains(sig)) {
-            if (list.size > 1 || f.name != finalName) tidy(ctx, f, list, finalName)
+            val verRx = Regex("^" + Regex.escape(stem(finalName)) + "\\d+\\." + Regex.escape(ext(finalName)) + "$", RegexOption.IGNORE_CASE)
+            if (list.size > 1 || !verRx.matches(f.name)) tidy(ctx, f, list, finalName)
             return true
         }
 
@@ -201,28 +208,100 @@ object AutoDeploy {
         return ok
     }
 
+    // ───────────────────────── version naam ─────────────────────────
+
+    private fun stem(finalName: String): String = finalName.substringBeforeLast('.', finalName)
+    private fun ext(finalName: String): String = finalName.substringAfterLast('.', "zip")
+
+    private fun sha256(f: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        f.inputStream().use { ins ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = ins.read(buf)
+                if (n <= 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun verList(ctx: Context): MutableList<Pair<Int, String>> =
+        DlSettings.getStr(ctx, K_VER, "").split('\n').mapNotNull {
+            val p = it.split('|')
+            val n = p.getOrNull(0)?.toIntOrNull()
+            val h = p.getOrNull(1)
+            if (n != null && !h.isNullOrEmpty()) Pair(n, h) else null
+        }.toMutableList()
+
+    /** Download ya ServerVersions me pehle se bani sabse badi version number (settings reset ho gayi ho tab bhi). */
+    private fun maxVersionOnDisk(ctx: Context, finalName: String): Int {
+        val rx = Regex("^" + Regex.escape(stem(finalName)) + "(\\d+)\\." + Regex.escape(ext(finalName)) + "$", RegexOption.IGNORE_CASE)
+        val src = File(srcDir(ctx))
+        var m = 0
+        for (d in listOf(src, File(src, VER_DIR))) {
+            d.listFiles()?.forEach { f -> rx.find(f.name)?.groupValues?.get(1)?.toIntOrNull()?.let { if (it > m) m = it } }
+        }
+        return m
+    }
+
+    /** Is file ka version number: same content pehle aaya ho to wahi number, nahi to agla naya number. */
+    @Synchronized
+    private fun versionOf(ctx: Context, f: File, finalName: String): Int {
+        val h = sha256(f)
+        val l = verList(ctx)
+        l.firstOrNull { it.second == h }?.let { return it.first }
+        val n = maxOf(l.maxOfOrNull { it.first } ?: 0, maxVersionOnDisk(ctx, finalName)) + 1
+        l.add(Pair(n, h))
+        DlSettings.setStr(ctx, K_VER, l.joinToString("\n") { it.first.toString() + "|" + it.second })
+        return n
+    }
+
+    private fun versionName(ctx: Context, f: File, finalName: String): String =
+        stem(finalName) + versionOf(ctx, f, finalName) + "." + ext(finalName)
+
     /**
-     * Upload ke baad: `keep` ke alawa baaki sab matching purani files delete, phir `keep` ka naam `finalName` karo.
+     * Upload ke baad: nayi `keep` ka naam `server<N>.zip` kar do (Download me yahi latest rehti hai),
+     * uski ek copy `ServerVersions/` me rakho, aur baaki purani matching files `ServerVersions/` me bhej do.
+     * Kuch delete nahi hota — sirf wo file jiska bilkul same content pehle se ServerVersions me ho.
      * Naam badalne ke baad (naam|size|time) badal jata hai, isliye naya signature bhi "done" me daalte hain.
      * Return: chhota text jo status me dikhta hai.
      */
     private fun tidy(ctx: Context, keep: File, all: Array<File>, finalName: String): String {
-        var removed = 0
+        val vdir = File(keep.parentFile, VER_DIR)
+        vdir.mkdirs()
+        val parts = ArrayList<String>()
+        var moved = 0
+        // 1) baaki purani files -> ServerVersions
         for (o in all) {
             if (o.absolutePath == keep.absolutePath) continue
-            if (o.delete()) removed++
+            try {
+                val dest = File(vdir, versionName(ctx, o, finalName))
+                if (dest.exists()) {
+                    o.delete()                       // same content pehle se bachi hai
+                } else if (o.renameTo(dest) || (runCatching { o.copyTo(dest, false); o.delete() }.isSuccess)) {
+                    moved++
+                }
+            } catch (_: Throwable) {
+            }
         }
-        val parts = ArrayList<String>()
-        if (removed > 0) parts.add("$removed purani hata di")
-        if (keep.name != finalName) {
-            val target = File(keep.parentFile, finalName)
+        if (moved > 0) parts.add("$moved purani ServerVersions me")
+        // 2) nayi ka version naam + ServerVersions me copy
+        val vname = versionName(ctx, keep, finalName)
+        try {
+            val cp = File(vdir, vname)
+            if (!cp.exists()) keep.copyTo(cp, false)
+        } catch (_: Throwable) {
+        }
+        if (keep.name != vname) {
+            val target = File(keep.parentFile, vname)
             val len = keep.length()
             val mod = keep.lastModified()
             if (target.exists() && !target.delete()) {
                 parts.add("naam badal nahi payi")
             } else if (keep.renameTo(target)) {
-                markDone(ctx, finalName + "|" + len + "|" + mod)
-                parts.add("naam $finalName kiya")
+                markDone(ctx, vname + "|" + len + "|" + mod)
+                parts.add("naam $vname kiya")
             } else {
                 parts.add("naam badal nahi payi")
             }
@@ -277,10 +356,17 @@ object AutoDeploy {
             if (exists) ch.rm(remote)
             ch.rename(part, remote)
             markDone(ctx, sig)
+            // Server par version copy: <dir>/versions/server<N>.zip (fail ho to deploy fail nahi maanna)
+            val vname = versionName(ctx, f, finalName)
+            try {
+                try { ch.cd("versions") } catch (e: SftpException) { ch.mkdir("versions"); ch.cd("versions") }
+                ch.put(f.absolutePath, vname, ChannelSftp.OVERWRITE)
+            } catch (_: Exception) {
+            }
             val note = tidy(ctx, f, all, finalName)
             val extra = if (note.isEmpty()) "" else " ($note)"
-            setLast(ctx, "✅ ${f.name} → ${remoteDir.trimEnd('/')}/$remote$extra")
-            result(ctx, "✅ Server par pahunch gayi", "${f.name} → $remoteDir/$remote")
+            setLast(ctx, "✅ $vname (${f.name}) → ${remoteDir.trimEnd('/')}/$remote$extra")
+            result(ctx, "✅ $vname server par pahunch gayi", "${f.name} → $remoteDir/$remote  (version: $vname)")
             return true
         } catch (e: Exception) {
             val m = (e.message ?: e.javaClass.simpleName)
