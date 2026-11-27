@@ -25,7 +25,8 @@ import java.io.IOException
 
 /**
  * 🦚 Krishna — apni heading (jaise Practice and Run, Money Manager) + har heading me Problem aur Solution.
- * Data: SharedPreferences "krishna" -> "data" = {"v":1,"h":[{"id","t","e":[{"id","p","s"}]}],"t":<ms>}
+ * Data: SharedPreferences "krishna" -> "data" = {"v":1,"c":[{"id","t"}],"h":[{"id","t","cid","r":[{"id","x"}],"e":[{"id","p","sl":[{"id","x"}]}]}],"t":<ms>}
+ * Level: Category (c) -> Heading (h, cid = category id; cid khali = "Bina category") -> Rules (r) + Problem/Solution (e).
  * Sync (server ke 🦚 panel ke saath): GET dav/app_state/krishna.json, save = POST api/local_state_save {kind:"krishna"}
  * (RoutineNet, File Manager wala login). Whole-blob latest-wins: jiska "t" bada, wahi jeeta.
  */
@@ -43,7 +44,8 @@ class KrishnaActivity : AppCompatActivity() {
     private lateinit var editBtn: TextView
     private lateinit var syncTv: TextView
     private lateinit var listBox: LinearLayout
-    private var cur: String? = null
+    private var cur: String? = null        // khuli heading ki id
+    private var curCat: String? = null     // khuli category: null = sabse upar, "" = Bina category, warna category id
 
     private val ui = Handler(Looper.getMainLooper())
     private var syncing = false
@@ -68,6 +70,7 @@ class KrishnaActivity : AppCompatActivity() {
 
     /** Purana format {p, s:"text"} -> naya {p, sl:[{id,x}]} (ek problem ke multiple solutions). */
     private fun norm(o: JSONObject) {
+        if (o.optJSONArray("c") == null) o.put("c", JSONArray())
         val hs = o.optJSONArray("h") ?: return
         for (i in 0 until hs.length()) {
             val es = hs.getJSONObject(i).optJSONArray("e") ?: continue
@@ -186,6 +189,26 @@ class KrishnaActivity : AppCompatActivity() {
         return null
     }
 
+    private fun cats(o: JSONObject): JSONArray = o.optJSONArray("c") ?: JSONArray().also { o.put("c", it) }
+
+    private fun findCat(o: JSONObject, id: String?): JSONObject? {
+        val a = cats(o)
+        for (i in 0 until a.length()) if (a.getJSONObject(i).optString("id") == id) return a.getJSONObject(i)
+        return null
+    }
+
+    /** catId "" = Bina category (cid khali, ya wo category ab nahi hai). */
+    private fun headsOf(o: JSONObject, catId: String): List<JSONObject> {
+        val a = o.getJSONArray("h"); val out = ArrayList<JSONObject>()
+        for (i in 0 until a.length()) {
+            val x = a.getJSONObject(i)
+            val cid = x.optString("cid")
+            val inCat = if (catId.isEmpty()) (cid.isEmpty() || findCat(o, cid) == null) else cid == catId
+            if (inCat) out.add(x)
+        }
+        return out
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val root = FrameLayout(this).apply { setBackgroundColor(BG); fitsSystemWindows = true }
@@ -205,7 +228,7 @@ class KrishnaActivity : AppCompatActivity() {
             maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(dp(6), 0, dp(6), 0)
         }
-        editBtn = hdrBtn("✏️") { editHeading(cur) }
+        editBtn = hdrBtn("✏️") { if (cur != null) editHeading(cur) else editCategory(curCat) }
         syncTv = TextView(this).apply {
             textSize = 12f; setPadding(dp(8), dp(4), dp(8), dp(4))
             setOnClickListener { sync(true) }
@@ -225,7 +248,7 @@ class KrishnaActivity : AppCompatActivity() {
             text = "+"; textSize = 30f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ACC) }
             elevation = dp(6).toFloat()
-            setOnClickListener { if (cur == null) editHeading(null) else editProblem(null) }
+            setOnClickListener { if (cur != null) editProblem(null) else if (curCat != null) editHeading(null) else editCategory(null) }
         }
         root.addView(fab, FrameLayout.LayoutParams(dp(54), dp(54), Gravity.END or Gravity.BOTTOM).apply {
             setMargins(0, 0, dp(18), dp(18))
@@ -234,7 +257,7 @@ class KrishnaActivity : AppCompatActivity() {
         setContentView(root)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (cur != null) goBack() else finish()
+                if (cur != null || curCat != null) goBack() else finish()
             }
         })
         render()
@@ -248,40 +271,84 @@ class KrishnaActivity : AppCompatActivity() {
         setOnClickListener { click() }
     }
 
-    private fun goBack() { cur = null; render() }
+    private fun goBack() { if (cur != null) cur = null else curCat = null; render() }
+
+    private fun addRow(title: String, count: Int, click: () -> Unit) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            setOnClickListener { click() }
+        }
+        row.addView(TextView(this).apply {
+            text = title; setTextColor(Color.WHITE); textSize = 15f
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        row.addView(TextView(this).apply {
+            text = count.toString(); setTextColor(MUT); textSize = 12f
+        })
+        listBox.addView(row)
+        listBox.addView(View(this).apply { setBackgroundColor(PANEL) }, LinearLayout.LayoutParams(-1, dp(1)))
+    }
 
     private fun render() {
         val d = load()
         val h = if (cur != null) findHead(d, cur) else null
         if (cur != null && h == null) cur = null
-        backBtn.visibility = if (h != null) View.VISIBLE else View.GONE
-        editBtn.visibility = if (h != null) View.VISIBLE else View.GONE
-        titleTv.text = h?.optString("t") ?: "🦚 Krishna"
+        if (!curCat.isNullOrEmpty() && findCat(d, curCat) == null) curCat = null
+        val cobj = if (!curCat.isNullOrEmpty()) findCat(d, curCat) else null
+        backBtn.visibility = if (h != null || curCat != null) View.VISIBLE else View.GONE
+        editBtn.visibility = if (h != null || cobj != null) View.VISIBLE else View.GONE
+        titleTv.text = when {
+            h != null -> h.optString("t")
+            cobj != null -> cobj.optString("t")
+            curCat != null -> "📂 Bina category"
+            else -> "🦚 Krishna"
+        }
         listBox.removeAllViews()
 
         if (h == null) {
-            val a = d.getJSONArray("h")
-            if (a.length() == 0) { listBox.addView(emptyView("+ dabao aur heading likho")); return }
-            for (i in 0 until a.length()) {
-                val x = a.getJSONObject(i)
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(14), dp(14), dp(14), dp(14))
-                    setOnClickListener { cur = x.optString("id"); render() }
+            if (curCat == null) {   // sabse upar: Categories
+                val ca = cats(d)
+                val loose = headsOf(d, "")
+                if (ca.length() == 0 && loose.isEmpty()) { listBox.addView(emptyView("+ dabao aur category likho")); return }
+                for (i in 0 until ca.length()) {
+                    val c = ca.getJSONObject(i); val cid = c.optString("id")
+                    addRow(c.optString("t"), headsOf(d, cid).size) { curCat = cid; render() }
                 }
-                row.addView(TextView(this).apply {
-                    text = x.optString("t"); setTextColor(Color.WHITE); textSize = 15f
-                }, LinearLayout.LayoutParams(0, -2, 1f))
-                row.addView(TextView(this).apply {
-                    text = x.optJSONArray("e")?.length()?.toString() ?: "0"
-                    setTextColor(MUT); textSize = 12f
-                })
-                listBox.addView(row)
-                listBox.addView(View(this).apply { setBackgroundColor(PANEL) }, LinearLayout.LayoutParams(-1, dp(1)))
+                if (loose.isNotEmpty()) addRow("📂 Bina category", loose.size) { curCat = ""; render() }
+                return
             }
+            // category ke andar: Headings
+            val hs = headsOf(d, curCat ?: "")
+            if (hs.isEmpty()) { listBox.addView(emptyView("+ dabao aur heading likho")); return }
+            for (x in hs) addRow(x.optString("t"), x.optJSONArray("e")?.length() ?: 0) { cur = x.optString("id"); render() }
             return
         }
+
+        // 📌 Rules (jaise: ye kaam subah 6 AM par hoga)
+        val rl = h.optJSONArray("r") ?: JSONArray()
+        val rbox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(PANEL); cornerRadius = dp(10).toFloat(); setStroke(dp(1), Color.parseColor("#FFD54F"))
+            }
+        }
+        rbox.addView(small("📌 Rules"))
+        for (k in 0 until rl.length()) {
+            val ro = rl.getJSONObject(k); val rid = ro.optString("id")
+            rbox.addView(TextView(this).apply {
+                text = "• " + ro.optString("x"); setTextColor(Color.parseColor("#FFD54F")); textSize = 14f
+                setPadding(0, dp(4), 0, dp(4))
+                setOnClickListener { editRule(rid) }
+            })
+        }
+        rbox.addView(TextView(this).apply {
+            text = "+ Rule"; setTextColor(Color.parseColor("#90CAF9")); textSize = 13f
+            setPadding(0, dp(8), 0, 0)
+            setOnClickListener { editRule(null) }
+        })
+        listBox.addView(rbox, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(10), dp(10), dp(10), 0) })
 
         val e = h.optJSONArray("e") ?: JSONArray().also { h.put("e", it) }
         if (e.length() == 0) { listBox.addView(emptyView("+ dabao aur Problem likho")); return }
@@ -337,25 +404,98 @@ class KrishnaActivity : AppCompatActivity() {
         val d = load()
         val x = if (id != null) findHead(d, id) else null
         val et = field("Heading", x?.optString("t") ?: "", 1)
-        val box = LinearLayout(this).apply { setPadding(dp(20), dp(10), dp(20), 0); addView(et, LinearLayout.LayoutParams(-1, -2)) }
+        val ca = cats(d)
+        val names = ArrayList<String>(); val ids = ArrayList<String>()
+        names.add("Bina category"); ids.add("")
+        for (i in 0 until ca.length()) { names.add(ca.getJSONObject(i).optString("t")); ids.add(ca.getJSONObject(i).optString("id")) }
+        val spin = android.widget.Spinner(this)
+        spin.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, names)
+        val startCid = if (x != null) x.optString("cid") else (curCat ?: "")
+        spin.setSelection(ids.indexOf(startCid).coerceAtLeast(0))
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(10), dp(20), 0)
+            addView(et, LinearLayout.LayoutParams(-1, -2))
+            addView(small("Category"), LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
+            addView(spin, LinearLayout.LayoutParams(-1, -2))
+        }
         val b = AlertDialog.Builder(this).setTitle("Heading").setView(box)
             .setPositiveButton("Save") { _, _ ->
                 val t = et.text.toString().trim()
                 if (t.isEmpty()) return@setPositiveButton
+                val cid = ids[spin.selectedItemPosition]
                 val dd = load()
                 val y = if (id != null) findHead(dd, id) else null
-                if (y != null) y.put("t", t)
-                else dd.getJSONArray("h").put(JSONObject().put("id", newId()).put("t", t).put("e", JSONArray()))
+                if (y != null) { y.put("t", t); y.put("cid", cid) }
+                else dd.getJSONArray("h").put(JSONObject().put("id", newId()).put("t", t).put("cid", cid).put("r", JSONArray()).put("e", JSONArray()))
+                curCat = cid          // back dabane par usi category me wapas
                 save(dd); render()
             }
             .setNegativeButton("Cancel", null)
         if (x != null) b.setNeutralButton("Delete") { _, _ ->
-            AlertDialog.Builder(this).setMessage("Ye heading aur uske saare Problem/Solution delete karu?")
+            AlertDialog.Builder(this).setMessage("Ye heading aur uske saare Rules/Problem/Solution delete karu?")
                 .setPositiveButton("Delete") { _, _ ->
                     val dd = load(); val a = dd.getJSONArray("h"); val n = JSONArray()
                     for (i in 0 until a.length()) if (a.getJSONObject(i).optString("id") != id) n.put(a.getJSONObject(i))
                     dd.put("h", n); save(dd); cur = null; render()
                 }.setNegativeButton("Cancel", null).show()
+        }
+        b.show()
+    }
+
+    private fun editCategory(id: String?) {
+        val d = load()
+        val x = if (id != null) findCat(d, id) else null
+        val et = field("Category (jaise Money, Practice)", x?.optString("t") ?: "", 1)
+        val box = LinearLayout(this).apply { setPadding(dp(20), dp(10), dp(20), 0); addView(et, LinearLayout.LayoutParams(-1, -2)) }
+        val b = AlertDialog.Builder(this).setTitle("Category").setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                val t = et.text.toString().trim()
+                if (t.isEmpty()) return@setPositiveButton
+                val dd = load()
+                val y = if (id != null) findCat(dd, id) else null
+                if (y != null) y.put("t", t)
+                else cats(dd).put(JSONObject().put("id", newId()).put("t", t))
+                save(dd); render()
+            }
+            .setNegativeButton("Cancel", null)
+        if (x != null) b.setNeutralButton("Delete") { _, _ ->
+            AlertDialog.Builder(this).setMessage("Ye category delete karu? Iske headings delete nahi honge, 'Bina category' me chale jaayenge.")
+                .setPositiveButton("Delete") { _, _ ->
+                    val dd = load()
+                    val hs = dd.getJSONArray("h")
+                    for (i in 0 until hs.length()) { val hh = hs.getJSONObject(i); if (hh.optString("cid") == id) hh.put("cid", "") }
+                    val ca = cats(dd); val n = JSONArray()
+                    for (i in 0 until ca.length()) if (ca.getJSONObject(i).optString("id") != id) n.put(ca.getJSONObject(i))
+                    dd.put("c", n); save(dd); curCat = null; render()
+                }.setNegativeButton("Cancel", null).show()
+        }
+        b.show()
+    }
+
+    /** 📌 Rule add / edit (rid == null => naya). Heading ke andar, jaise "ye kaam subah 6 AM par hoga". */
+    private fun editRule(rid: String?) {
+        val h0 = findHead(load(), cur) ?: return
+        var old: JSONObject? = null
+        val rl0 = h0.optJSONArray("r") ?: JSONArray()
+        if (rid != null) for (i in 0 until rl0.length()) if (rl0.getJSONObject(i).optString("id") == rid) old = rl0.getJSONObject(i)
+        val et = field("Rule (jaise: ye kaam subah 6 AM par hoga)", old?.optString("x") ?: "", 3)
+        val b = AlertDialog.Builder(this).setTitle("Rule").setView(boxOf(et))
+            .setPositiveButton("Save") { _, _ ->
+                val t = et.text.toString().trim()
+                if (t.isEmpty()) return@setPositiveButton
+                val dd = load(); val hh = findHead(dd, cur) ?: return@setPositiveButton
+                val rl = hh.optJSONArray("r") ?: JSONArray().also { hh.put("r", it) }
+                var y: JSONObject? = null
+                if (rid != null) for (i in 0 until rl.length()) if (rl.getJSONObject(i).optString("id") == rid) y = rl.getJSONObject(i)
+                if (y != null) y.put("x", t) else rl.put(JSONObject().put("id", newId()).put("x", t))
+                save(dd); render()
+            }
+            .setNegativeButton("Cancel", null)
+        if (old != null) b.setNeutralButton("Delete") { _, _ ->
+            val dd = load(); val hh = findHead(dd, cur) ?: return@setNeutralButton
+            val rl = hh.optJSONArray("r") ?: JSONArray(); val n = JSONArray()
+            for (i in 0 until rl.length()) if (rl.getJSONObject(i).optString("id") != rid) n.put(rl.getJSONObject(i))
+            hh.put("r", n); save(dd); render()
         }
         b.show()
     }
